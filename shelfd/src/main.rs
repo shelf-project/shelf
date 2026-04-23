@@ -1,23 +1,32 @@
 //! `shelfd` binary entry point.
 //!
 //! Ticket ownership:
-//! - SHELF-02 — Axum HTTP server skeleton, `/healthz`, `/readyz`,
-//!   `/metrics`, graceful shutdown, structured logging.
-//! - SHELF-08 — Prometheus registry + OTel traces are wired in here
-//!   so that every subsystem emits through the same pipeline.
+//! - SHELF-02 — Axum HTTP server, `/healthz`, `/readyz`, `/metrics`,
+//!   graceful shutdown, structured logging.
+//! - SHELF-06 — full read-through path (see `http::handlers::get_cache`).
 //!
-//! The real `main` will compose `config::Config`, `metrics::Registry`,
-//! `origin::Origin`, `store::Store`, `router::Router`,
-//! `admission::AdmissionPolicy`, `membership::Resolver`, and
-//! `http::serve` into a graceful-shutdown loop. This scaffold only
-//! parses args + wires tracing so that `cargo run --bin shelfd
-//! --help` prints something sensible.
+//! `main` composes `Config`, `metrics::Registry`, `origin::S3Origin`,
+//! `store::FoyerStore`, `router::Router`, `admission::SizeThresholdPolicy`
+//! into an `http::ServerState`, then drives `http::serve` under a
+//! SIGTERM/SIGINT-triggered `CancellationToken`.
+
+use std::sync::Arc;
 
 use clap::Parser;
+use shelfd::{
+    admission::SizeThresholdPolicy,
+    config::Config,
+    http::{self, ServerState},
+    metrics,
+    origin::S3Origin,
+    router::Router,
+    store::FoyerStore,
+};
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 /// Command-line arguments for `shelfd`. Kept intentionally small; all
-/// tunables live in `Config` (see `config::Config` and
+/// tunables live in `Config` (see `shelfd::config::Config` +
 /// `contracts/config-keys.md`).
 #[derive(Debug, Parser)]
 #[command(
@@ -41,30 +50,45 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     init_tracing(&args.log)?;
 
-    tracing::info!(
-        config_path = %args.config.display(),
-        "shelfd startup (scaffold — SHELF-02 not yet implemented)"
-    );
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async { run(args).await })
+}
 
-    // SHELF-02 / SHELF-06 / SHELF-17 / SHELF-18 / SHELF-20:
-    // The real entry point will:
-    //   1. load config (config::Config::from_path)
-    //   2. init metrics registry (metrics::init)
-    //   3. build origin client (origin::Origin::new)
-    //   4. build store (store::Store::open)
-    //   5. build router + membership
-    //   6. spawn http::serve + control::serve on a tokio runtime
-    //   7. wait on a SIGTERM-driven CancellationToken
-    //
-    // Until those tickets land, `shelfd` exits cleanly so that
-    // `docker run shelfd:0.1 --help` and CI smoke tests are green.
+async fn run(args: Args) -> anyhow::Result<()> {
+    let config =
+        Config::from_path(&args.config).map_err(|e| anyhow::anyhow!("config load failed: {e}"))?;
+    tracing::info!(node = %config.node.id, "shelfd starting");
+
+    let metrics = Arc::new(metrics::Registry::init()?);
+    let origin = Arc::new(S3Origin::new(&config.origin).await?);
+    let store = Arc::new(FoyerStore::open(&config.pools).await?);
+    let router = Arc::new(Router::new());
+    let admission = Arc::new(SizeThresholdPolicy::from_config(&config.admission));
+
+    let state = Arc::new(ServerState::new(
+        store.clone(),
+        origin.clone(),
+        router,
+        admission,
+        metrics,
+    ));
+    // Phase-0: mark ready as soon as Foyer + S3 client built. The
+    // origin head-bucket probe would go here once SHELF-07 lands.
+    state.mark_ready();
+
+    let shutdown = CancellationToken::new();
+    spawn_signal_handler(shutdown.clone());
+
+    let listen = config.http.listen;
+    let request_timeout = config.http.request_timeout;
+    tracing::info!(%listen, ?request_timeout, "binding data plane");
+    http::serve(listen, state, request_timeout, shutdown).await?;
+    tracing::info!("shelfd shutdown complete");
     Ok(())
 }
 
-/// Initialise `tracing` with an `EnvFilter` + JSON formatter.
-///
-/// The JSON layer is structured so that rep-2's Loki / OTel collectors
-/// can scrape without custom parsers (SHELF-08).
 fn init_tracing(filter: &str) -> anyhow::Result<()> {
     let env_filter =
         EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info,shelfd=debug"));
@@ -76,4 +100,43 @@ fn init_tracing(filter: &str) -> anyhow::Result<()> {
         .try_init()
         .map_err(|e| anyhow::anyhow!("tracing init failed: {e}"))?;
     Ok(())
+}
+
+/// Cancel `token` on SIGTERM or SIGINT. On non-unix we only listen for
+/// Ctrl-C; shelfd is a linux-only binary in production but this keeps
+/// `cargo run` on macOS dev-machines sane.
+fn spawn_signal_handler(token: CancellationToken) {
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut term = match signal(SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "SIGTERM handler setup failed");
+                    return;
+                }
+            };
+            let mut int = match signal(SignalKind::interrupt()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "SIGINT handler setup failed");
+                    return;
+                }
+            };
+            tokio::select! {
+                _ = term.recv() => tracing::info!("SIGTERM received"),
+                _ = int.recv()  => tracing::info!("SIGINT received"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                tracing::error!(error = %e, "ctrl_c handler failed");
+                return;
+            }
+            tracing::info!("Ctrl-C received");
+        }
+        token.cancel();
+    });
 }

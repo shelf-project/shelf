@@ -5,18 +5,26 @@
 //! - SHELF-17 — separate DRAM pool for Iceberg manifests / Parquet
 //!   footers / page indexes. ADR-0008 mandates exactly two pools in v1.
 //! - SHELF-18 — hybrid DRAM + NVMe `pool.rowgroup` with S3-FIFO
-//!   eviction per ADR-0009.
+//!   eviction per ADR-0009. **Deferred in phase-0 — rowgroup is DRAM
+//!   only; NVMe tier lands once we have a PVC-backed test loop.**
 //! - SHELF-04 — content-addressed keys:
 //!   `sha256(etag_bytes || le_u64(offset) || le_u64(length) || le_u32(rg_ordinal))`.
+//! - SHELF-06 — [`FoyerStore::get_or_fetch`] is the single-flight
+//!   miss path wired into the HTTP handler.
 //!
 //! The trait-first layout is deliberate so we can unit-test consumers
 //! (the HTTP handler, the admission policy) against an in-memory
 //! implementation without linking Foyer.
 
+use std::collections::HashMap;
 use std::fmt::Debug;
+use std::future::Future;
+use std::sync::{Arc, Weak};
 
 use bytes::Bytes;
+use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
+use tokio::sync::OnceCell;
 
 // NOTE: The trait below uses `impl Future` (RPITIT) instead of the
 // `async_trait` crate. If we later need `dyn Store`, SHELF-NN will add
@@ -110,55 +118,183 @@ pub trait Store: Send + Sync + Debug + 'static {
     fn capacity_bytes(&self, pool: Pool) -> u64;
 }
 
-/// Foyer-backed `Store` implementation. The type is public but
-/// intentionally opaque; all construction goes through `open()`.
+/// Shared slot for a single in-flight miss fetch.
+///
+/// Concurrent callers hitting the same `(Pool, Key)` race for the
+/// `Mutex<HashMap>` slot exactly once; whichever arrives first creates
+/// the `OnceCell` and drives `fetch`, everyone else awaits the same
+/// cell. Map entries hold only a `Weak`, so the last `Arc` drop cleans
+/// up without a separate reaper task.
+type InflightMap = Mutex<HashMap<(Pool, Key), Weak<OnceCell<Result<Bytes, String>>>>>;
+
+/// Pool-segmented Foyer cache. Phase-0 holds both pools as DRAM-only
+/// `foyer::Cache<Key, Bytes>`; SHELF-18 will swap `rowgroup` for
+/// `HybridCache` once the PVC-backed test loop exists.
 #[derive(Debug)]
 pub struct FoyerStore {
-    // Fields elided until SHELF-03/17/18 land. The final shape will be
-    // roughly:
-    //   metadata: foyer::Cache<Key, Bytes>,
-    //   rowgroup: foyer::HybridCache<Key, Bytes>,
-    //   metrics:  Arc<crate::metrics::StoreMetrics>,
-    _private: (),
+    metadata: foyer::Cache<Key, Bytes>,
+    rowgroup: foyer::Cache<Key, Bytes>,
+    metadata_capacity: u64,
+    rowgroup_capacity: u64,
+    inflight: InflightMap,
 }
 
 impl FoyerStore {
     /// Open the Foyer pools from the daemon config.
-    pub async fn open(_config: &crate::config::PoolsConfig) -> crate::Result<Self> {
-        todo!(
-            "SHELF-03 + SHELF-17 + SHELF-18: store: wire two Foyer pools \
-             (metadata: DRAM+SIEVE; rowgroup: DRAM+NVMe+S3-FIFO); see \
-             03-plan.md §4 SHELF-03/17/18 and \
-             agents/out/adr/0008-two-pools-in-v1.md + 0009-foyer-s3-fifo-over-gl-cache-custom.md"
-        )
+    ///
+    /// Phase-0: both pools are DRAM-only `foyer::Cache`. The weighter
+    /// charges each entry its byte length so eviction honours the
+    /// byte budget rather than entry count. NVMe hybrid-tier wiring
+    /// for `rowgroup` lands with SHELF-18.
+    pub async fn open(config: &crate::config::PoolsConfig) -> crate::Result<Self> {
+        let metadata_capacity = config.metadata.dram_bytes;
+        let rowgroup_capacity = config.rowgroup.dram_bytes;
+        if metadata_capacity == 0 {
+            return Err(crate::Error::Store(
+                "pools.metadata.dram_bytes must be > 0".into(),
+            ));
+        }
+        if rowgroup_capacity == 0 {
+            return Err(crate::Error::Store(
+                "pools.rowgroup.dram_bytes must be > 0".into(),
+            ));
+        }
+
+        let metadata = foyer::CacheBuilder::new(metadata_capacity as usize)
+            .with_weighter(|_k: &Key, v: &Bytes| v.len())
+            .build();
+        let rowgroup = foyer::CacheBuilder::new(rowgroup_capacity as usize)
+            .with_weighter(|_k: &Key, v: &Bytes| v.len())
+            .build();
+
+        Ok(Self {
+            metadata,
+            rowgroup,
+            metadata_capacity,
+            rowgroup_capacity,
+            inflight: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn cache_for(&self, pool: Pool) -> &foyer::Cache<Key, Bytes> {
+        match pool {
+            Pool::Metadata => &self.metadata,
+            Pool::RowGroup => &self.rowgroup,
+        }
+    }
+
+    /// Read-through miss path with single-flight deduplication.
+    ///
+    /// Contract:
+    /// 1. If `(pool, key)` is cached, return those bytes. No admission
+    ///    check, no `fetch` call.
+    /// 2. Otherwise, dedupe concurrent callers so `fetch` runs exactly
+    ///    once; all callers receive a clone of the same `Bytes`.
+    /// 3. After fetch, consult `admission`. On `Admit` the bytes are
+    ///    inserted into the pool before being returned; on `Reject`
+    ///    the bytes are returned but not cached.
+    ///
+    /// Errors from `fetch` propagate to every concurrent caller.
+    pub async fn get_or_fetch<A, F>(
+        &self,
+        pool: Pool,
+        key: Key,
+        admission: &A,
+        fetch: F,
+    ) -> crate::Result<ReadOutcome>
+    where
+        A: crate::admission::AdmissionPolicy + ?Sized,
+        F: Future<Output = crate::Result<Bytes>> + Send,
+    {
+        if let Some(bytes) = self.get(pool, &key).await? {
+            return Ok(ReadOutcome::Hit(bytes));
+        }
+
+        let cell = self.acquire_inflight_cell(pool, &key);
+
+        // `get_or_init` takes an FnOnce returning a future. Only the
+        // first concurrent caller's closure ever runs.
+        let slot = cell
+            .get_or_init(|| async move { fetch.await.map_err(|e| e.to_string()) })
+            .await;
+
+        let bytes = match slot.clone() {
+            Ok(b) => b,
+            Err(e) => return Err(crate::Error::Origin(e)),
+        };
+
+        let ctx = crate::admission::AdmissionContext {
+            pool,
+            key: &key,
+            size_bytes: bytes.len() as u64,
+            pinned: false,
+        };
+        if admission.decide(&ctx) == crate::admission::AdmissionDecision::Admit {
+            self.insert(pool, key, bytes.clone()).await?;
+        }
+        Ok(ReadOutcome::Miss(bytes))
+    }
+
+    fn acquire_inflight_cell(&self, pool: Pool, key: &Key) -> Arc<OnceCell<Result<Bytes, String>>> {
+        let mut guard = self.inflight.lock();
+        if let Some(weak) = guard.get(&(pool, key.clone())) {
+            if let Some(a) = weak.upgrade() {
+                return a;
+            }
+        }
+        let a: Arc<OnceCell<Result<Bytes, String>>> = Arc::new(OnceCell::new());
+        guard.insert((pool, key.clone()), Arc::downgrade(&a));
+        a
+    }
+}
+
+/// Whether a [`FoyerStore::get_or_fetch`] returned the bytes straight
+/// from a warm pool or after an origin fetch.
+#[derive(Debug)]
+pub enum ReadOutcome {
+    Hit(Bytes),
+    Miss(Bytes),
+}
+
+impl ReadOutcome {
+    pub fn into_bytes(self) -> Bytes {
+        match self {
+            ReadOutcome::Hit(b) | ReadOutcome::Miss(b) => b,
+        }
+    }
+
+    pub fn is_hit(&self) -> bool {
+        matches!(self, ReadOutcome::Hit(_))
     }
 }
 
 impl Store for FoyerStore {
-    async fn get(&self, _pool: Pool, _key: &Key) -> crate::Result<Option<Bytes>> {
-        todo!(
-            "SHELF-06: store: Foyer get; see 03-plan.md §4 SHELF-06 \
-             and adr/0009"
-        )
+    async fn get(&self, pool: Pool, key: &Key) -> crate::Result<Option<Bytes>> {
+        let cache = self.cache_for(pool);
+        Ok(cache.get(key).map(|entry| entry.value().clone()))
     }
 
-    async fn insert(&self, _pool: Pool, _key: Key, _bytes: Bytes) -> crate::Result<()> {
-        todo!(
-            "SHELF-06: store: Foyer insert with admission check; see \
-             03-plan.md §4 SHELF-06 + SHELF-25"
-        )
+    async fn insert(&self, pool: Pool, key: Key, bytes: Bytes) -> crate::Result<()> {
+        let cache = self.cache_for(pool);
+        cache.insert(key, bytes);
+        Ok(())
     }
 
-    async fn evict(&self, _pool: Pool, _key: &Key) -> crate::Result<()> {
-        todo!("SHELF-23: store: explicit eviction path for shelfctl evict; see 03-plan.md §4 SHELF-23")
+    async fn evict(&self, pool: Pool, key: &Key) -> crate::Result<()> {
+        let cache = self.cache_for(pool);
+        cache.remove(key);
+        Ok(())
     }
 
-    fn used_bytes(&self, _pool: Pool) -> u64 {
-        todo!("SHELF-08: store: expose used_bytes for Prometheus + /stats; see 03-plan.md §4 SHELF-08/SHELF-20")
+    fn used_bytes(&self, pool: Pool) -> u64 {
+        self.cache_for(pool).usage() as u64
     }
 
-    fn capacity_bytes(&self, _pool: Pool) -> u64 {
-        todo!("SHELF-08: store: expose capacity_bytes for Prometheus + /stats; see 03-plan.md §4 SHELF-08/SHELF-20")
+    fn capacity_bytes(&self, pool: Pool) -> u64 {
+        match pool {
+            Pool::Metadata => self.metadata_capacity,
+            Pool::RowGroup => self.rowgroup_capacity,
+        }
     }
 }
 
@@ -240,8 +376,7 @@ mod key_tests {
 
     #[test]
     fn golden_vectors_match_fixture() {
-        let fixture =
-            include_str!("../tests/fixtures/shelf04_golden_vectors.txt");
+        let fixture = include_str!("../tests/fixtures/shelf04_golden_vectors.txt");
         let expected: Vec<&str> = fixture
             .lines()
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
@@ -251,8 +386,7 @@ mod key_tests {
             GOLDEN_INPUTS.len(),
             "fixture must have one line per golden input"
         );
-        for ((etag, off, len, ord), want) in GOLDEN_INPUTS.iter().zip(expected)
-        {
+        for ((etag, off, len, ord), want) in GOLDEN_INPUTS.iter().zip(expected) {
             let got = key_from_tuple(etag.as_bytes(), *off, *len, *ord)
                 .expect("valid golden vector must hash")
                 .to_hex();
@@ -327,5 +461,173 @@ mod key_tests {
             let b = key_from_tuple(etag.as_bytes(), *off, *len, *ord).unwrap();
             assert_eq!(a, b);
         }
+    }
+}
+
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+    use crate::admission::{AdmissionContext, AdmissionDecision, AdmissionPolicy};
+    use crate::config::{MetadataPoolConfig, PoolsConfig, RowGroupPoolConfig};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn test_pools() -> PoolsConfig {
+        PoolsConfig {
+            metadata: MetadataPoolConfig {
+                dram_bytes: 1 << 20,
+            },
+            rowgroup: RowGroupPoolConfig {
+                dram_bytes: 1 << 20,
+                nvme_dir: std::path::PathBuf::from("/tmp/unused"),
+                nvme_bytes: 0,
+            },
+        }
+    }
+
+    async fn new_store() -> FoyerStore {
+        FoyerStore::open(&test_pools()).await.expect("open")
+    }
+
+    fn k(seed: u8) -> Key {
+        key_from_tuple(&[seed; 4], 0, 1, 0).unwrap()
+    }
+
+    /// Admit-everything policy for happy-path store tests; the
+    /// SHELF-25 logic is covered separately in `admission::tests`.
+    #[derive(Debug)]
+    struct AlwaysAdmit;
+    impl AdmissionPolicy for AlwaysAdmit {
+        fn decide(&self, _ctx: &AdmissionContext<'_>) -> AdmissionDecision {
+            AdmissionDecision::Admit
+        }
+    }
+
+    #[derive(Debug)]
+    struct NeverAdmit;
+    impl AdmissionPolicy for NeverAdmit {
+        fn decide(&self, _ctx: &AdmissionContext<'_>) -> AdmissionDecision {
+            AdmissionDecision::Reject
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_then_get_is_hit() {
+        let store = new_store().await;
+        let key = k(1);
+        store
+            .insert(Pool::RowGroup, key.clone(), Bytes::from_static(b"hello"))
+            .await
+            .unwrap();
+        let got = store.get(Pool::RowGroup, &key).await.unwrap();
+        assert_eq!(got.as_deref(), Some(&b"hello"[..]));
+    }
+
+    #[tokio::test]
+    async fn evict_removes_entry() {
+        let store = new_store().await;
+        let key = k(2);
+        store
+            .insert(Pool::Metadata, key.clone(), Bytes::from_static(b"x"))
+            .await
+            .unwrap();
+        store.evict(Pool::Metadata, &key).await.unwrap();
+        assert!(store.get(Pool::Metadata, &key).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn pools_are_isolated() {
+        let store = new_store().await;
+        let key = k(3);
+        store
+            .insert(Pool::Metadata, key.clone(), Bytes::from_static(b"m"))
+            .await
+            .unwrap();
+        assert!(store.get(Pool::RowGroup, &key).await.unwrap().is_none());
+        assert_eq!(
+            store.get(Pool::Metadata, &key).await.unwrap().as_deref(),
+            Some(&b"m"[..]),
+        );
+    }
+
+    #[tokio::test]
+    async fn get_or_fetch_miss_admits_and_caches() {
+        let store = new_store().await;
+        let key = k(4);
+        let outcome = store
+            .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
+                Ok(Bytes::from_static(b"abc"))
+            })
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ReadOutcome::Miss(_)));
+        // Second get is a straight hit.
+        let hit = store.get(Pool::RowGroup, &key).await.unwrap();
+        assert_eq!(hit.as_deref(), Some(&b"abc"[..]));
+    }
+
+    #[tokio::test]
+    async fn get_or_fetch_reject_does_not_cache() {
+        let store = new_store().await;
+        let key = k(5);
+        let outcome = store
+            .get_or_fetch(Pool::RowGroup, key.clone(), &NeverAdmit, async {
+                Ok(Bytes::from_static(b"xyz"))
+            })
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ReadOutcome::Miss(_)));
+        assert!(
+            store.get(Pool::RowGroup, &key).await.unwrap().is_none(),
+            "reject must not insert into the pool"
+        );
+    }
+
+    /// SHELF-06 acceptance: 100 concurrent miss requests for the same
+    /// cold key fan in to exactly ONE fetch invocation.
+    #[tokio::test]
+    async fn single_flight_coalesces_concurrent_misses() {
+        let store = Arc::new(new_store().await);
+        let key = k(6);
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+
+        let mut joins = Vec::with_capacity(100);
+        for _ in 0..100 {
+            let store = store.clone();
+            let key = key.clone();
+            let fetch_count = fetch_count.clone();
+            joins.push(tokio::spawn(async move {
+                store
+                    .get_or_fetch(Pool::RowGroup, key, &AlwaysAdmit, async move {
+                        fetch_count.fetch_add(1, Ordering::SeqCst);
+                        // Give siblings time to queue on the OnceCell.
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        Ok(Bytes::from_static(b"coalesced"))
+                    })
+                    .await
+            }));
+        }
+
+        for j in joins {
+            let outcome = j.await.unwrap().unwrap();
+            assert_eq!(outcome.into_bytes(), Bytes::from_static(b"coalesced"));
+        }
+        assert_eq!(
+            fetch_count.load(Ordering::SeqCst),
+            1,
+            "single-flight must collapse 100 concurrent misses into 1 fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn used_bytes_reflects_insertions() {
+        let store = new_store().await;
+        assert_eq!(store.used_bytes(Pool::RowGroup), 0);
+        store
+            .insert(Pool::RowGroup, k(7), Bytes::from_static(&[0u8; 1024]))
+            .await
+            .unwrap();
+        assert!(store.used_bytes(Pool::RowGroup) >= 1024);
+        assert_eq!(store.capacity_bytes(Pool::RowGroup), 1 << 20);
     }
 }

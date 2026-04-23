@@ -22,8 +22,7 @@ use prometheus::{
 /// `Lazy` is the single allowed use of global state in `shelfd` per
 /// agents/4-shelfd-builder.md Pass 2 ("No global mutable state.
 /// `once_cell::sync::Lazy` is allowed for metric registries only.").
-pub static REGISTRY: Lazy<prometheus::Registry> =
-    Lazy::new(prometheus::Registry::new);
+pub static REGISTRY: Lazy<prometheus::Registry> = Lazy::new(prometheus::Registry::new);
 
 /// Handle to the set of Shelf metrics. Held inside `ServerState`.
 #[derive(Debug)]

@@ -61,17 +61,22 @@ impl SizeThresholdPolicy {
 }
 
 impl AdmissionPolicy for SizeThresholdPolicy {
-    fn decide(&self, _ctx: &AdmissionContext<'_>) -> AdmissionDecision {
-        todo!(
-            "SHELF-25: admission: if ctx.size_bytes > size_threshold_bytes \
-             and !(pinned_bypass && ctx.pinned) return Reject, else Admit; \
-             see 03-plan.md §4 SHELF-25 and adr/0003"
-        )
+    fn decide(&self, ctx: &AdmissionContext<'_>) -> AdmissionDecision {
+        if ctx.size_bytes > self.size_threshold_bytes {
+            if self.pinned_bypass && ctx.pinned {
+                AdmissionDecision::Admit
+            } else {
+                AdmissionDecision::Reject
+            }
+        } else {
+            AdmissionDecision::Admit
+        }
     }
 }
 
-/// Pin list — reloaded from S3 (SHELF-24). The scaffold exposes only
-/// the lookup surface; the loader lives in SHELF-24.
+/// Pin list — reloaded from S3 (SHELF-24). Phase-0 exposes only the
+/// lookup surface with an empty set; the S3-backed loader lands with
+/// SHELF-24.
 #[derive(Debug, Default)]
 pub struct PinList {
     _private: (),
@@ -79,11 +84,66 @@ pub struct PinList {
 
 impl PinList {
     /// Whether `key` belongs to a pinned table + partition combination.
+    /// Phase-0 always returns `false` (SHELF-24 will swap the body for
+    /// a real lookup).
     pub fn contains(&self, _key: &crate::store::Key) -> bool {
-        todo!(
-            "SHELF-24: admission: implement PinList::contains; load from \
-             S3 ConfigMap on SIGHUP + every 15 min; see 03-plan.md §4 \
-             SHELF-24"
-        )
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{key_from_tuple, Pool};
+
+    fn ctx(size: u64, pinned: bool) -> AdmissionContext<'static> {
+        static KEY: once_cell::sync::Lazy<crate::store::Key> =
+            once_cell::sync::Lazy::new(|| key_from_tuple(b"etag", 0, 1, 0).unwrap());
+        AdmissionContext {
+            pool: Pool::RowGroup,
+            key: &KEY,
+            size_bytes: size,
+            pinned,
+        }
+    }
+
+    #[test]
+    fn admits_below_threshold() {
+        let policy = SizeThresholdPolicy {
+            size_threshold_bytes: 1024,
+            pinned_bypass: true,
+        };
+        assert_eq!(policy.decide(&ctx(512, false)), AdmissionDecision::Admit);
+        assert_eq!(policy.decide(&ctx(1024, false)), AdmissionDecision::Admit);
+    }
+
+    #[test]
+    fn rejects_above_threshold() {
+        let policy = SizeThresholdPolicy {
+            size_threshold_bytes: 1024,
+            pinned_bypass: true,
+        };
+        assert_eq!(policy.decide(&ctx(1025, false)), AdmissionDecision::Reject);
+    }
+
+    #[test]
+    fn pinned_bypasses_threshold_when_enabled() {
+        let policy = SizeThresholdPolicy {
+            size_threshold_bytes: 1024,
+            pinned_bypass: true,
+        };
+        assert_eq!(policy.decide(&ctx(1 << 30, true)), AdmissionDecision::Admit);
+    }
+
+    #[test]
+    fn pinned_does_not_bypass_when_disabled() {
+        let policy = SizeThresholdPolicy {
+            size_threshold_bytes: 1024,
+            pinned_bypass: false,
+        };
+        assert_eq!(
+            policy.decide(&ctx(1 << 30, true)),
+            AdmissionDecision::Reject
+        );
     }
 }

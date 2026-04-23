@@ -172,13 +172,162 @@ fn default_pin_reload() -> Duration {
 impl Config {
     /// Load and validate a config from disk.
     ///
-    /// SHELF-02 wires this up; until then the body panics with a
-    /// descriptive ticket message so an accidental runtime invocation
-    /// fails loud.
-    pub fn from_path(_path: &Path) -> crate::Result<Self> {
-        todo!(
-            "SHELF-02: config: implement YAML loader + env overrides + validation; \
-             see 03-plan.md §4 SHELF-02 and contracts/config-keys.md"
-        )
+    /// Order: read YAML → parse with `deny_unknown_fields` → apply
+    /// `SHELFD_*` env overrides → validate. Any failure returns
+    /// [`crate::Error::Config`] with the path and cause in the message.
+    pub fn from_path(path: &Path) -> crate::Result<Self> {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| crate::Error::Config(format!("read {}: {e}", path.display())))?;
+        Self::from_yaml_str(&contents, Some(path))
+    }
+
+    /// Parse from an in-memory YAML string (unit-test entry point).
+    ///
+    /// The `origin_path` parameter is only used to produce clearer
+    /// error messages; it is optional for tests.
+    pub fn from_yaml_str(s: &str, origin_path: Option<&Path>) -> crate::Result<Self> {
+        let path_label = origin_path
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<inline>".to_owned());
+        let mut cfg: Config = serde_yaml::from_str(s)
+            .map_err(|e| crate::Error::Config(format!("parse {path_label}: {e}")))?;
+        cfg.apply_env_overrides();
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Apply `SHELFD_*` env overrides. Kept narrow on purpose: only the
+    /// knobs an operator needs to flip without editing the mounted
+    /// YAML (MinIO endpoint for dev, node id from the K8s downward
+    /// API, bucket for cross-env reuse). Everything else stays in YAML
+    /// so misconfigurations are reviewable.
+    fn apply_env_overrides(&mut self) {
+        if let Ok(v) = std::env::var("SHELFD_NODE_ID") {
+            self.node.id = v;
+        }
+        if let Ok(v) = std::env::var("SHELFD_ORIGIN_ENDPOINT") {
+            self.origin.endpoint_url = Some(v);
+        }
+        if let Ok(v) = std::env::var("SHELFD_ORIGIN_BUCKET") {
+            self.origin.bucket = v;
+        }
+        if let Ok(v) = std::env::var("SHELFD_ORIGIN_REGION") {
+            self.origin.region = Some(v);
+        }
+    }
+
+    /// Enforce the invariants the type system cannot. Add checks here
+    /// rather than sprinkling `assert!`s through the codebase.
+    fn validate(&self) -> crate::Result<()> {
+        if self.node.id.is_empty() {
+            return Err(crate::Error::Config("node.id must be non-empty".into()));
+        }
+        if self.origin.bucket.is_empty() {
+            return Err(crate::Error::Config(
+                "origin.bucket must be non-empty".into(),
+            ));
+        }
+        if self.pools.metadata.dram_bytes == 0 {
+            return Err(crate::Error::Config(
+                "pools.metadata.dram_bytes must be > 0".into(),
+            ));
+        }
+        if self.pools.rowgroup.dram_bytes == 0 {
+            return Err(crate::Error::Config(
+                "pools.rowgroup.dram_bytes must be > 0".into(),
+            ));
+        }
+        if self.admission.size_threshold_bytes == 0 {
+            return Err(crate::Error::Config(
+                "admission.size_threshold_bytes must be > 0".into(),
+            ));
+        }
+        if self.membership.headless_service.is_empty() {
+            return Err(crate::Error::Config(
+                "membership.headless_service must be non-empty".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Kept as a string constant rather than a fixture file so the test
+    // stays self-contained. The canonical shape is mirrored in
+    // `charts/shelf/values.yaml` (cache.*, origin.*).
+    const MINIMAL: &str = r#"
+node:
+  id: shelf-0
+http:
+  listen: "0.0.0.0:9090"
+control:
+  listen: "0.0.0.0:9093"
+origin:
+  bucket: test-bucket
+pools:
+  metadata:
+    dram_bytes: 1048576
+  rowgroup:
+    dram_bytes: 4194304
+    nvme_dir: /var/lib/shelf/rg
+    nvme_bytes: 0
+admission:
+  size_threshold_bytes: 1073741824
+membership:
+  headless_service: shelf.shelf.svc.cluster.local
+pin_list:
+  source: "s3://cfg/pin_list.json"
+"#;
+
+    #[test]
+    fn parses_minimal_config() {
+        let cfg = Config::from_yaml_str(MINIMAL, None).expect("minimal config must parse");
+        assert_eq!(cfg.node.id, "shelf-0");
+        assert_eq!(cfg.origin.bucket, "test-bucket");
+        assert_eq!(cfg.pools.metadata.dram_bytes, 1_048_576);
+        assert_eq!(cfg.admission.size_threshold_bytes, 1_073_741_824);
+        // Defaults applied.
+        assert_eq!(cfg.origin.max_inflight, 256);
+        assert!(cfg.admission.pinned_bypass);
+    }
+
+    #[test]
+    fn env_override_replaces_endpoint() {
+        // Tests set env vars on the process — keep them scoped to
+        // names we own so concurrent tests don't collide.
+        // SAFETY: env var writes are unsafe in 2024 edition; single-
+        // threaded test mutex is the project norm elsewhere. Here we
+        // use a unique var name and unset after.
+        unsafe {
+            std::env::set_var("SHELFD_ORIGIN_ENDPOINT", "http://127.0.0.1:9000");
+        }
+        let cfg = Config::from_yaml_str(MINIMAL, None).expect("parse");
+        assert_eq!(
+            cfg.origin.endpoint_url.as_deref(),
+            Some("http://127.0.0.1:9000")
+        );
+        unsafe {
+            std::env::remove_var("SHELFD_ORIGIN_ENDPOINT");
+        }
+    }
+
+    #[test]
+    fn rejects_zero_metadata_dram() {
+        let bad = MINIMAL.replace("dram_bytes: 1048576", "dram_bytes: 0");
+        let err = Config::from_yaml_str(&bad, None).unwrap_err();
+        assert!(
+            matches!(&err, crate::Error::Config(m) if m.contains("metadata.dram_bytes")),
+            "expected metadata.dram_bytes error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_field() {
+        let bad = MINIMAL.to_owned() + "\ngrafana: true\n";
+        let err = Config::from_yaml_str(&bad, None).unwrap_err();
+        assert!(matches!(err, crate::Error::Config(_)));
     }
 }

@@ -20,7 +20,11 @@ use tracing_subscriber::EnvFilter;
 struct Cli {
     /// Base URL of the shelfd control endpoint, e.g.
     /// `http://shelf-0.shelf.shelf.svc.cluster.local:9091`.
-    #[arg(long, env = "SHELFCTL_ENDPOINT", default_value = "http://127.0.0.1:9091")]
+    #[arg(
+        long,
+        env = "SHELFCTL_ENDPOINT",
+        default_value = "http://127.0.0.1:9091"
+    )]
     endpoint: String,
 
     /// Log level override (`RUST_LOG`-compatible filter).
@@ -48,9 +52,7 @@ enum Command {
         partition: Vec<String>,
     },
     /// Remove a table from the pin list.
-    Unpin {
-        table: String,
-    },
+    Unpin { table: String },
     /// Forcibly evict a single key from the cache.
     Evict {
         /// Hex-encoded content-addressed key.
