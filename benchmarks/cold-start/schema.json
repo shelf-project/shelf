@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shelf.io/schemas/benchmarks/cold-start/v0.json",
+  "title": "Shelf cold-start benchmark result",
+  "description": "One record per (backend, run). Inner `queries` array holds per-(query, cycle) TTFQ measurements. See SPEC.md.",
+  "type": "object",
+  "required": [
+    "run_id",
+    "timestamp",
+    "commit_sha",
+    "release_tag",
+    "benchmark",
+    "backend",
+    "config",
+    "cluster_shape",
+    "queries",
+    "summary"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "run_id": { "type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "commit_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "release_tag": { "type": "string" },
+    "benchmark": { "type": "string", "const": "cold-start" },
+    "backend": {
+      "type": "string",
+      "enum": ["raw-s3", "fs-cache", "alluxio-2-9", "alluxio-3-dora", "shelf"]
+    },
+    "config": {
+      "type": "object",
+      "required": ["config_hash", "trino_image", "backend_image"],
+      "properties": {
+        "config_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "trino_image": { "type": "string" },
+        "backend_image": { "type": "string" },
+        "plugin_jar_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "cluster_shape": {
+      "type": "object",
+      "required": [
+        "region",
+        "k8s_version",
+        "trino_instance_type",
+        "trino_worker_count_initial",
+        "trino_worker_count_scaled",
+        "shelf_instance_type",
+        "shelf_node_count"
+      ],
+      "properties": {
+        "region": { "type": "string" },
+        "k8s_version": { "type": "string" },
+        "trino_instance_type": { "type": "string" },
+        "trino_worker_count_initial": { "type": "integer", "minimum": 1 },
+        "trino_worker_count_scaled":  { "type": "integer", "minimum": 2 },
+        "shelf_instance_type": { "type": "string" },
+        "shelf_node_count": { "type": "integer", "minimum": 0 },
+        "driver_instance_type": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "queries": {
+      "type": "array",
+      "description": "One record per (query_id, cycle). Cycle = 1..3.",
+      "items": { "$ref": "#/$defs/queryRecord" }
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "latency_ns_p50",
+        "latency_ns_p95",
+        "latency_ns_p99",
+        "latency_ns_p999",
+        "hit_rate",
+        "bytes_read",
+        "bytes_admitted",
+        "dollars_per_query",
+        "scale_up_latency_seconds"
+      ],
+      "properties": {
+        "latency_ns_p50":  { "type": "integer", "minimum": 0 },
+        "latency_ns_p95":  { "type": "integer", "minimum": 0 },
+        "latency_ns_p99":  { "type": "integer", "minimum": 0 },
+        "latency_ns_p999": { "type": "integer", "minimum": 0 },
+        "hit_rate":          { "type": "number", "minimum": 0, "maximum": 1 },
+        "bytes_read":        { "type": "integer", "minimum": 0 },
+        "bytes_admitted":    { "type": "integer", "minimum": 0 },
+        "dollars_per_query": { "type": "number", "minimum": 0 },
+        "scale_up_latency_seconds": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "queryRecord": {
+      "type": "object",
+      "required": [
+        "query_id",
+        "cycle",
+        "ttfq_ns",
+        "latency_ns_p50",
+        "latency_ns_p95",
+        "latency_ns_p99",
+        "latency_ns_p999",
+        "hit_rate",
+        "bytes_read",
+        "bytes_admitted",
+        "dollars_per_query",
+        "failed"
+      ],
+      "properties": {
+        "query_id": { "type": "string", "pattern": "^d[0-9]{1,3}$" },
+        "cycle": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "ttfq_ns": { "type": "integer", "minimum": 0 },
+        "latency_ns_p50":  { "type": "integer", "minimum": 0 },
+        "latency_ns_p95":  { "type": "integer", "minimum": 0 },
+        "latency_ns_p99":  { "type": "integer", "minimum": 0 },
+        "latency_ns_p999": { "type": "integer", "minimum": 0 },
+        "hit_rate":        { "type": "number", "minimum": 0, "maximum": 1 },
+        "bytes_read":      { "type": "integer", "minimum": 0 },
+        "bytes_admitted":  { "type": "integer", "minimum": 0 },
+        "dollars_per_query": { "type": "number", "minimum": 0 },
+        "failed": { "type": "boolean" },
+        "failure_reason": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    }
+  }
+}

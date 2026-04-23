@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shelf.io/schemas/benchmarks/tpcds/v0.json",
+  "title": "Shelf TPC-DS benchmark result",
+  "description": "One record per (backend, run). Inner `queries` array holds per-query measurements. See SPEC.md for semantics.",
+  "type": "object",
+  "required": [
+    "run_id",
+    "timestamp",
+    "commit_sha",
+    "release_tag",
+    "benchmark",
+    "backend",
+    "config",
+    "cluster_shape",
+    "queries",
+    "summary"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "run_id": {
+      "description": "Crockford ULID, unique per run.sh invocation.",
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "timestamp": {
+      "description": "ISO-8601 UTC, start of the run.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "commit_sha": {
+      "description": "40-char git SHA of this repo at run time.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "release_tag": {
+      "description": "Release tag this run is attributed to.",
+      "type": "string"
+    },
+    "benchmark": {
+      "type": "string",
+      "const": "tpcds"
+    },
+    "backend": {
+      "type": "string",
+      "enum": ["raw-s3", "fs-cache", "alluxio-2-9", "alluxio-3-dora", "shelf"]
+    },
+    "config": {
+      "description": "Hash of configs/<backend>/ tree + image digests. Any change here invalidates comparison with prior runs.",
+      "type": "object",
+      "required": ["config_hash", "trino_image", "backend_image"],
+      "properties": {
+        "config_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "trino_image": { "type": "string" },
+        "backend_image": { "type": "string" },
+        "plugin_jar_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "cluster_shape": {
+      "description": "Copied from env/outputs.tf::cluster_shape.",
+      "type": "object",
+      "required": [
+        "region",
+        "k8s_version",
+        "trino_instance_type",
+        "trino_worker_count",
+        "shelf_instance_type",
+        "shelf_node_count"
+      ],
+      "properties": {
+        "region": { "type": "string" },
+        "k8s_version": { "type": "string" },
+        "trino_instance_type": { "type": "string" },
+        "trino_worker_count": { "type": "integer", "minimum": 1 },
+        "shelf_instance_type": { "type": "string" },
+        "shelf_node_count": { "type": "integer", "minimum": 0 },
+        "driver_instance_type": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "queries": {
+      "type": "array",
+      "description": "Per-query, per-iteration measurements.",
+      "items": { "$ref": "#/$defs/queryRecord" }
+    },
+    "summary": {
+      "description": "Aggregate across warm runs; written back into RESULTS.md.",
+      "type": "object",
+      "required": [
+        "latency_ns_p50",
+        "latency_ns_p95",
+        "latency_ns_p99",
+        "latency_ns_p999",
+        "hit_rate",
+        "bytes_read",
+        "bytes_admitted",
+        "dollars_per_query",
+        "warm_up_seconds"
+      ],
+      "properties": {
+        "latency_ns_p50":  { "type": "integer", "minimum": 0 },
+        "latency_ns_p95":  { "type": "integer", "minimum": 0 },
+        "latency_ns_p99":  { "type": "integer", "minimum": 0 },
+        "latency_ns_p999": { "type": "integer", "minimum": 0 },
+        "hit_rate":          { "type": "number", "minimum": 0, "maximum": 1 },
+        "bytes_read":        { "type": "integer", "minimum": 0 },
+        "bytes_admitted":    { "type": "integer", "minimum": 0 },
+        "dollars_per_query": { "type": "number", "minimum": 0 },
+        "warm_up_seconds":   { "type": ["number", "null"], "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "queryRecord": {
+      "type": "object",
+      "required": [
+        "query_id",
+        "iteration",
+        "mode",
+        "latency_ns_p50",
+        "latency_ns_p95",
+        "latency_ns_p99",
+        "latency_ns_p999",
+        "hit_rate",
+        "bytes_read",
+        "bytes_admitted",
+        "dollars_per_query",
+        "failed"
+      ],
+      "properties": {
+        "query_id": {
+          "type": "string",
+          "pattern": "^q([1-9]|[1-9][0-9])$",
+          "description": "q1 .. q99 from TPC-DS."
+        },
+        "iteration": { "type": "integer", "minimum": 0 },
+        "mode": { "type": "string", "enum": ["cold", "warm"] },
+        "latency_ns_p50":  { "type": "integer", "minimum": 0 },
+        "latency_ns_p95":  { "type": "integer", "minimum": 0 },
+        "latency_ns_p99":  { "type": "integer", "minimum": 0 },
+        "latency_ns_p999": { "type": "integer", "minimum": 0 },
+        "hit_rate":        { "type": "number", "minimum": 0, "maximum": 1 },
+        "bytes_read":      { "type": "integer", "minimum": 0 },
+        "bytes_admitted":  { "type": "integer", "minimum": 0 },
+        "dollars_per_query": { "type": "number", "minimum": 0 },
+        "failed": { "type": "boolean" },
+        "failure_reason": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    }
+  }
+}

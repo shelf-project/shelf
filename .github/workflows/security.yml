@@ -1,0 +1,286 @@
+# Shelf security CI — runs on every PR + on a daily schedule.
+#
+# Every job fails closed. If a scanner errors out, that is a fail,
+# not a pass. The two jobs that are allowed to continue on error
+# (grype-second-opinion, owasp-dep-check-deep) are marked with
+# `continue-on-error: true` together with a justification comment.
+#
+# Owners: security rota (see CODEOWNERS; SECURITY.md §5).
+
+name: security
+
+"on":
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Daily at 02:17 UTC to stay off the :00 cron storm.
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # id-token is only needed by the release workflow (keyless cosign);
+  # not required here but documented for future extension.
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # -------------------------------------------------------------------
+  # Rust: cargo-deny (licenses + bans + advisories + sources)
+  # -------------------------------------------------------------------
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+          log-level: warn
+
+  # -------------------------------------------------------------------
+  # Rust: cargo-audit (RustSec advisories)
+  # -------------------------------------------------------------------
+  cargo-audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version ^0.21
+      - name: Audit
+        run: cargo audit --deny warnings
+
+  # -------------------------------------------------------------------
+  # Python: pip-audit on trainer + snapshot-watcher lockfiles
+  # -------------------------------------------------------------------
+  pip-audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pip-audit
+        run: pip install "pip-audit==2.*"
+      - name: Audit trainer
+        run: |
+          set -euo pipefail
+          if [ -f clients/python/trainer/uv.lock ]; then
+            pip-audit --strict --disable-pip -r clients/python/trainer/requirements.txt
+          else
+            echo "No trainer lockfile yet (Phase 4 deliverable). Skipping with a hard note."
+            echo "::notice::trainer lockfile missing — re-enable strict audit once SHELF-trainer lands"
+          fi
+      - name: Audit snapshot-watcher
+        run: |
+          set -euo pipefail
+          if [ -f clients/python/snapshot-watcher/uv.lock ]; then
+            pip-audit --strict --disable-pip -r clients/python/snapshot-watcher/requirements.txt
+          else
+            echo "No snapshot-watcher lockfile yet (Phase 1.5 deliverable). Skipping with a hard note."
+            echo "::notice::snapshot-watcher lockfile missing — re-enable strict audit once watcher lands"
+          fi
+
+  # -------------------------------------------------------------------
+  # Java: OSV-Scanner over clients/trino
+  # -------------------------------------------------------------------
+  osv-scanner-java:
+    name: osv-scanner (Java)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run OSV-Scanner
+        uses: google/osv-scanner-action/osv-scanner-action@v2.0.0
+        with:
+          scan-args: |-
+            --recursive
+            --skip-git
+            --config=.osv-scanner.toml
+            clients/trino
+
+  # -------------------------------------------------------------------
+  # Trivy filesystem scan (source tree)
+  # -------------------------------------------------------------------
+  trivy-fs:
+    name: trivy filesystem
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+          ignore-unfixed: true
+          format: table
+          # The scanner itself failing → CI failing.
+          # Do NOT set continue-on-error here.
+
+  # -------------------------------------------------------------------
+  # Grype: second-opinion scanner for divergence reporting.
+  # Justification for continue-on-error: we intentionally want
+  # Grype/Trivy divergences to be visible as warnings rather than
+  # duplicating the fail-closed behaviour of trivy-fs. A true
+  # severity gate is already enforced by trivy-fs; Grype here is
+  # purely informational. Divergences are tracked as GitHub issues.
+  # -------------------------------------------------------------------
+  grype-second-opinion:
+    name: grype (second opinion)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin v0.85.0
+      - name: Grype scan
+        run: grype dir:. --fail-on high --only-fixed
+
+  # -------------------------------------------------------------------
+  # Syft SBOM generation + upload (CycloneDX JSON)
+  # -------------------------------------------------------------------
+  syft-sbom:
+    name: syft SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0.18.0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: shelf-source.sbom.cdx.json
+          upload-artifact: true
+          artifact-name: shelf-source-sbom
+      - name: Verify SBOM is non-empty
+        run: |
+          set -euo pipefail
+          bytes=$(wc -c < shelf-source.sbom.cdx.json)
+          if [ "${bytes}" -lt 1024 ]; then
+            echo "::error::SBOM is suspiciously small (${bytes} bytes) — failing closed."
+            exit 1
+          fi
+
+  # -------------------------------------------------------------------
+  # Secret scanning (gitleaks on diff, trufflehog on PR range)
+  # -------------------------------------------------------------------
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_SUMMARY: "true"
+
+  # -------------------------------------------------------------------
+  # IAM grep guard — no `*:*` patterns in shipped IAM samples.
+  # -------------------------------------------------------------------
+  iam-grep-guard:
+    name: IAM wildcard guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Scan for forbidden wildcard patterns
+        run: |
+          set -euo pipefail
+          # Look for JSON policy snippets that contain `"Action": "*"`
+          # or `"Resource": "*"` — both are disallowed in shipped samples.
+          # Allow occurrences inside SECURITY/ markdown (documentation
+          # often cites the forbidden pattern as an example).
+          if grep -rE '"(Action|Resource)"\s*:\s*"\*"' \
+               --include='*.json' --include='*.yaml' --include='*.yml' \
+               --exclude-dir='SECURITY' \
+               . ; then
+            echo "::error::Forbidden wildcard found in a shipped policy."
+            exit 1
+          fi
+
+  # -------------------------------------------------------------------
+  # OWASP Dependency-Check — deep Java scan.
+  # Justification for continue-on-error: Dependency-Check is slow
+  # (5-15 min, NVD DB download) and occasionally flaps on NVD
+  # outages. Primary Java gate is OSV-Scanner (strict). This is
+  # scheduled-only (not on PR) and produces an HTML report for the
+  # security rota to review; a rota member files issues manually.
+  # -------------------------------------------------------------------
+  owasp-dep-check-deep:
+    name: OWASP Dependency-Check (scheduled)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: OWASP Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: shelf-trino
+          path: clients/trino
+          format: HTML
+          args: "--failOnCVSS 7 --enableRetired"
+
+  # -------------------------------------------------------------------
+  # Aggregation gate: every hard job above must be green.
+  # This is the single required check to configure in branch protection.
+  # -------------------------------------------------------------------
+  security-gate:
+    name: security gate
+    runs-on: ubuntu-latest
+    needs:
+      - cargo-deny
+      - cargo-audit
+      - pip-audit
+      - osv-scanner-java
+      - trivy-fs
+      - syft-sbom
+      - gitleaks
+      - iam-grep-guard
+    steps:
+      - name: All required scanners passed
+        run: echo "All required security scanners passed."

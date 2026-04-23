@@ -1,0 +1,210 @@
+name: bench
+
+# Benchmark harness automation.
+#
+# Two modes:
+#   1. pr-smoke: triggered on every PR. Runs the fixture-backed smoke
+#      profile of TPC-DS + cold-start inside GitHub-hosted runners
+#      against a docker-compose stack (SHELF-12). Must finish in <10m.
+#   2. nightly-full: runs 02:00 UTC on a self-hosted runner tagged
+#      `shelf-bench`. Full matrix across backends, full benchmarks,
+#      uploads results to the results bucket stub.
+#
+# Scaffolding: the jobs here run the scaffold `run.sh` scripts, which
+# exit 0 without real work. Gate comparison and results upload are
+# TODO_SHELF-26 / TODO_SHELF-27.
+
+on:
+  pull_request:
+    paths:
+      - "benchmarks/**"
+      - "shelfd/**"
+      - "clients/trino/**"
+      - ".github/workflows/bench.yml"
+  schedule:
+    - cron: "0 2 * * *"        # 02:00 UTC nightly
+  workflow_dispatch:
+    inputs:
+      backends:
+        description: "Comma-separated backends"
+        required: false
+        default: "shelf,alluxio-2-9"
+      profile:
+        description: "smoke | full"
+        required: false
+        default: "full"
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write              # for OIDC to AWS
+
+jobs:
+  pr-smoke:
+    name: PR smoke (${{ matrix.benchmark }} / ${{ matrix.backend }})
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        benchmark: [tpcds, cold-start, replay]
+        backend: [shelf, fs-cache]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq python3 python3-pip
+          pip install --quiet "jsonschema>=4.18"
+
+      - name: Lint shell scripts
+        run: |
+          set -e
+          for f in benchmarks/*.sh benchmarks/*/run.sh; do
+            bash -n "$f"
+          done
+
+      - name: Validate JSON schemas
+        run: |
+          for f in benchmarks/*/schema.json; do
+            python3 -c "import json; json.loads(open('$f').read())"
+          done
+
+      - name: Run scaffold smoke (${{ matrix.benchmark }} / ${{ matrix.backend }})
+        env:
+          SHELF_BENCH_RELEASE_TAG: pr-${{ github.event.pull_request.number }}
+          SHELF_BENCH_COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [[ "${{ matrix.benchmark }}" == "tpcds" ]]; then
+            ./benchmarks/${{ matrix.benchmark }}/run.sh \
+              --backend=${{ matrix.backend }} \
+              --profile=smoke
+          elif [[ "${{ matrix.benchmark }}" == "cold-start" ]]; then
+            ./benchmarks/${{ matrix.benchmark }}/run.sh \
+              --backend=${{ matrix.backend }} \
+              --cycles=1
+          else
+            ./benchmarks/${{ matrix.benchmark }}/run.sh \
+              --backend=${{ matrix.backend }} \
+              --days=1 \
+              --speed=10x
+          fi
+
+      - name: Validate the produced record
+        run: |
+          schema="benchmarks/${{ matrix.benchmark }}/schema.json"
+          latest="$(find benchmarks/results -type f -name '*.json' | head -n 1)"
+          if [[ -z "$latest" ]]; then
+            echo "no result record found"
+            exit 1
+          fi
+          python3 -m jsonschema -i "$latest" "$schema"
+
+      - name: Upload smoke result
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.benchmark }}-${{ matrix.backend }}
+          path: benchmarks/results/**
+          retention-days: 7
+
+  regression-gate:
+    name: Regression gate (PR only)
+    if: github.event_name == 'pull_request'
+    needs: pr-smoke
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download smoke artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artefacts
+
+      # TODO_SHELF-26: compare quantiles against main baseline
+      #   Fail PR if:
+      #     p95 regressed by > 10 %
+      #     p99 regressed by > 5 %
+      - name: Compare against baseline (stub)
+        run: |
+          echo "scaffold: would compare quantiles against main baseline"
+          echo "TODO_SHELF-26: gate logic"
+
+  nightly-full:
+    name: Nightly full (${{ matrix.benchmark }} / ${{ matrix.backend }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, shelf-bench]
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        benchmark: [tpcds, cold-start, spot-churn, replay]
+        backend:   [raw-s3, fs-cache, alluxio-2-9, alluxio-3-dora, shelf]
+        exclude:
+          - benchmark: replay
+            backend: alluxio-3-dora       # v0.5 gate comparison is vs 2.9.5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS creds via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.BENCH_RUNNER_ROLE_ARN }}
+          aws-region: ap-south-1
+
+      - name: Terraform apply (env/)
+        run: |
+          terraform -chdir=benchmarks/env init -input=false
+          terraform -chdir=benchmarks/env apply -auto-approve
+
+      - name: Bootstrap software stack
+        run: ./benchmarks/bootstrap.sh --apply --backends=${{ matrix.backend }}
+
+      - name: Run benchmark
+        env:
+          SHELF_BENCH_RELEASE_TAG: nightly-${{ github.run_id }}
+          SHELF_BENCH_COMMIT_SHA: ${{ github.sha }}
+        run: |
+          case "${{ matrix.benchmark }}" in
+            tpcds)      ./benchmarks/tpcds/run.sh      --backend=${{ matrix.backend }} --apply --scale=1tb ;;
+            cold-start) ./benchmarks/cold-start/run.sh --backend=${{ matrix.backend }} --apply ;;
+            spot-churn) ./benchmarks/spot-churn/run.sh --backend=${{ matrix.backend }} --apply ;;
+            replay)     ./benchmarks/replay/run.sh     --backend=${{ matrix.backend }} --apply --days=7 --speed=2x ;;
+          esac
+
+      - name: Validate result
+        run: |
+          schema="benchmarks/${{ matrix.benchmark }}/schema.json"
+          latest="$(find benchmarks/results -type f -name '*.json' | sort | tail -n 1)"
+          python3 -m jsonschema -i "$latest" "$schema"
+
+      - name: Upload to results bucket (stub)
+        # TODO_SHELF-26 / TODO_SHELF-27: real upload + RESULTS.md PR
+        run: |
+          echo "scaffold: would aws s3 cp benchmarks/results/ s3://shelf-bench-results/ --recursive"
+
+      - name: Teardown
+        if: always()
+        run: |
+          ./benchmarks/cleanup.sh --apply || true
+          terraform -chdir=benchmarks/env destroy -auto-approve || true
+
+  publish-results:
+    name: Publish to RESULTS.md
+    if: github.event_name == 'schedule'
+    needs: nightly-full
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # TODO_SHELF-26: open machine-authored PR appending rows to RESULTS.md
+      - name: Open results PR (stub)
+        run: |
+          echo "scaffold: would author a PR appending rows to benchmarks/RESULTS.md"

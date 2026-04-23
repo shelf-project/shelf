@@ -1,0 +1,10 @@
+[toolchain]
+# Shelf toolchain pin.
+#
+# MSRV is tracked separately in workspace.package.rust-version (currently
+# "1.82"). This file pins the build toolchain to stable so the dev image,
+# CI matrix and laptop builds all agree. Bumping MSRV is a SHELF-NN
+# ticket of its own (see 03-plan.md §4 SHELF-01).
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

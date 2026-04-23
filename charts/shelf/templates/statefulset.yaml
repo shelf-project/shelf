@@ -1,0 +1,142 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "shelf.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shelf.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "shelf.fullname" . }}
+  replicas: {{ .Values.replicaCount }}
+  podManagementPolicy: {{ .Values.statefulset.podManagementPolicy }}
+  updateStrategy:
+    type: {{ .Values.statefulset.updateStrategy.type }}
+  selector:
+    matchLabels:
+      {{- include "shelf.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "shelf.labels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "shelf.serviceAccountName" . }}
+      {{- with include "shelf.priorityClassName" . }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: shelfd
+          image: {{ include "shelf.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: data
+              containerPort: {{ .Values.service.dataPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.service.metricsPort }}
+              protocol: TCP
+            - name: s3shim
+              containerPort: {{ .Values.service.s3shimPort }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ .Values.service.adminPort }}
+              protocol: TCP
+          env:
+            - name: SHELF_LOG_LEVEL
+              value: {{ .Values.logging.level | quote }}
+            - name: SHELF_LOG_FORMAT
+              value: {{ .Values.logging.format | quote }}
+            - name: SHELF_ORIGIN_BUCKET
+              value: {{ .Values.origin.bucket | quote }}
+            - name: SHELF_ORIGIN_REGION
+              value: {{ .Values.origin.region | quote }}
+            - name: SHELF_POOL_METADATA_SIZE_BYTES
+              value: {{ .Values.cache.pools.metadata.sizeBytes | quote }}
+            - name: SHELF_POOL_ROWGROUP_DRAM_SIZE_BYTES
+              value: {{ .Values.cache.pools.rowgroup.dramSizeBytes | quote }}
+            - name: SHELF_POOL_ROWGROUP_NVME_SIZE_BYTES
+              value: {{ .Values.cache.pools.rowgroup.nvmeSizeBytes | quote }}
+            - name: SHELF_ADMISSION_SIZE_THRESHOLD_MIB
+              value: {{ .Values.cache.admission.sizeThresholdMiB | quote }}
+            - name: SHELF_ADMISSION_PINNED_BYPASS
+              value: {{ .Values.cache.admission.pinnedBypass | quote }}
+            - name: SHELF_PIN_LIST_S3_URI
+              value: {{ .Values.cache.pinList.s3Uri | quote }}
+            - name: SHELF_PIN_LIST_RELOAD_SECONDS
+              value: {{ .Values.cache.pinList.reloadIntervalSeconds | quote }}
+            - name: SHELF_ORIGIN_POOL_MAX_CONNECTIONS
+              value: {{ .Values.origin.pool.maxConnections | quote }}
+            - name: SHELF_NVME_MOUNT_PATH
+              value: {{ .Values.storage.mountPath | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: admin
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: nvme
+              mountPath: {{ .Values.storage.mountPath }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: nvme
+        labels:
+          {{- include "shelf.labels" . | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ .Values.storage.storageClassName | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.size }}

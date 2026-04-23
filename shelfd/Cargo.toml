@@ -1,0 +1,71 @@
+[package]
+name = "shelfd"
+description = "Shelf cache daemon — Iceberg-native, row-group-granular read cache for Trino"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[[bin]]
+name = "shelfd"
+path = "src/main.rs"
+
+[lib]
+name = "shelfd"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+axum = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+once_cell = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+parking_lot = { workspace = true }
+humantime-serde = { workspace = true }
+clap = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+foyer = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+
+[features]
+# Feature flags track ADR-0001/2/3/4/8/9 scope. The defaults represent
+# the v0.5 gate-target build. Cfg-gating follows the pattern in
+# agents/4-shelfd-builder.md Pass 2 "Feature flags compile each pass
+# independently".
+default = []
+# Enable the Foyer NVMe tier (SHELF-18). Off by default while the
+# hybrid pool is behind a PVC that only exists in rep-2.
+foyer_pool = []
+# ADR-0001 keeps Raft out of v1. This flag exists only so the compiler
+# can refuse its reintroduction without an ADR update.
+raft = []
+# ADR-0004 keeps Arrow Flight out of v1. Same reason.
+flight = []
+
+[[bench]]
+name = "hashring"
+harness = false

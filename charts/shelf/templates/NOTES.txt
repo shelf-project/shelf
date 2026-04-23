@@ -1,0 +1,27 @@
+Shelf {{ .Chart.AppVersion }} installed as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Replicas:        {{ .Values.replicaCount }}
+Image:           {{ include "shelf.image" . }}
+Data port:       {{ .Values.service.dataPort }}  (HTTP/2 range-GET; ADR-0004)
+Metrics port:    {{ .Values.service.metricsPort }}
+S3-shim port:    {{ .Values.service.s3shimPort }}
+Admin port:      {{ .Values.service.adminPort }}
+Storage:         {{ .Values.storage.size }} via StorageClass {{ .Values.storage.storageClassName | quote }}
+NetworkPolicy:   {{ .Values.networkPolicy.enabled }}
+ServiceMonitor:  {{ .Values.serviceMonitor.enabled }}
+
+Verify pods:
+  kubectl -n {{ .Release.Namespace }} get sts {{ include "shelf.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+
+Port-forward the admin endpoint and tail stats:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "shelf.fullname" . }} {{ .Values.service.adminPort }}:{{ .Values.service.adminPort }}
+  shelfctl --endpoint http://localhost:{{ .Values.service.adminPort }} stats
+
+Grafana dashboards: see /Users/aamir/trino/shelf/observability/dashboards/
+Alerts:             see /Users/aamir/trino/shelf/observability/alerts/
+Runbooks:           see /Users/aamir/trino/shelf/runbooks/
+SLO doc:            /Users/aamir/trino/shelf/docs/SLO.md
+
+This chart is v0.1.0 scaffolding. Production tuning (resources, NVMe size,
+pool sizes) is deferred until Phase 0 benchmarks E3 / E10 land.

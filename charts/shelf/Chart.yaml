@@ -1,0 +1,27 @@
+apiVersion: v2
+name: shelf
+description: |
+  Shelf — Iceberg-native, row-group-granular read cache for Trino.
+  Replaces Alluxio OSS 2.9.5 on the penpencil Trino-on-EKS footprint.
+  See /Users/aamir/trino/shelf/BLUEPRINT.md §9 and
+  /Users/aamir/trino/shelf/agents/out/03-plan.md §4 for context.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/penpencil-oss/shelf
+sources:
+  - https://github.com/penpencil-oss/shelf
+keywords:
+  - cache
+  - trino
+  - iceberg
+  - parquet
+  - s3
+maintainers:
+  - name: shelf-oncall
+    email: shelf-oncall@penpencil.internal
+annotations:
+  # artifacthub.io/changes is intentionally omitted until v0.2; this chart is
+  # scaffolding only — see plan §3 Phase 0 / §4 SHELF-09 & SHELF-21.
+  category: Caching

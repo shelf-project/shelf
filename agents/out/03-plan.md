@@ -1,0 +1,990 @@
+# Shelf execution plan
+
+_Author: agent-3-planner_
+_Date: 2026-04-23_
+_Inputs: `shelf/BLUEPRINT.md` (v0.3, last edited 2026-04-23), `shelf/COMPARISON.md`, `shelf/agents/out/01-scientist-review.md`, `shelf/agents/out/02-critical-review.md`_
+
+---
+
+## 0. TL;DR
+
+Ship a **scope-cut, measurement-gated Shelf** on top of a stabilised
+Alluxio — not a 9-month greenfield dream. The team's first 8 weeks
+build exactly one thing: a single-node, then 3-node, row-group-granular
+cache on rep-2 that wins (or loses) a head-to-head against the
+currently-fixed Alluxio. That fight is the **v0.5 gate**: match
+Alluxio's measured 71 % hit rate, keep `GOLD_DBT` ok-rate ≥ 99.9 %, p95
+within 20 %, for 7 consecutive days, at ≥ 50 % less oncall surface. If
+v0.5 loses, the project dies on purpose instead of dying slowly.
+
+Beyond v0.5, the v1.0 roadmap ships plan-aware prefetch (file + footer
+only, plugin-side row-group observation — no `SplitCompletedEvent`,
+which Trino PR #26436 removed), multi-node HRW hashing over the K8s
+headless service (**no Raft**), size-threshold admission (**no ONNX
+MLP** in v1), HTTP/2 everywhere (**no Arrow Flight** in v1), the
+existing Redis-Gateway result cache from `COMPARISON.md` (**no
+`shelf-result-cache`** in v1), and a public OSS launch.
+
+Dropped outright: Phase 10 incremental MV refresh (wrong project, it's
+a compute service). Deferred: learned admission, Arrow Flight, side-built
+blooms §7.4.2, z-order awareness §7.4.3, MV-aware caching.
+
+Calendar: **36-44 weeks** to OSS launch for a 3-person team (~2× the
+blueprint estimate). Cost ceiling: one on-demand NVMe pool on rep-2 we
+already own from the Alluxio footprint; no new IaaS spend before v0.5.
+
+Five biggest risks: (1) Alluxio is already at 71 %, marginal lift may be
+low; (2) Trino SPI churn (TrinoFileSystem rewrite in ~v464, could move
+again); (3) cold-cache thundering herd against S3 per-prefix rate
+limits; (4) team has never shipped a Rust service; (5) multipart S3
+ETags are not MD5 — key invariant needs documenting.
+
+---
+
+## 1. What we are building (merged source of truth)
+
+_This supersedes BLUEPRINT.md §1 for planning purposes until the diff
+in `BLUEPRINT-DIFF.md` is applied._
+
+**Shelf** is a Rust, Apache 2.0, Iceberg-native, row-group-granular
+read cache for Trino that replaces Alluxio OSS 2.9.5 on our 4 EKS Trino
+clusters. It keeps exactly three differentiators from the blueprint —
+(a) columnar-range granularity (manifest, footer, page index, row-group
+byte range) with content-addressed keys; (b) shared cross-replica cache
+(one warm pool, not four cold ones); (c) plan-aware push prefetch from
+the Trino coordinator (file + footer only — row-group prefetch is
+reactive, plugin-observation-based) — and gives up everything
+speculative in v1:
+
+- No embedded Raft. Membership = K8s headless service; pin list + quotas
+  = S3-backed ConfigMap pulled on SIGHUP / 15 min.
+- No ONNX MLP admission. Size threshold (refuse > 1 GB unless pinned)
+  + nightly-trained pin list from `cdp.trino_logs.trino_queries`.
+- No Arrow Flight in v1. HTTP/2 range-GET with pooled connections for
+  every payload size; revisit Flight only if EKS-measured throughput
+  justifies it.
+- No in-repo result cache. The already-scoped Redis + Trino-Gateway
+  result cache from COMPARISON.md Phase 0 owns result caching; `shelfd`
+  stays a pure byte-range cache.
+- No in-cache blooms, no z-order detection, no MV pinning in v1. The
+  bloom *recommender* (§7.4.1) lives as an ops playbook, not Shelf code.
+- No incremental MV refresh — dropped from the project entirely.
+
+Plugin contract is unchanged from the blueprint: every Shelf error
+becomes a transparent S3 fall-through via a per-pod circuit breaker,
+which ships as a committed Java reference implementation with unit
+tests in v0.1. Trino never sees a Shelf-specific error.
+
+Gate: if v0.5 cannot beat Alluxio on rep-2 on measured metrics for 7
+consecutive days, Shelf is killed. This is a feature, not a fear.
+
+---
+
+## 2. Unknowns and experiments (critical path first)
+
+These block specific phases. Every experiment produces a numeric
+answer. They sit at the top of the plan because they *move the
+critical path*.
+
+| # | Question | Experiment (concrete) | Owner | Duration | Blocks |
+|---|----------|-----------------------|-------|----------|--------|
+| E1 | Does `QueryCreatedEvent.queryMetadata.plan` on Trino 480 actually expose tables + predicates + snapshot IDs? | (a) `EXPLAIN (FORMAT JSON) SELECT * FROM cdp.icesheet.silver_offline_event_data_2026 WHERE event_region='MP+CG' LIMIT 10;` on rep-0. (b) Install throwaway `EventListener` impl on rep-0 for 24h; log `queryId`, `plan`, `tables`, `routines`, `sessionProperties` to file. Count plans that expose `predicate` / `tableHandle`. | trino-plugin-eng-1 | 4 h | Phase 2a |
+| E2 | How much signal does `QueryStatistics.getOperatorSummaries()` carry now that `SplitCompletedEvent` is gone? | Install `QueryCompletedEvent` listener on rep-0, collect 24 h of operator summaries. Bucket: % queries where `ScanFilterAndProject` operator summary names (file, partition, scanned bytes). | trino-plugin-eng-1 | 1 d | Phase 2b |
+| E3 | What is the per-stream HTTP/2 range-GET throughput from a Trino worker pod to a shelf pod on actual EKS networking? | Deploy single-pod `shelfd` on rep-2 pool; from a worker pod, pull 128 MiB × 50 iterations over pooled h2, record p50 / p95 / p99 and GB/s. Compare with direct S3 from the same pod. | rust-engineer-1 | 4 h | Phase 0 gate |
+| E4 | What is a ONNX Runtime single-inference latency for a 3-layer MLP, 10 features, on a Graviton3 pod? | Ship the 20-line ORT benchmark (`onnxruntime` + static MLP); measure 10k inferences on warm session, record p50 / p95 / p99. Repeat with LightGBM same features. | ml-engineer-1 | 4 h | ADR-0003 fallback only |
+| E5 | On 7 days of `cdp.trino_logs.trino_queries` replay, what is the scanned-byte reduction from row-group granularity vs file granularity? | Build replay harness: for each query, materialise Iceberg manifests + footers, compute needed row-group byte-ranges, sum vs raw file size. Report median and P90 ratio. | data-eng-1 | 2 d | Phase 1 success gate (row-group claim) |
+| E6 | During a synthetic cold-cache storm (all 5 pods restart, 150 GiB working set re-warms), do we hit S3 per-prefix rate limits? | Using the replay harness, simulate 5 pods starting with empty Foyer; issue the 24 h read sequence in 10 min of wall clock; count 503 SlowDown responses from S3, record recovery time. | rust-engineer-2 | 1 d | §9.4 failure-mode claim |
+| E7 | HRW + K8s headless-service DNS cache refresh: during a pod rotation, how many mis-routed requests per client per minute? | Chaos: delete `shelf-2` pod while synthetic workload runs 1 k req/s; count requests mis-hashed vs actual owner until convergence. | k8s-eng-1 | 4 h | Phase 3 gate |
+| E8 | On `cdp.trino_logs.trino_queries` last 30 days, what is the empirically best HTTP-vs-Flight crossover size? | Using the replay harness, plot IPC framing overhead (simulated) vs zero-copy Flight gain at 256 KiB, 1 MiB, 4 MiB, 16 MiB payload. | rust-engineer-1 | 1 d | v1.x Flight decision |
+| E9 | How much HMS / Trino system-table load does a 30 s `SnapshotWatcher` poll add across 3 catalogs? | Instrument `pg_stat_statements`-equivalent on HMS; run watcher in staging for 1 h; measure queries/s and p95 backend latency delta. | data-eng-2 | 4 h | Phase 2 / 1.5 go/no-go |
+| E10 | On v0.1 single-node, does p99 plugin-path latency stay within 5 % of direct S3? | Enable shadow traffic for non-critical queries on rep-0; collect 1 h; compare plugin-enabled vs plugin-disabled p50/p95/p99 from Trino `QueryCompletedEvent` / `OperatorStats` timings. | trino-plugin-eng-1 | 4 h | Phase 0 exit |
+| E11 | Foyer SIEVE vs S3-FIFO hit-ratio on 7-day rep-2 trace. | Replay harness — same trace, two Foyer configs, same DRAM + NVMe quotas. Report hit-rate delta and tail-latency delta. | rust-engineer-2 | 1 d | ADR-0009 (eviction default) |
+| E12 | Alluxio current-day baseline on rep-2: 7-day measured hit rate, p50/p95 latency, `GOLD_DBT` ok rate, oncall page count. | Pull from existing Grafana dashboards + PagerDuty. No new instrumentation. | sre-1 | 2 h | v0.5 gate (have we actually got a number to beat?) |
+
+Total critical-path experiment budget: **~8-10 engineer-days**, ideally
+done inside Phase −1 / Phase 0 so the phases downstream build on
+measured answers, not blueprint claims.
+
+---
+
+## 3. Phased roadmap
+
+Phase numbering aligned with BLUEPRINT.md §12 and COMPARISON.md §2,
+with Phase 10 **removed** (out of scope — it is a compute service, not
+a cache; see ADR-0007). Durations use calendar weeks and assume a
+3-person team running alongside the existing Alluxio on-call rotation.
+
+### Phase −1 — Stabilise existing stack (1 week)
+
+- **Entry criterion.** Alluxio on rep-2 stable with the
+  `UfsIOManager=256` patch in place (already true on 2026-04-23).
+- **Deliverables.** (1) `emptyDir → hostPath` migration for every Trino
+  `fs.cache` volume on rep-1/2/3. (2) Audit `hive.metastore-cache-ttl`
+  across 3 catalogs → set to `10m`. (3) Verify
+  `iceberg.metadata-cache.enabled=false` wherever `fs.cache.enabled=true`.
+  (4) `UfsIOManager=256` committed to git (not just a live CM patch).
+  (5) Rep-2 KEDA cooldown MR merged.
+- **Success gate.** `fs.cache` hit rate climbs from 15-20 % → ≥ 45 %
+  for 5 consecutive days on rep-1/2/3. Zero query regressions.
+- **Dependencies.** None.
+- **Risks.** `hostPath` PVs may not survive Karpenter node rotation on
+  shared pools — verify by draining a node mid-week.
+- **Rollback.** `kubectl rollout undo` per Trino deployment; all changes
+  are config-only.
+
+### Phase 0 — Proof of concept (v0.1) (2-3 weeks)
+
+- **Entry criterion.** Phase −1 complete; E1/E3/E10 experiments
+  scheduled.
+- **Deliverables.** (1) `shelfd` Rust binary: Axum HTTP server, Foyer
+  DRAM-only cache (64 GiB), `GET`/`HEAD` with range support,
+  content-addressed keys `sha256(etag || offset || length)`, S3 origin
+  client (AWS SDK v2, pooled), Prometheus `/metrics`, `/healthz`,
+  `/readyz`. (2) `shelf-trino-plugin`: `ShelfFileSystem` pass-through
+  wrapper, fail-open on every error. (3) Circuit-breaker reference Java
+  class, shipped with unit tests (scenarios: closed/open/half-open,
+  concurrent `record_failure`, per-pod isolation). (4) Integration
+  harness: docker-compose (Trino 480 + `shelfd` + minio) runs 10-query
+  smoke test green. (5) 1-pod Deployment on rep-2 `alluxio` Karpenter
+  pool (reuse existing nodes, no new IaaS).
+- **Success gate.** A single query against
+  `cdp.icesheet.silver_offline_event_data_2026` on rep-0 is served from
+  Shelf (verified by Grafana: `shelf_hits_total{tier="dram"} > 0`);
+  plugin shadow-traffic on rep-2 shows p99 overhead ≤ 5 % vs direct S3
+  (E10 numeric).
+- **Dependencies.** Phase −1.
+- **Risks.** Rust team velocity; tokio + Foyer + Tonic version tangle;
+  NVMe PVC provisioning on rep-2 pool (not used yet in Phase 0, but
+  validated here).
+- **Rollback.** `fs.shelf.enabled=false` per catalog; no user-visible
+  state.
+
+### Phase 0R — Quick-win result cache (parallel, 2-3 weeks)
+
+_Not a "new" phase — this is COMPARISON.md Phase 0, which has always
+been in the merged roadmap. It runs in parallel with Phase 0 so users
+see value before Shelf v0.5 even compiles._
+
+- **Entry criterion.** Phase −1 complete. Redis 7 Helm chart landed.
+- **Deliverables.** (1) Redis cluster (`cache` ns, 3 × 32 GB primaries).
+  (2) `SnapshotWatcher` Python sidecar polling Trino system tables
+  every 30 s. (3) `trino-gateway-result-cache` plugin keyed on
+  `sha256(normalized_sql || snapshot_map)`. (4) Enabled for BI users
+  (`pbi_*`, `mbuser`, `commonuser`).
+- **Success gate.** Dashboard queries ≤ 5 ms on cache hit; ≥ 60 % hit
+  rate on BI traffic after 5 days.
+- **Dependencies.** None with Shelf. Owner track: data-platform, not
+  cache-team.
+- **Risks.** HMS load from the watcher (E9). If bad, cap polling
+  rate and back off on no-change.
+- **Rollback.** Disable plugin in Trino Gateway config.
+
+### Phase 1 — Columnar granularity + NVMe + 3-node HRW (v0.5) (6-8 weeks)
+
+This is the biggest phase; it contains the v0.5 gate.
+
+- **Entry criterion.** Phase 0 exit criteria hit; E3 and E10 numeric
+  results recorded; rep-2 Alluxio baseline pulled (E12).
+- **Deliverables.** (1) Parquet footer caching: plugin recognises the
+  Parquet footer range-GET pattern, issues a fetch of the last 64 KB
+  before the worker asks. (2) Row-group byte-range support: key is
+  `sha256(etag || rg_ordinal || offset || length)` with ordinal pulled
+  from the cached footer. (3) Iceberg manifest caching (pool.metadata,
+  DRAM, Foyer FrozenHot). (4) Foyer NVMe tier configured with S3-FIFO
+  (the Foyer built-in — see ADR-0009). (5) **Two-pool** layout: one
+  DRAM pool (manifests + footers, 5 GiB), one hybrid pool (row groups,
+  500 GiB/pod). (6) Rendezvous (HRW) hashing in both plugin and
+  `shelfd`, with capacity weights from `/stats`; golden-vector unit test
+  cross-checks Rust and Java hashes byte-identical. (7) 3-pod
+  StatefulSet on the rep-2 pool, K8s headless-service membership,
+  no Raft. (8) S3-compat shim: `GetObject` + `HeadObject` only, so
+  DuckDB / notebook traffic can participate. (9) `shelfctl` CLI:
+  `stats`, `pin`, `evict`, `ring`, `reload`. (10) Pin list:
+  `pin_list.json` in S3 ConfigMap, reloaded on SIGHUP. (11) Size
+  threshold admission: refuse ≥ 1 GiB unless pinned. (12) Grafana
+  dashboard (insight-first: traffic-light hit rate, p95, fallback rate,
+  pod health). (13) Chaos drills: KEDA rotation + pod-kill, both
+  passing weekly. (14) `trino_logs` replay benchmark harness (from E5).
+- **Success gate (v0.5).** On rep-2, live traffic routed through Shelf
+  instead of Alluxio:
+  - Cumulative hit rate ≥ 71 % for 7 consecutive days
+  - `GOLD_DBT` ok-rate ≥ 99.9 %
+  - p95 query latency within 20 % of Alluxio baseline
+  - Zero Shelf-caused pages for 7 days
+  - Oncall surface (tracked manually) ≤ 50 % of Alluxio's: measured by
+    unique runbook lookups + pages per week.
+  If any one misses, **the project does not continue** until the gap
+  is closed or Shelf is killed. This is the kill-switch.
+- **Dependencies.** Phase 0 complete; E5, E7, E11.
+- **Risks.** (a) Alluxio baseline is a fixed bar that is now stable;
+  beating it on granularity but losing on hit rate is a real failure
+  mode. (b) Foyer NVMe tier immature for our load. (c) HRW re-routes
+  during KEDA churn cause hit-rate wobble (E7).
+- **Rollback.** Point plugin back at Alluxio via
+  `fs.shelf.enabled=false`; 3-pod StatefulSet can stay running idle for
+  30 days while team diagnoses.
+
+### Phase 2 — Plan-aware prefetch (4-5 weeks)
+
+- **Entry criterion.** Phase 1 passed v0.5 gate. E1 + E2 numeric
+  results recorded. **No code until E1 says `QueryCreatedEvent` carries
+  the needed fields.**
+- **Deliverables.** (1) `ShelfPrefetchListener` Java class: on
+  `QueryCreatedEvent`, extract tables + predicates + snapshot IDs;
+  read Iceberg manifest from Shelf's own metadata tier; issue
+  `Prefetch` gRPC for `(metadata.json, manifest_list, matching-partition
+  footers)` — file + footer only (no row groups) — with a **hard 10 ms
+  coordinator-side deadline**. (2) Shelf-side prefetch queue per
+  tenant, bounded depth (default 1 024), priority 0 for dashboard /
+  priority 10 for bulk. (3) Cancellation on `QueryCompletedEvent`.
+  (4) Plugin-side Phase 2b-signal-1: after a worker range-GET on a
+  footer, plugin parses row-group stats vs captured predicate and
+  issues row-group prefetch locally (no listener involvement). (5)
+  Post-hoc learning: `QueryCompletedEvent.operatorSummaries` feeds a
+  nightly Airflow job building `(query_sketch → likely_row_groups)`
+  lookup table consumed by Phase 2a's prefetch on the *next* matching
+  query.
+- **Success gate.** TTFQ (time-to-first-query) after 10× scale-up
+  (2 → 20 workers) ≤ 3 s p95 on dashboard queries, measured via the
+  cold-start benchmark harness (§10.2). Cold-start tax eliminated.
+- **Dependencies.** Phase 1 v0.5 gate passed.
+- **Risks.** (a) `splitCompleted` is gone (PR #26436) — if E2 shows
+  operator summaries don't carry enough signal, learning path is
+  limited. (b) Listener can block coordinator thread if deadline not
+  enforced (§9.5 circuit breaker applies here too). (c) SPI churn —
+  `TrinoFileSystem` rewrite in ~v464 shows this can happen again.
+- **Rollback.** `shelf.prefetch.enabled=false` per catalog. Listener
+  continues to run as no-op; no restart needed.
+
+### Phase 3 — Scale-out + S3-shim hardening (3-4 weeks)
+
+- **Entry criterion.** Phase 2 passed.
+- **Deliverables.** (1) Scale StatefulSet from 3 → 5-7 pods; validate
+  HRW rebalance. (2) Per-prefix S3 rate limiter on fallback path (per
+  §9.4 — thundering-herd mitigation). (3) S3-shim hardening: error
+  parity with real S3 for `NoSuchKey`, `AccessDenied`. (4) Migrate all
+  rep-2 traffic from Alluxio to Shelf (Alluxio kept hot-standby for 30
+  days). (5) `tokio`-blocking-call lint; runtime starvation smoke test
+  under NVMe write pressure. (6) Per-prefix connection pools on origin
+  client (drop "one global pool" pattern from v0.1).
+- **Success gate.** Chaos test: kill 1 pod / 5 min for 1 hour, hit rate
+  stays ≥ 65 %. Thundering-herd test: simultaneous 5-pod kill, S3
+  request rate caps at configured prefix limit with 0 query errors.
+- **Dependencies.** Phase 2 complete.
+- **Risks.** Per-prefix pool count explosion (thousands of prefixes in
+  `cdp`); memoise + evict.
+- **Rollback.** Scale StatefulSet back; Alluxio hot-standby re-engaged
+  via ConfigMap flip.
+
+### Phase 4 — Learned admission (evaluation only) (2-6 weeks)
+
+- **Entry criterion.** Phase 3 stable; E4 numeric + E5 numeric
+  recorded.
+- **Deliverables.** (1) `trino_logs`-driven **pin list trainer** — a
+  nightly Airflow job that emits `pin_list.json` sorted by `scanned_bytes
+  × wall_time × frequency`, top-N per tenant. Ops reviews PR-style.
+  (2) **Benchmark** size-threshold-only vs size-threshold + LightGBM
+  admission on 30-day replayed trace. (3) Decision point: if LightGBM
+  lifts hit rate by ≥ 5 pp over size-threshold alone **on replayed
+  traffic** and adds < 50 µs to large-miss path, ship LightGBM
+  (ADR-0003 escape hatch); else stop and ship only pin-list.
+- **Success gate.** Pin list merged and live; NVMe write bandwidth cut
+  ≥ 40 % vs v0.5 baseline on ad-hoc scans. Any learned model only
+  shipped if measured gap ≥ 5 pp.
+- **Dependencies.** Phase 3 stable; `cdp.trino_logs.trino_queries`
+  replay harness from Phase 1.
+- **Risks.** (a) Ops blames pin list for eviction storm; PR flow + git
+  history mitigates. (b) LightGBM retraining cadence drift (weekly is
+  enough for dashboard cohort stability, per E5's week-over-week
+  stationarity sidecar).
+- **Rollback.** `pin_list.json` → empty; admission = size-threshold
+  only.
+
+### Phase 5 — Productionise rep-2 (3-4 weeks)
+
+- **Entry criterion.** Phase 4 complete.
+- **Deliverables.** (1) Full runbook (AGENTS.md-compliant: traffic-light
+  dashboard, 3-step diagnosis tree, on-call rotation). (2) Capacity
+  plan: NVMe headroom ≥ 30 %; alarms on DRAM pool saturation. (3) HA
+  config: 5-pod StatefulSet across ≥ 2 AZs (on-demand, not spot). (4)
+  Retire Alluxio from rep-2 (hot-standby decommissioned). (5) Incident
+  postmortem template + on-call handoff. (6) Remove rep-2 `alluxio-worker`
+  StatefulSet.
+- **Success gate.** 7 consecutive days zero Shelf-caused incidents on
+  rep-2 with Alluxio decommissioned; `alluxio-worker` headcount reduced
+  to 0 on rep-2.
+- **Dependencies.** Phase 4 complete.
+- **Risks.** Alluxio decommissioned too early → no rollback. Mitigation:
+  keep the `alluxio-values.yaml` in repo + a 24-h "re-deploy Alluxio"
+  drill rehearsed once before decommission.
+- **Rollback.** Re-apply Alluxio Helm chart; 24 h warm-up; plugin
+  `fs.shelf.enabled=false`.
+
+### Phase 6 — Roll to rep-0 / rep-1 / rep-3 (4-6 weeks)
+
+- **Entry criterion.** Phase 5 done.
+- **Deliverables.** (1) Replica-specific rollouts, one at a time, each
+  with its own ACL story: rep-2 Ranger, rep-3 file-based `rules.json`
+  (see AGENTS.md). (2) Shared-vs-per-replica Shelf cluster decision:
+  blueprint says shared (§15), critic agrees; ship as a single shared
+  Shelf cluster with per-replica tenants. (3) Per-tenant quotas wired
+  through to pool accounting. (4) Full Alluxio retirement.
+- **Success gate.** All 4 replicas on shared Shelf; Alluxio retired;
+  `alluxio-*` containers deleted from Helm; 7 days zero incidents.
+- **Dependencies.** Phase 5 done.
+- **Risks.** Rep-3's file-rules ACL surface breaks tenant isolation on
+  Shelf if IRSA role mapping has drift; pre-test with rep-3 canary.
+- **Rollback.** Per-replica rollback only — one replica can fall back
+  to Alluxio without affecting others (requires Alluxio hot-standby per
+  replica during Phase 6).
+
+### Phase 7 — OSS launch (3-4 weeks)
+
+- **Entry criterion.** Phase 6 done; all four replicas on Shelf for 14
+  consecutive days.
+- **Deliverables.** (1) Public repo (`github.com/penpencil-oss/shelf`
+  or similar — see §8). (2) Apache 2.0 license, CLA, codeowners,
+  security policy, CONTRIBUTING.md, CODE_OF_CONDUCT.md. (3) MkDocs
+  site with quick-start, runbook, benchmarks, ADR index. (4) One
+  reproducible benchmark: 7-day `trino_logs` replay (NOT TPC-DS in v1 —
+  that's v1.1 content). (5) Launch blog post: "Why we replaced
+  Alluxio: a row-group-granular, plan-aware, open-source cache for
+  Trino". (6) HN + Discord + issue-triage rota.
+- **Success gate.** Repo public; blog post published; first external PR
+  or issue responded to within 48 h.
+- **Dependencies.** Phase 6 done.
+- **Risks.** "Yet another cache" fatigue. Lead with *measured*
+  numbers, not claims.
+- **Rollback.** Archive repo (unlikely; OSS isn't production).
+
+### Phase 8 — Approximate in-cache indexes (4-6 weeks, **parallel with Phase 7 only if 4+ engineers**)
+
+- **Entry criterion.** Phase 7 done **or** team expands to 4+
+  engineers.
+- **Deliverables.** (1) Parquet bloom-filter recommender (trainer-side,
+  §7.4.1) — as an **ops playbook**, not new Shelf code. (2) Side-built
+  blooms in `shelfd` with `ShelfFilterService` gRPC (§7.4.2) — this is
+  the only new Shelf code in Phase 8. (3) Z-order / sort-order
+  detection in control plane (§7.4.3).
+- **Success gate.** Selective-equality benchmark: scanned-bytes cut
+  ≥ 60 % on top 20 `WHERE col = literal` queries.
+- **Dependencies.** Phase 7 or expanded team.
+- **Risks.** Scope creep into "index engine" territory (blueprint
+  explicitly calls this out in §7.4.4).
+- **Rollback.** `ShelfFilterService` disabled via config flag; reader
+  falls back to standard path.
+
+### Phase 9 — MV-aware caching (3 weeks, **parallel with Phase 7 only if 4+ engineers**)
+
+- **Entry criterion.** Phase 7 done or team expands. Trino 468+ MV
+  support live in production.
+- **Deliverables.** (1) MV recommender in trainer. (2) Shelf pins MV
+  files in DRAM hot pool (no new code — reuses pin list). (3) Control
+  plane tracks MV → base-table graph + per-MV hit rate.
+- **Success gate.** Top 10 dashboard aggregations served from MV + Shelf
+  in < 20 ms p95.
+- **Dependencies.** Trino MV support, Phase 7.
+- **Risks.** MV refresh is an Iceberg / dbt problem, not a cache
+  problem — stay out of it.
+- **Rollback.** Stop pinning MVs; no code to roll back.
+
+### Phase 10 — **REMOVED**
+
+See ADR-0007. Incremental MV refresh is a compute service, not a
+cache. If the org wants it, start a separate project (`shelf-mv-refresh`
+or rename) — Shelf will happily cache whatever files it writes.
+
+### Parallelism table
+
+| Phase | Parallelisable with | Notes |
+|-------|---------------------|-------|
+| −1 | Nothing | Stabilisation precedes everything. |
+| 0 | 0R | 0R is data-platform work, not cache-team. Different owner. |
+| 1 | 0R tail | Should overlap by 1-2 weeks. |
+| 2 | — | Serialised after v0.5 gate. |
+| 3 | — | Serialised. |
+| 4 | — | Serialised (relies on Phase 3 stability). |
+| 5 | — | Serialised (production cutover). |
+| 6 | — | Replica rollouts serial, not parallel (ACL differences). |
+| 7 | 8, 9 *iff* team ≥ 4 engineers | 3-person team must serialise. |
+| 8 | 7, 9 | See above. |
+| 9 | 7, 8 | See above. |
+
+**Total calendar at 3 engineers:** 36-44 weeks end-to-end (Phase −1
+through Phase 7). Phases 8 + 9 push to ~44-52 weeks if kept serial.
+This is ~2× the blueprint's 20-22 weeks and is the honest number.
+
+---
+
+## 4. Phase 0 + Phase 1 tickets
+
+28 tickets total. All sized S / M / L; none XL. Each is actionable on
+day 1 by a single engineer with blueprint + this plan + the repo
+scaffolding in hand.
+
+### Phase 0 (v0.1)
+
+**SHELF-01 — Bootstrap Cargo workspace + CI**
+Set up the monorepo: `shelfd/`, `shelfctl/`, `clients/trino/`,
+`protos/`, `charts/`, `benchmarks/`, `docs/`, `.github/`. Cargo
+workspace for Rust, Maven for Java, Taskfile for top-level commands.
+GitHub Actions: `cargo fmt + clippy + test`, `mvn verify`, Docker
+build, helm lint.
+- [ ] `cargo workspace` compiles empty binaries
+- [ ] `mvn verify` passes in `clients/trino`
+- [ ] CI runs on PR in < 10 min
+- [ ] Apache 2.0 LICENSE, CODEOWNERS, SECURITY.md, CONTRIBUTING.md committed
+- Effort: M. Depends on: — . Owner: rust-engineer-1.
+- Out of scope: Helm templates beyond `lint` placeholder.
+
+**SHELF-02 — `shelfd` Axum HTTP server skeleton**
+Rust binary, Axum router with `/healthz`, `/readyz`, `/metrics` (empty
+Prometheus registry), graceful-shutdown via SIGTERM, structured
+logging via `tracing`. Docker image built from scratch base.
+- [ ] `curl :9090/healthz` returns 200
+- [ ] `curl :9090/readyz` returns 503 until cache init complete
+- [ ] `docker run shelf:0.1` exits cleanly on SIGTERM
+- Effort: S. Depends on: SHELF-01. Owner: rust-engineer-1.
+- Out of scope: cache layer.
+
+**SHELF-03 — Foyer DRAM-only cache integration**
+Wire `foyer::HybridCache` with DRAM-only config, 64 GiB max, SIEVE
+policy (Foyer built-in). Pool ID = content-addressed key as-is. No
+NVMe yet.
+- [ ] `cache.insert(key, bytes)` / `cache.get(key)` unit test passes
+- [ ] DRAM eviction triggers at 90 % capacity
+- [ ] Prometheus metric `shelf_dram_bytes_used` exported
+- Effort: M. Depends on: SHELF-02. Owner: rust-engineer-1.
+- Out of scope: NVMe tier, S3-FIFO, GL-Cache.
+
+**SHELF-04 — Content-addressed key function (Rust + Java)**
+Shared key derivation: `sha256(etag_bytes || le_u64(offset) ||
+le_u64(length))`. Rust lib + Java lib. Golden-vector unit test: a
+frozen set of 20 test inputs produces the same hex output on both
+sides.
+- [ ] `rust test key::roundtrip` green
+- [ ] `mvn test KeyTest#roundtrip` green on same vectors
+- [ ] Both sides reject keys with length = 0
+- [ ] Multipart-ETag note in rustdoc + javadoc: ETag is not cryptographic
+- Effort: S. Depends on: SHELF-01. Owner: rust-engineer-2.
+- Out of scope: key versioning.
+
+**SHELF-05 — S3 origin client in `shelfd` (AWS SDK v2 Rust)**
+`aws-sdk-s3` client with one pooled `HyperClient`, retry-on-503,
+per-request `x-amz-request-id` logging. Expose `get_range(bucket,
+key, offset, length) -> Bytes` as the only entry point.
+- [ ] Against local MinIO, 100 concurrent `get_range` calls finish with
+      zero errors
+- [ ] Request-ID logged to `tracing` on 5xx
+- [ ] IRSA credential provider tested via AWS_ROLE_ARN env
+- Effort: M. Depends on: SHELF-02. Owner: rust-engineer-2.
+- Out of scope: per-prefix pool sharding (Phase 3).
+
+**SHELF-06 — `GET /cache/<key>/<offset>-<len>` with read-through**
+Axum handler: lookup `(key, offset, length)` in Foyer; on miss call S3,
+insert, return. Return `Content-Range` header. No admission decision
+yet (everything admitted).
+- [ ] Hit returns < 5 ms p99 DRAM (E3 result blocking)
+- [ ] Miss returns S3-latency + 1 ms p95
+- [ ] Parallel reads of the same key coalesce (single S3 GET)
+- [ ] Metrics: `shelf_hits_total`, `shelf_misses_total` by pool
+- Effort: M. Depends on: SHELF-03, SHELF-05. Owner: rust-engineer-1.
+- Out of scope: coalescing perfection (can ship single-flight via
+  `moka::Cache` or simple mutex); NVMe.
+
+**SHELF-07 — `HEAD /cache/<key>` and range metadata endpoint**
+For the S3-shim path and for the plugin's pre-flight size check.
+- [ ] Returns S3's Content-Length without a full GET
+- [ ] Caches the HEAD result in a small DRAM LRU (10k entries)
+- Effort: S. Depends on: SHELF-06. Owner: rust-engineer-2.
+- Out of scope: full S3 ListObjects.
+
+**SHELF-08 — Prometheus metrics + OTel traces**
+`prometheus` crate registry exposed at `:9091/metrics`; `tracing-opentelemetry`
+exporting to cluster Tempo. Trace every `GET /cache/*` request end-to-end
+(server + S3 client).
+- [ ] Grafana panel shows `rate(shelf_hits_total[1m])`
+- [ ] Tempo trace for a single request shows 2 spans (Axum + S3 client)
+- Effort: S. Depends on: SHELF-06. Owner: sre-1.
+- Out of scope: custom dashboard layout (ticket SHELF-27).
+
+**SHELF-09 — Dockerfile + base Helm chart (1-pod Deployment)**
+Multi-stage Rust build → distroless base; Helm chart in
+`charts/shelf/` with values.yaml parameterising image tag, resources,
+nodeSelector.
+- [ ] `docker build` image ≤ 80 MB
+- [ ] `helm install --dry-run` clean on default values
+- [ ] Deploys 1-pod Deployment on the rep-2 `alluxio` Karpenter pool
+- Effort: M. Depends on: SHELF-02. Owner: k8s-eng-1.
+- Out of scope: StatefulSet (Phase 1).
+
+**SHELF-10 — `ShelfFileSystem` Java plugin skeleton**
+Java module in `clients/trino/`: extends Trino's `TrinoFileSystem`,
+intercepts `newInputFile(Location)` for a configured prefix list,
+delegates everything else to the parent `S3FileSystem`.
+- [ ] Loads into Trino 480 without classpath errors
+- [ ] `fs.shelf.enabled=false` = pass-through with < 1 % overhead
+- [ ] `fs.shelf.enabled=true` with no Shelf endpoint = fail-open to S3
+      (never throws to Trino)
+- Effort: M. Depends on: SHELF-04. Owner: trino-plugin-eng-1.
+- Out of scope: `EventListener`, circuit breaker (SHELF-11), prefetch.
+
+**SHELF-11 — Circuit-breaker reference Java class + unit tests**
+Per-pod `CircuitBreaker` (closed / open / half-open), failure counter
+`AtomicInteger`, 5-failure threshold, 10 s open window, half-open
+single-probe. Shipped in `clients/trino/` with full unit test suite.
+- [ ] 9+ unit tests: closed→open, open→half-open timer, half-open→open
+      on probe fail, half-open→closed on probe success, concurrent
+      `record_failure` safe, per-pod isolation, failure counter reset
+      on close, half-open-only-one-probe (contention), timer reset on
+      successive failures
+- [ ] State machine diagram in `clients/trino/README.md`
+- Effort: M. Depends on: SHELF-10. Owner: trino-plugin-eng-1.
+- Out of scope: metrics (Phase 1).
+
+**SHELF-12 — Docker-compose integration harness + 10-query smoke test**
+`benchmarks/smoke/`: docker-compose (Trino 480, `shelfd`, MinIO, seed
+Parquet data). A bash script loads 3 Iceberg tables, runs 10 canonical
+queries, asserts each returns expected row count.
+- [ ] `make smoke` green in CI
+- [ ] Smoke log captures `shelf_hits_total > 0` on second run
+- [ ] Local dev setup under 5 min for new engineers
+- Effort: M. Depends on: SHELF-06, SHELF-10. Owner: qa-eng-1.
+- Out of scope: TPC-DS.
+
+**SHELF-13 — Shadow-traffic rollout on rep-2**
+Deploy the 1-pod `shelfd` on rep-2; enable plugin for `replica-2-canary`
+resource group (non-critical notebooks only), 5 % traffic via Trino
+Gateway routing rule.
+- [ ] Grafana: `shelf_hits_total` > 0 after 1 h of traffic
+- [ ] Zero `QueryFailedEvent` attributed to plugin (read logs)
+- [ ] p99 overhead ≤ 5 % on plugin-enabled path (E10)
+- Effort: M. Depends on: SHELF-09, SHELF-13 (self-loop resolved by
+  Gateway team). Owner: sre-1.
+- Out of scope: production routing.
+
+**SHELF-14 — Run E1 + E3 + E10 + E12 experiments**
+Execute the four Phase-0-blocking experiments from §2. Record results
+in `out/experiments/`.
+- [ ] E1: listener log shows what `plan` / `tables` carries
+- [ ] E3: h2 throughput p50 / p95 recorded
+- [ ] E10: plugin overhead numeric
+- [ ] E12: Alluxio 7-day baseline pulled
+- Effort: M (parallelisable across team). Depends on: SHELF-13,
+  separate data pulls. Owner: whole team, sre-1 coordinates.
+- Out of scope: producing answers; only recording.
+
+### Phase 1 (v0.5)
+
+**SHELF-15 — Parquet footer prefetch in plugin**
+Plugin detects `.parquet` path, issues a pre-emptive 64 KiB range-GET
+to Shelf for the footer *before* the Trino reader asks for it. Tunable
+via `shelf.footer.prefetch.kib` (default 64, max 256).
+- [ ] On second query of the same file, Grafana
+      `shelf_footer_hits_ratio` > 90 %
+- [ ] Smoke test validates: first query populates footer; second hits
+- Effort: M. Depends on: SHELF-10. Owner: trino-plugin-eng-1.
+- Out of scope: page index prefetch.
+
+**SHELF-16 — Row-group byte-range key extension**
+Extend content-addressed key to include `rg_ordinal`. Plugin parses
+cached footer's row-group metadata to derive `(offset, length, ordinal)`
+per range-GET. `shelfd` treats row-group keys exactly like any other
+(admission-wise).
+- [ ] Unit test: (file X, rg 2) and (file X, rg 3) produce distinct keys
+- [ ] Integration: replay of one rep-2 query shows ≥ 1 row-group hit
+- Effort: M. Depends on: SHELF-04, SHELF-15. Owner: trino-plugin-eng-1.
+- Out of scope: page-level granularity.
+
+**SHELF-17 — Iceberg manifest caching (pool.metadata, DRAM FrozenHot)**
+Separate Foyer pool: `pool.metadata`, DRAM-only, 5 GiB, FrozenHot
+policy. Manifests + manifest-lists + `metadata.json` routed here;
+row-groups routed to `pool.rowgroup`.
+- [ ] Manifest hit served in < 1 ms p99
+- [ ] Ad-hoc 50 GB scan cannot evict manifests (pool isolation test)
+- Effort: M. Depends on: SHELF-03. Owner: rust-engineer-2.
+- Out of scope: page-index pool (v1.1).
+
+**SHELF-18 — Foyer NVMe hybrid tier with S3-FIFO**
+Add NVMe disk backing to `pool.rowgroup`; Foyer hybrid mode with
+S3-FIFO eviction policy (built-in). 500 GiB per pod. PVC via local
+NVMe StorageClass (preferred) or `ebs-gp3-wffc` (fallback).
+- [ ] `shelfd` survives pod restart with NVMe data preserved
+- [ ] Foyer reports disk_hits distinct from dram_hits in metrics
+- [ ] ADR-0009 recorded
+- Effort: L. Depends on: SHELF-17. Owner: rust-engineer-1.
+- Out of scope: GL-Cache, LightGBM admission.
+
+**SHELF-19 — Rendezvous (HRW) hashing library, Rust + Java**
+`crate: shelf-hashring` + `class: ShelfHashRing` — both compute
+`argmax_node(sha256(key || node_id)) * weight(node)`. Golden-vector
+unit test across both.
+- [ ] Both sides agree on 10k random keys across 7 weighted nodes
+- [ ] Capacity-weighted HRW tested: 2× weight = 2× expected load
+- [ ] ADR-0002 recorded
+- Effort: M. Depends on: SHELF-04. Owner: rust-engineer-2.
+- Out of scope: Raft.
+
+**SHELF-20 — K8s headless service membership resolver**
+Plugin resolves `shelf.shelf.svc.cluster.local` every 5 s (Java DNS
+cache override), builds a `ShelfHashRing` over current pod IPs +
+`/stats` capacity. `shelfd` pods expose `/stats` with `{capacity_bytes,
+used_bytes}` for the weighting.
+- [ ] DNS refresh observed in logs every 5 ± 1 s
+- [ ] Pod rotation (delete 1, wait 30 s, recreate) re-balances cleanly
+      with < 1 % mis-routed requests (E7)
+- Effort: M. Depends on: SHELF-19. Owner: k8s-eng-1.
+- Out of scope: gossip; Raft.
+
+**SHELF-21 — 3-pod StatefulSet Helm chart + NVMe PVC**
+Extend chart: StatefulSet (not Deployment), headless service,
+volumeClaimTemplates for 500 GiB NVMe, pod anti-affinity across AZs.
+Three pods in rep-2's cluster.
+- [ ] `helm upgrade` from Phase 0 Deployment → Phase 1 StatefulSet
+      without data loss (DRAM only at Phase 0, so acceptable)
+- [ ] StatefulSet rollout does not cause traffic drop (HRW + circuit
+      breaker absorb it)
+- Effort: M. Depends on: SHELF-09, SHELF-18. Owner: k8s-eng-1.
+- Out of scope: multi-region.
+
+**SHELF-22 — S3-compat shim (`GetObject` + `HeadObject` only)**
+HTTP server on `:9092` speaking the S3 REST subset: `GetObject` with
+`Range` header, `HeadObject`. Enough for DuckDB, boto3, Polars via
+`endpoint_url=http://shelf:9092`.
+- [ ] `aws s3 cp s3://bucket/key -` works against Shelf endpoint
+- [ ] `duckdb SELECT * FROM read_parquet(...)` via S3 env works
+- [ ] 404 / 403 error parity with real S3
+- Effort: M. Depends on: SHELF-06, SHELF-07. Owner: rust-engineer-2.
+- Out of scope: `ListObjects`, `PutObject`.
+
+**SHELF-23 — `shelfctl` CLI: stats, pin, evict, ring, reload**
+Rust CLI binary. Talks to `shelfd` admin gRPC or HTTP. `stats
+[--granularity=row-group|footer|manifest]`, `pin <table>`,
+`evict <key>`, `ring` (dumps current membership + weights),
+`reload [pin-list|admission-model]`.
+- [ ] Each subcommand has `--help` with 1 example
+- [ ] `reload pin-list` survives SIGHUP race
+- [ ] `ring` on two different pods shows identical output
+- Effort: M. Depends on: SHELF-20. Owner: rust-engineer-1.
+- Out of scope: web UI.
+
+**SHELF-24 — Pin list loader from S3 ConfigMap + SIGHUP**
+`shelfd` on boot reads `s3://config-bucket/shelf/pin_list.json`;
+reloads on SIGHUP or every 15 min. Pin list is a simple JSON:
+`{"pins": [{"table": "cdp.icesheet.silver_offline_event_data_2026",
+"partitions": ["event_region='MP+CG'"]}, ...]}`.
+- [ ] `shelfctl reload pin-list` triggers SIGHUP via admin gRPC
+- [ ] A pinned entry is never evicted under synthetic pressure test
+- [ ] `/stats` reports `pinned_bytes`
+- Effort: M. Depends on: SHELF-03. Owner: rust-engineer-2.
+- Out of scope: per-tenant pin lists (Phase 6).
+
+**SHELF-25 — Size-threshold admission policy**
+Admission: refuse inserts for objects `> 1 GiB` unless in pin list.
+All other objects admitted. Config key `shelf.admission.size_threshold_mib`
+(default 1024) and `shelf.admission.pinned_bypass` (default true).
+- [ ] Unit: 1.5 GiB miss returns data to client but is not inserted
+- [ ] Pin list bypass: pinned 2 GiB file *is* inserted
+- [ ] ADR-0003 recorded
+- Effort: S. Depends on: SHELF-24. Owner: rust-engineer-1.
+- Out of scope: LightGBM.
+
+**SHELF-26 — `trino_logs` replay benchmark harness**
+`benchmarks/trino_logs/`: pull last 7 / 30 days of
+`cdp.trino_logs.trino_queries` for rep-2; for each query, materialise
+its Iceberg manifest; compute (a) scanned bytes at file granularity,
+(b) at row-group granularity given the predicate; simulate hit rate
+under different Foyer configs.
+- [ ] Harness reproduces E5 (median and P90 row-group/file ratio)
+- [ ] `make replay-rep2-7d` runs in ≤ 20 min on a dev pod
+- [ ] Publishable CSV output
+- Effort: L. Depends on: SHELF-06. Owner: data-eng-1.
+- Out of scope: live replay.
+
+**SHELF-27 — Grafana dashboard (insight-first)**
+Single Grafana dashboard UID `shelf-overview`. Four top-row big
+numbers: cumulative hit rate, p95 latency, fallback rate, pod health.
+Second row: per-pool hit rate, NVMe used, DRAM used. Follow
+AGENTS.md's traffic-light conventions.
+- [ ] Dashboard JSON committed to `charts/shelf/grafana/`
+- [ ] Alerting rules for: hit rate < 60 % for 10 m, fallback rate > 5 %
+      for 5 m, any pod unready for 2 m
+- [ ] On-call can diagnose in ≤ 3 clicks per AGENTS.md rubric
+- Effort: M. Depends on: SHELF-08. Owner: sre-1.
+- Out of scope: ML-dashboards.
+
+**SHELF-28 — Chaos drills + v0.5 gate runbook**
+Write + schedule two weekly drills: (a) KEDA-style rotation (kill 50 %
+of rep-2 workers + 1 Shelf pod, run 10 dashboard queries, assert no
+failures); (b) pod-kill on the busiest Shelf pod during live dashboard
+traffic. Runbook in `docs/runbook.md` documents the v0.5 gate
+checklist and the kill-switch decision path.
+- [ ] Both drills have `make` targets and green-in-CI smoke variants
+- [ ] Runbook published; gate-evaluation criteria checkable from
+      Grafana panel
+- [ ] Operator can execute the runbook in ≤ 30 min with no prior Shelf
+      context
+- Effort: L. Depends on: SHELF-21, SHELF-27. Owner: sre-1 + rust-engineer-1.
+- Out of scope: v1+ drills.
+
+**Total:** 28 tickets (SHELF-01 through SHELF-28). Sizing: 4 S, 18 M,
+6 L, 0 XL. At 3 engineers, ~10 weeks of calendar work for phases 0 + 1
+plus the v0.5 gate observation window — matches the 36-44 week total.
+
+---
+
+## 5. Risk register
+
+Ordered by Likelihood × Impact. L/M/H scale. Trigger signal is
+something observable, not a feeling.
+
+| # | Risk | Likelihood | Impact | Trigger signal | Mitigation | Owner |
+|---|------|------------|--------|----------------|------------|-------|
+| R-01 | v0.5 fails to beat the stabilised Alluxio baseline | H | H | After 7-day observation on rep-2: cumulative hit rate < 71 % OR `GOLD_DBT` ok-rate < 99.9 % OR p95 > 120 % of Alluxio | Stop the project; write an honest "Shelf is the wrong answer" postmortem; invest in Alluxio. | eng-lead |
+| R-02 | Trino SPI churn breaks plugin between versions | H | H | Grafana: plugin-class-load errors on Trino version bump | Pin to Trino 480 LTS for v1; contract tests run nightly against Trino main nightly | trino-plugin-eng-1 |
+| R-03 | Cold-cache thundering herd hits S3 per-prefix rate limits | M | H | CloudWatch: `503 SlowDown` > 0 during warm-up; cache miss p95 > 2 s | Per-prefix concurrency limiter on fallback path (Phase 3 deliverable); pre-warm critical pins on pod start | rust-engineer-2 |
+| R-04 | Team has never shipped a Rust service | H | M | Phase 0 end-date slip > 50 %; Foyer or Tonic issues blocking | Pair-programming week 1; Rust mentor from Foyer community; keep Phase 0 tiny (v0.1 is hostable in ≤ 2 Rust engineers for 2 weeks) | eng-lead |
+| R-05 | `QueryCreatedEvent` doesn't carry enough plan signal (E1 fails) | M | H | E1 log shows empty `predicate` / missing `tables` on > 50 % of queries | Fall back to Phase 2b-signal-1 only (plugin-observation); ship Phase 2 with no listener | trino-plugin-eng-1 |
+| R-06 | Foyer disk tier corrupts NVMe data on pod crash | M | H | `shelfd` startup reads return checksum mismatch > 0.01 % | Content-addressed keys mean a bad chunk is rejected on read; trigger re-fetch. Run a 24-h power-kill test in Phase 3 | rust-engineer-1 |
+| R-07 | HRW + DNS cache creates hit-rate wobble during KEDA churn | M | M | E7 chaos drill: > 5 % mis-routed / minute for > 2 min | Tune DNS TTL down to 5 s; add circuit-breaker short-circuit on unknown pod | k8s-eng-1 |
+| R-08 | ACL heterogeneity (rep-2 Ranger, rep-3 file rules.json) delays Phase 6 | M | M | Rep-3 canary fails tenant isolation integration test | Abstract plugin auth at IRSA-role boundary; write canary per replica; stage rep-3 last | trino-plugin-eng-1 |
+| R-09 | Plugin blocks coordinator on prefetch RPC | M | H | Coordinator thread dump shows threads blocked in `ShelfPrefetchListener.onQueryCreated` > 10 ms | Hard 10 ms deadline + fire-and-forget; circuit breaker also wraps listener | trino-plugin-eng-1 |
+| R-10 | Multipart S3 ETag assumption leaks into docs as "content hash" | H | L | OSS launch blog draft uses phrase "cryptographic content hash" | Code review checklist + javadoc/rustdoc on key function; BLUEPRINT-DIFF covers it | rust-engineer-2 |
+| R-11 | Pin list edit corrupts ops (empty or bad syntax) | L | H | `shelfctl reload pin-list` returns error; `pinned_bytes` drops to 0 | JSON schema validation in `shelfctl reload`; S3 versioning; rollback via previous object version | sre-1 |
+| R-12 | Shelf p99.9 tail latency worse than Alluxio under NVMe pressure | M | M | p99.9 > 50 ms during chaos drill | `tokio`-blocking-call lint; dedicated Foyer write threadpool; measure E-related (scientist open q 7) | rust-engineer-1 |
+| R-13 | `cdp.trino_logs.trino_queries` schema change breaks trainer | M | M | Nightly Airflow job fails after 10 d of green runs | Schema-version tag in trainer; fall back to empty pin list (same as v0.1 behaviour) | data-eng-1 |
+| R-14 | Foyer crate upstream API churn | M | M | `cargo update` breaks build on minor bump | Pin Foyer version exact; quarterly bump cadence with regression tests | rust-engineer-1 |
+| R-15 | "Yet another cache" reception kills OSS momentum | M | M | Launch post: <100 HN points; <10 GitHub stars in week 1 | Lead with measured numbers vs Alluxio baseline, not claims; don't compare to Warp Speed | eng-lead |
+| R-16 | openraft is quietly re-introduced by a future engineer "for consistency" | M | M | PR adds `openraft = ` to Cargo.toml | ADR-0001 reviewed in codeowners; compiler error if `openraft` added without ADR update | eng-lead |
+| R-17 | Trino replica coordinator pods deploy with mismatched plugin versions | M | M | `QueryCreatedEvent` not firing on rep-0 but firing on rep-2; Grafana panel shows per-replica prefetch rate | Helm plugin version as a required value; ArgoCD drift alert | sre-1 |
+| R-18 | Alluxio decommissioned too early (Phase 5) with no rollback path | L | H | Rep-2 Shelf degraded and Alluxio no longer deployable | Keep `alluxio-values.yaml` in repo; mandatory "re-deploy Alluxio" drill before decommission | sre-1 |
+
+Likelihood × Impact ordering: R-01 / R-02 / R-03 / R-09 are the
+immediate priorities; R-04 / R-05 / R-18 tied next; R-08 / R-10 /
+R-15 tail.
+
+---
+
+## 6. Success metrics and SLOs
+
+One sub-section per phase success gate.
+
+### 6.1 Phase −1 — Stabilisation
+
+- **Primary metric.** `fs.cache` cumulative hit rate, measured from
+  Trino `operator_summaries` (scan operator cacheHitPct), per replica.
+- **Measurement.** 5-day rolling average from Grafana panel
+  `trino-fs-cache-hitrate` (existing).
+- **Target.** ≥ 45 %.
+- **Rollback threshold.** Drops below 20 % for 1 day → revert hostPath
+  migration on the affected replica.
+- **Guardrails.** `QueryFailedEvent` rate not > 1.2× baseline; `GOLD_DBT`
+  ok-rate ≥ 99.9 %.
+- **Dashboard.** Grafana `trino-stability-overview` (existing).
+
+### 6.2 Phase 0 — v0.1 PoC
+
+- **Primary metric.** Plugin overhead — p99(plugin-enabled-read) /
+  p99(plugin-disabled-read) for non-cached reads on shadow traffic.
+- **Measurement.** 1-hour shadow traffic on rep-2 canary; Trino
+  `QueryCompletedEvent.getStatistics().getScanTime()`, bucketed by
+  `fs.shelf.enabled`.
+- **Target.** ≤ 1.05×.
+- **Rollback threshold.** ≥ 1.15× for 1 h → disable plugin.
+- **Guardrails.** `shelf_pod_cpu` < 50 % of limit; memory stable; zero
+  Shelf-attributed query failures.
+- **Dashboard.** Grafana `shelf-overview` (new, SHELF-27).
+
+### 6.3 Phase 0R — Redis-Gateway result cache
+
+- **Primary metric.** BI-user cache hit rate.
+- **Measurement.** Gateway plugin exports `result_cache_hits_total /
+  result_cache_misses_total`.
+- **Target.** ≥ 60 % after 5 days.
+- **Rollback threshold.** < 20 % or elevated HMS load from watcher.
+- **Guardrails.** Gateway p95 latency ≤ baseline.
+- **Dashboard.** Grafana `trino-gateway` (existing).
+
+### 6.4 Phase 1 — v0.5 gate on rep-2
+
+This is the kill-switch gate.
+
+- **Primary metric 1.** Cumulative cache hit rate (all pools combined)
+  on rep-2 over rolling 7 days.
+- **Measurement.** `shelf_hits_total / (shelf_hits_total +
+  shelf_misses_total)` from Prometheus, 7-day window.
+- **Target.** ≥ 71 % (Alluxio baseline from E12).
+- **Rollback threshold.** < 60 % for any 24-h window → revert to
+  Alluxio.
+- **Primary metric 2.** `GOLD_DBT` ok-rate.
+- **Measurement.** Airflow DAG SLA from dbt job catalog.
+- **Target.** ≥ 99.9 %.
+- **Primary metric 3.** Rep-2 p95 query latency.
+- **Measurement.** Trino `QueryCompletedEvent` p95 over 7 days.
+- **Target.** ≤ 120 % of Alluxio baseline.
+- **Primary metric 4.** Shelf-attributed pages.
+- **Target.** Zero in 7 days.
+- **Primary metric 5.** Oncall surface (pages + runbook lookups + Slack
+  incidents).
+- **Target.** ≤ 50 % of Alluxio's 7-day rolling rate.
+- **Dashboard.** Grafana `shelf-v05-gate` (new).
+
+### 6.5 Phase 2 — Plan-aware prefetch
+
+- **Primary metric.** TTFQ (time-to-first-query) p95 after 10×
+  worker scale-up.
+- **Measurement.** Synthetic benchmark: scale replica-2 pool from 2
+  → 20, issue 20 canonical dashboard queries, record first-result
+  latency.
+- **Target.** ≤ 3 s p95.
+- **Rollback threshold.** Prefetch listener blocking coordinator > 10
+  ms median → `shelf.prefetch.enabled=false`.
+- **Guardrails.** Prefetch queue depth ≤ 1024 bounded.
+- **Dashboard.** Grafana `shelf-prefetch`.
+
+### 6.6 Phase 3-4-5
+
+- **Chaos drills:** pass/fail weekly runs documented.
+- **NVMe admission bytes:** cut ≥ 40 % vs v0.5 (Phase 4).
+- **Rep-2 Alluxio retirement:** `alluxio-worker` replicas = 0 for 7
+  consecutive days (Phase 5).
+
+### 6.7 Phase 6 — Full rollout
+
+- **Per-replica success gate:** same v0.5 gate numbers, per replica,
+  for 7 consecutive days.
+- **Org-wide metric:** Alluxio pods = 0 across all 4 replicas.
+
+### 6.8 Phase 7 — OSS launch
+
+- **Primary metric.** Blog post published, repo public, first external
+  response within 48 h.
+- **Guardrails.** No regression in production Shelf SLOs during launch
+  week (no "launch-driven outage").
+
+SLO contracts go into `contracts/slos.md` on the cycle this diff lands.
+
+---
+
+## 7. OSS readiness + launch plan
+
+### 7.1 Weeks 1-4 pre-OSS readiness checklist
+
+Do this during Phase 5 / Phase 6 so it's ready for Phase 7.
+
+- [ ] Apache 2.0 LICENSE in repo root
+- [ ] CLA (individual + corporate) chosen and bot configured (CLA
+      assistant / EasyCLA)
+- [ ] `CODEOWNERS` with current team
+- [ ] `SECURITY.md`: private vulnerability disclosure process, PGP key,
+      24 h acknowledgement SLA
+- [ ] `CONTRIBUTING.md`: how to run tests, submit a PR, code-of-conduct
+      link
+- [ ] `CODE_OF_CONDUCT.md` (Contributor Covenant v2.1)
+- [ ] CI: `cargo fmt + clippy + test + audit + deny`, `mvn verify`,
+      `helm lint`, `make integration` (docker-compose smoke from
+      SHELF-12)
+- [ ] Release automation: `cargo-release` + `release-please` PR-based
+      version bumps; signed Docker images (`cosign`); Helm chart
+      publishing via OCI
+- [ ] Test matrix: Trino 473, 476, 480 (current LTS); Rust stable on
+      `ubuntu-22.04` + `al2023`; nightly test against Trino `main`
+- [ ] Docs: MkDocs Material site at `docs.shelf.io` (or subpath); ADR
+      index auto-generated from `docs/adr/`
+- [ ] Quick-start: `kind`-based local cluster in ≤ 5 minutes
+- [ ] Support matrix page: which Iceberg / Trino / Foyer versions
+- [ ] Benchmark harness (SHELF-26) reproducible on a fresh EKS cluster
+      in ≤ 1 h
+- [ ] Trademark check for name "Shelf" (there are several; own the
+      narrow scope "Iceberg-native cache for Trino")
+- [ ] Repository home chosen: `penpencil-oss/shelf` preferred (see §8)
+
+### 7.2 Launch week runbook
+
+- **T−14 days.** Blog post draft circulated to 3 technical reviewers
+  (one not on the project). HN post scheduled via drafts queue.
+- **T−7 days.** Repo freeze; docs review; final benchmark rerun.
+- **T−1 day.** Public-private mirror sanity-check; CLA bot green on
+  test PR.
+- **T = launch day.** Post at 10:00 ET Tuesday (empirically the best
+  HN window). Two people covering issue triage for first 12 h (split
+  ET/IST rotation). Discord / Slack on.
+- **T+2 days.** First community office hour (30 min) scheduled on
+  public calendar.
+- **T+7 days.** Retrospective blog post: "What we learned from day 1-7
+  of Shelf OSS" — not marketing; an honest "which issues people hit
+  first".
+
+**Response SLA:** External P0 bug → ack ≤ 24 h, fix ≤ 7 days. P1 →
+ack ≤ 48 h. P2+ → ack ≤ 5 days.
+
+### 7.3 First 90 days post-launch commitments
+
+- Issue-triage rota: 1 engineer on Shelf issues for 1 week, rotating
+  through the 3-person team. Ticket target: 0 stale issues (>14 days
+  without response).
+- Monthly roadmap update in `docs/roadmap.md`.
+- Community office hours: every other Thursday 30 min via public
+  Google Meet. Recordings posted.
+- Bug SLA as §7.2.
+- No new major features for 60 days. v1.x patches only.
+- Post-90-day: evaluate whether to pursue Apache Incubator track
+  (blueprint §11 item 4).
+
+### 7.4 Governance
+
+- BDFL (the original author — Aamir per blueprint) for first 12 months
+  post-launch.
+- Transition to informal PMC after ≥ 10 external contributors or 12
+  months, whichever is later.
+- Apache donation decision: defer 12 months. Initial Incubator
+  conversation can start at month 6 if 5+ external contributors.
+
+---
+
+## 8. Open items not yet decided
+
+The three agents (scientist, critical thinker, planner) agree we still
+need human decisions on the following:
+
+1. **Project name.** Blueprint proposes "Shelf". Alternatives: Tundra,
+   Reef, Ledge, Gale. Decision needed before Phase 7. Forum: eng
+   all-hands. By: 2026-05-15.
+2. **Repo home.** `github.com/penpencil-services/shelf` vs
+   `github.com/penpencil-oss/shelf` vs new GitHub org. Decision needed
+   before Phase 7. Forum: eng-leadership + legal. By: 2026-05-30.
+3. **Spark client in v1 or Trino-only?** COMPARISON says Trino-only for
+   focus; scientist question #12 agrees. Re-decide at end of Phase 5.
+   By: Phase 5 retrospective. Forum: eng all-hands.
+4. **Apache donation — year 1 or self-govern first?** Blueprint §11.4
+   asks this; critic defers. Forum: eng-leadership. By: month 6 post-launch.
+5. **Whether to run Phases 8 + 9 in parallel with Phase 7.** Depends on
+   team size at the time. Decision point: end of Phase 6. Forum:
+   eng-lead + staff engineer.
+6. **Trino TIP for a focused `splitCompleted` replacement.** We do not
+   wait for it (ADR-0005) but we should still file the TIP. Owner:
+   trino-plugin-eng-1. By: start of Phase 2.
+7. **Blog post co-authors.** Blueprint §11 asks this. By: start of Phase 7.
+   Forum: eng all-hands.
+8. **Arrow Flight v1.x go/no-go.** Depends on E8 numeric result. By:
+   end of Phase 5.
+9. **LightGBM admission v1.x go/no-go.** Depends on Phase 4 replay
+   benchmark (≥ 5 pp gap threshold). By: Phase 4 exit.
+
+---
+
+## 9. Appendix — links
+
+- `BLUEPRINT-DIFF.md` — edits to apply to `shelf/BLUEPRINT.md` (v0.3 → v0.4).
+- `adr/0001-no-embedded-raft.md` — drop openraft, use K8s headless service + ConfigMap.
+- `adr/0002-hrw-hashing-over-vnode-ring.md` — drop 2000-vnode consistent hash.
+- `adr/0003-size-threshold-admission-over-onnx-mlp.md` — drop ONNX MLP in v1.
+- `adr/0004-http2-only-in-v1.md` — drop Arrow Flight in v1.
+- `adr/0005-drop-splitcompleted-event-path.md` — plugin-observation only (PR #26436 aware).
+- `adr/0006-drop-shelf-result-cache-in-v1.md` — Redis Gateway from COMPARISON owns result caching.
+- `adr/0007-drop-phase-10-mv-refresh.md` — wrong project; compute service, not cache.
+- `adr/0008-two-pools-in-v1.md` — metadata + bulk; defer 4-pool layout.
+- `adr/0009-foyer-s3-fifo-over-gl-cache-custom.md` — use Foyer built-in; defer GL-Cache.
+- `adr/0010-v05-gate-beat-alluxio-on-rep2.md` — kill-switch; 7 consecutive days.
+
+_End of plan._
