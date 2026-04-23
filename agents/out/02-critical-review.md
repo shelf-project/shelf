@@ -728,7 +728,7 @@ explicit note that Foyer ships S3-FIFO + SIEVE as pluggable policies.
 Rendezvous hashing as the actual primitive, per scientist §2.4.
 - **§5 principle 3** — reword per §5 above.
 - **§5** — add principles 8-12 per §5 above.
-- **§6.1 `pool.rowgroup*`* — replace "GL-Cache-style group-level
+- **§6.1 `pool.rowgroup`** — replace "GL-Cache-style group-level
 eviction" with "S3-FIFO (Foyer built-in)". GL-Cache becomes a v1.1
 upgrade path.
 - **§6.1 admission policy** — replace "consult the learned admission

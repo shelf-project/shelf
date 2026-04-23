@@ -1,28 +1,30 @@
 # Shelf — a smart, Iceberg-native cache for Trino
 
 > Codename: **Shelf** (iceberg shelf + "on the shelf"). Happy to rename.
-> Status: design blueprint v0.3. Meant to be iterated on with the team.
+> Status: design blueprint v0.4. Meant to be iterated on with the team.
 > License intent: **Apache 2.0**. Public from day one.
 >
-> **v0.3 changes** (on top of v0.2): added § 7.4 *Approximate in-cache
-> indexes* (Parquet bloom recommender, side-built blooms in DRAM,
-> z-order awareness) to close the selective-point-lookup gap vs
-> Warp Speed, and § 7.5 *MV-aware caching* + Phase 10 *Incremental MV
-> refresh on snapshot delta* to close the dashboard-aggregation gap
-> vs Firebolt. Added Phases 8, 9, 10 to the roadmap accordingly;
-> total timeline now ≈ 9-10 months to Phase 10 (phases 8-10 can run
-> in parallel with the OSS launch).
->
-> **v0.2 changes**: (1) plan-aware prefetch rescoped to be honest about
-> what `QueryCreatedEvent` actually exposes — file-level at plan time,
-> row-group-level via plugin observation + `SplitCompletedEvent`
-> learning; (2) ONNX admission latency corrected to 10-50 µs (was
-> 1 µs, which was 10-50× optimistic); (3) data plane split into HTTP
-> (< 1 MB: manifests, footers) and Arrow Flight (≥ 1 MB: row groups)
-> to avoid IPC framing overhead on small objects; (4) `shelf-result-cache`
-> explicitly separated from `shelfd` as a companion binary;
-> (5) explicit client-side retry + circuit-breaker state machine for
-> the Trino plugin to handle spot churn gracefully.
+> **v0.4 changes** (on top of v0.3):
+> - SplitCompletedEvent path removed — Trino PR #26436 (merged
+>   2025-08-19) deleted `EventListener#splitCompleted`. Phase 2b now
+>   relies on plugin-side observation plus `QueryCompletedEvent`
+>   operator summaries.
+> - `openraft` dropped; cluster membership comes from the K8s
+>   headless service, and pin list + tenant quotas live in a
+>   versioned S3-backed ConfigMap.
+> - ONNX MLP admission dropped for v1; v1 ships size-threshold
+>   admission + a pin list derived from `trino_logs`. LightGBM (not
+>   ONNX) is an optional v1.x upgrade gated on a measured hit-rate gap.
+> - Arrow Flight deferred to v1.x; v1 uses HTTP/2 range-GET for all
+>   payload sizes.
+> - `shelf-result-cache` dropped from v1 — the Redis + Trino-Gateway
+>   result cache in `COMPARISON.md` Phase 0 owns result caching.
+> - Phase 10 (incremental MV refresh) dropped entirely; it is a
+>   compute service, not a cache (see ADR-0007).
+> - Timeline re-estimated to ≈ 36-44 calendar weeks for a 3-person
+>   team.
+> - v0.5 gate added: Shelf must beat the stabilised Alluxio 2.9.5
+>   baseline on rep-2 for 7 consecutive days before rollout widens.
 
 ---
 
@@ -51,21 +53,22 @@ Starburst Warp Speed) share three limitations that we hit in production every da
 | Columnar-range granularity (Iceberg manifest / Parquet footer / row group byte-range)                                                     | 10-100× better cache density than file-block caches                                     |
 | Plan-aware **push prefetch** from Trino coordinator → cache (file-level at plan time, row-group-level via plugin observation — see § 7.2) | Eliminates cold-miss tax, unique to engines with a real planner                         |
 | Content-addressed keys (hash of the S3 ETag + byte range), snapshot-tagged for Iceberg pointers                                           | Dedup across Trino replicas, natural invalidation on Iceberg commits                    |
-| Learned admission (trained on `trino_logs`) + SIEVE eviction                                                                              | Best-in-class hit rate, O(1) hit-path cost                                              |
-| Rust cache plane; **HTTP for < 1 MB, Arrow Flight for ≥ 1 MB** data plane; embedded Raft control                                          | No JVM GC, zero-copy on bulk, no IPC framing tax on small objects                       |
+| Size-threshold admission + pin list from `trino_logs`; SIEVE (DRAM) + S3-FIFO (NVMe) via Foyer built-ins                                  | Best-in-class hit rate, O(1) hit-path cost                                              |
+| Rust cache plane; HTTP/2 range-GET for all payload sizes in v1; no embedded consensus                                                     | No JVM GC, simple operator surface, no IPC framing tax on small objects                 |
+| Rendezvous (HRW) hashing over K8s headless service membership; pin list + tenant quotas in S3-backed ConfigMap                            | No ring data structure, no consensus, membership tracked by K8s itself                  |
 | Shared across all 4 Trino replicas                                                                                                        | One warm cache instead of four cold ones                                                |
 | Decoupled from compute (separate StatefulSet with NVMe)                                                                                   | Survives KEDA spot churn, unlike fs.cache                                               |
 | Plugin is fail-open: every Shelf error becomes a transparent fall-through to S3                                                           | Trino never sees a Shelf-specific error, even during spot churn                         |
-| Approximate in-cache indexes: Parquet bloom-filter recommender, side-built blooms in DRAM, z-order / sort-order awareness (§ 7.4)         | Closes most of Warp Speed's selective-filter advantage without building an index engine |
 | MV-aware caching + incremental MV refresh on Iceberg snapshot delta (§ 7.5, Phase 10)                                                     | Matches Firebolt's aggregating indexes for dashboard queries using OSS components only  |
 
 
-Target: **p50 scan latency ≤ 1.2× direct S3 on miss, ≥ 20× direct S3 on hit**, at
-70-85% hit rate on our workload, with one operator on call instead of a team.
-On the query patterns where commercial caches traditionally win — selective
-equality predicates (Warp Speed) and dashboard aggregations (Firebolt) — Shelf
-closes the gap via § 7.4 and § 7.5 rather than feature-matching with new
-index engines.
+Target: **hit rate comparable to the stabilised Alluxio 2.9.5 baseline
+(currently 71% on rep-2) at substantially lower operator surface; p50
+scan latency within 20% of Alluxio on hit; fail-open to direct S3 on
+miss or Shelf fault**. On the query patterns where commercial caches
+traditionally win — selective equality predicates (Warp Speed) and
+dashboard aggregations (Firebolt) — Shelf closes the gap via § 7.4
+and § 7.5 rather than feature-matching with new index engines.
 
 ### Non-negotiable invariants
 
@@ -112,6 +115,9 @@ rate** — pods die before the cache warms.
   - Metadata sync failures on Iceberg subpaths, benign but noisy.
   - `TempBlockMeta not found` races in zero-copy gRPC reader.
   - Redirect mode is EE-only, so reads fan through the proxy.
+- Alluxio on rep-2 is now stable (2026-04-23, post `UfsIOManager=256`
+  + 3-master HA migration) at ≈ 71% hit rate. Shelf's v0.5 must beat
+  this baseline; see §12.
 - 3 catalogs share the same buckets (`cdp`, `bronze`, `cdp_curated` on
 `pw-data-cdp-prod-gold-layer` and `pw-data-cdp-prod-silver-layer`).
 - `cdp.trino_logs.trino_queries` is a goldmine: every query's SQL, plan,
@@ -173,9 +179,17 @@ never change (immutable files).
 
 ### 4.2 Prefetch and admission
 
-- **PACMan (NSDI '12, Ananthanarayanan et al.)** — coordinated cache
-admission beats per-node greedy admission for parallel jobs. We apply the
-coordinator-coordinated variant.
+- **PACMan (NSDI '12, Ananthanarayanan et al.)** — coordinated
+eviction and placement under an *all-or-nothing* parallel-job
+objective (a parallel job is only as fast as its slowest task, so
+evicting one input of a hot job is disproportionately costly). We
+borrow this framing for cross-pod eviction coordination, not for
+admission.
+- **Pythia (EDBT '25)** — plan-aware prefetching for OLAP workloads,
+validating that query plans are a strong signal for what to warm.
+- **GrASP (preprint, 2025)** — graph-based access-sketch prefetch
+for analytical caches; a modern counterpart to PACMan-style
+coordination on lakehouse workloads.
 - **LRB — Learning Relaxed Belady (NSDI '20, Song et al.)** — learn the
 next-access-time distribution and evict the item least likely to be used
 within a time horizon. We use LRB-style features (frequency, recency,
@@ -183,9 +197,11 @@ size) at the admission step for large scans, not eviction (too expensive).
 
 ### 4.3 Storage engine
 
-- **CacheLib (SOSP '20, Berg et al.)** — battle-tested DRAM+NVMe hybrid,
+- **CacheLib (OSDI '20, Berg et al.)** — battle-tested DRAM+NVMe hybrid,
 powers 70+ Meta services. Apache 2.0. We use the Rust port **Foyer**
-(RisingWave Labs) for easier deployment and Rust ecosystem fit.
+(RisingWave Labs) for easier deployment and Rust ecosystem fit. Foyer
+ships S3-FIFO (SOSP '23) and SIEVE (NSDI '24) as pluggable policies;
+we use them as-is rather than implementing custom policies.
 
 ### 4.4 Distributed topology
 
@@ -194,6 +210,11 @@ clients talk directly to the owning worker in 1 hop. We borrow this idea
 but ship it in Rust + Raft for the ring membership.
 - **Ceph CRUSH** — deterministic placement under heterogeneous capacity.
 Inspiration for our capacity-weighted ring.
+
+DORA is not peer-reviewed; the underlying primitive is the well-worn
+industrial pattern of consistent-hash / rendezvous (HRW) hashing +
+capacity weighting (Dynamo, Cassandra, Riak, Alluxio DORA). We cite
+it as convention, not as a novel contribution.
 
 ### 4.5 Columnar-aware caching
 
@@ -212,21 +233,32 @@ reads.
 2. **Granularity must match how Trino actually reads.** That means caching at
   four levels: Iceberg metadata JSON / manifest list / manifests / row-group
     byte ranges. Never cache a whole Parquet file just to read 2 row groups.
-3. **The engine pushes intent; the cache acts on it.** The coordinator knows
-  which files will be read before the workers do. That signal is free and
-    nobody else uses it.
+3. **The cache exploits whatever plan and observation signal the
+  engine exposes, never blocks the engine waiting for any signal.**
+    The coordinator knows which files will be read before the workers
+    do; the plugin also observes every range-GET. Both signals are
+    free; neither is on the query's critical path.
 4. **Immutable by construction.** Iceberg data files never change; cache keys
   are content-addressed (`sha256(etag + byte_range)`). No invalidation
     required, ever. TTL only for garbage collection of deleted files.
-5. **Open first, and genuinely multi-engine.** The wire protocol must be an
-  open standard (Arrow Flight / S3 API emulation) so Spark, DuckDB, Ray, and
-    Python can reuse the cache. No Trino-specific lock-in in the cache plane.
+5. **Wire protocol must be open enough that a non-Trino engine can
+  adopt Shelf without Trino cooperation.** Shipping non-Trino clients
+    in v1 is explicitly out of scope.
 6. **Simpler to operate than what it replaces.** If Shelf takes more operator
   time than Alluxio 2.x, it's a failed project. One binary, one dashboard,
     one runbook.
 7. **Degrade transparently.** Any cache miss, error, timeout, or partition
   MUST fall through to direct S3 without Trino noticing. Pool saturation
     must never block a query.
+8. **Every RPC has a budget.** Every Shelf client call carries a hard
+  timeout and falls open on expiry.
+9. **No unbounded queue.** Prefetch queue and training batch queue
+  both have explicit upper bounds and documented overflow behaviour.
+10. **Every published metric has an SLO.**
+11. **Every config key is reloadable at runtime OR documented as
+    restart-required.**
+12. **No new consensus systems without a failure case that demands
+    them.**
 
 ---
 
@@ -276,20 +308,17 @@ reads.
 
 Single Rust binary. Each node runs:
 
-- **Router** — consistent hash ring over object-key-hash. 2 000 virtual
-nodes per physical node, capacity-weighted (NVMe size). Ring membership
-stored in Raft; any node can route.
+- **Router** — Rendezvous (HRW) hashing over K8s headless-service
+membership; capacity weights read from each pod's `/stats` endpoint;
+no ring data structure, no vnode count.
 - **Storage** — `[foyer](https://github.com/foyer-rs/foyer)` hybrid cache
-with **per-pool byte quotas** (inspired by Firebolt's engine-cache pools):
-  - `pool.metadata` — Iceberg `metadata.json`, manifest lists, manifests.
-  Always DRAM. Quota: 5 % of DRAM. FrozenHot (immutable, never evicted
-  until file deletion).
-  - `pool.footer` — Parquet footer + page index. Always DRAM. Quota:
-  10 % of DRAM. FrozenHot.
-  - `pool.rowgroup_hot` — DRAM row groups for dashboard tables.
-  Quota: balance of DRAM. SIEVE eviction.
-  - `pool.rowgroup` — NVMe row groups. Bulk of storage. GL-Cache-style
-  group-level eviction.
+with **per-pool byte quotas**. **Two pools for v1:**
+  - `pool.metadata` — manifests + footers + page indexes, DRAM only,
+    FrozenHot, 5 % of DRAM quota.
+  - `pool.rowgroup` — DRAM+NVMe hybrid via Foyer, S3-FIFO (Foyer
+    built-in). Note: separating `rowgroup_hot` is deferred to v1.1
+    pending measurement.
+
   **Why separate pools:** a 50 GB ad-hoc scan must not be able to evict
   the 500 MB of hot Iceberg manifests that every dashboard needs. Firebolt
   validated this separation; we copy it.
@@ -300,15 +329,18 @@ S3 prefix to isolate noisy neighbours.
 GETs with byte-range headers for exactly the row groups the planner
 asked for.
 - **Admission policy** — by default SIEVE. On a miss, if the object is
-larger than `admission.size_threshold` (e.g. 8 MB), consult the learned
-admission model (ONNX file shipped by the trainer). Model output is
-P(next_access_within_1h); cache only if ≥ 0.3.
+larger than `admission.size_threshold` (default 1 GiB), refuse
+admission unless the key matches a pin-list entry. A learned model
+(LightGBM, not ONNX) is a v1.x upgrade path conditional on a
+measured ≥ 5 pp hit-rate gap vs size-threshold alone; see §7.3.
 - **Metrics** — Prometheus endpoint at `:9090/metrics`; per-tenant,
 per-table, per-granularity counters.
 - **Control RPC** — gRPC: `Read`, `ReadBatch`, `Prefetch`, `Evict`, `Pin`,
-`Unpin`, `Stats`.
-- **Data RPC** — Arrow Flight; client `DoGet` the byte range, server
-streams zero-copy from DRAM/NVMe.
+`Unpin`, `Stats`. `Evict` and `Pin` carry a per-tenant deadline and
+bounded queue depth.
+- **Data RPC** — HTTP/2 range-GET; client issues a ranged GET over a
+pooled connection, server streams bytes from DRAM/NVMe. Arrow Flight
+moved to v1.x.
 
 ### 6.2 Client plugin (`shelf-trino-plugin`)
 
@@ -316,11 +348,10 @@ Two artifacts, both JARs loaded into Trino:
 
 1. `**ShelfFileSystem`** — implements Trino's `TrinoFileSystem` SPI.
   Intercepts reads for configured S3 prefixes. Translates them to
-   `(object_key, byte_range)`, picks protocol by size (HTTP for < 1 MB,
-   Arrow Flight for ≥ 1 MB), and calls the Shelf node that owns the
-   key via consistent-hash ring. Fail-open: every Shelf error becomes
-   a transparent fall-through to S3, mediated by a per-node circuit
-   breaker (see § 9.5).
+   `(object_key, byte_range)` and issues HTTP/2 range-GET over a
+   pooled connection to the HRW-elected Shelf pod. Fail-open: every
+   Shelf error becomes a transparent fall-through to S3, mediated by
+   a per-node circuit breaker (see § 9.5).
 2. `**ShelfPrefetchListener`** — implements `EventListener`. On
   `QueryCreatedEvent` it extracts referenced Iceberg tables, their
    predicates, and the current snapshot IDs from `QueryMetadata`
@@ -330,7 +361,10 @@ Two artifacts, both JARs loaded into Trino:
    — not row groups (see § 7.2 for why plan-time prefetch cannot know
    row-group byte ranges without re-implementing `IcebergSplitSource`).
    Row-group prefetch is triggered later by plugin-side observation of
-   footer range-GETs on workers.
+   footer range-GETs on workers. The listener enforces a hard 10 ms
+   coordinator-side deadline; it is fire-and-forget with a bounded
+   queue — overflow drops the oldest pending hint rather than
+   blocking the coordinator.
 
 Trino config (one catalog):
 
@@ -355,9 +389,10 @@ shelf.granularity=row-group,footer,manifest
 
 ### 6.3 Control plane
 
-- **Raft** (`openraft` crate) inside the cache pods themselves. 3- or
-5-node quorum; stores ring membership, pinned-table list, tenant
-quotas. No etcd required. Still supports `kubectl exec` admin.
+- **No embedded consensus.** K8s headless-service provides membership.
+Pin list + tenant quotas live in a versioned S3-backed ConfigMap,
+pulled every 15 min and on SIGHUP. Trainer job writes the next
+version; ops reviews diffs via PR before publication.
 - **Tenants** = Trino resource groups. Each tenant has an NVMe quota
 (default: equal share) and a priority (default: equal).
 - **Pin list** = operator-supplied list of tables / partitions that
@@ -367,8 +402,10 @@ must never be evicted. Written as `pin_list.json`, hot-reloaded.
   1. Per-table access frequency (TF) and distinct-user count (TU)
   2. Per-(table, partition) access frequency, last 7 / 30 / 90 days
   3. Query-plan-to-row-group mapping for dashboard queries
-  4. Trains a 3-layer MLP (10 features → P(reaccess_within_1h)) and
-    exports as ONNX
+  4. Builds a pin list sorted by
+    `scanned_bytes × wall_time × frequency`, top-N per tenant;
+    merged via ops-reviewed PR. LightGBM model is a v1.x optional
+    component, not shipped in v1.
 - All training artifacts pushed to an S3 config bucket; cache nodes
 reload on `SIGHUP` or every 15 min.
 
@@ -392,8 +429,10 @@ We never cache a whole Parquet file. We cache, at most:
 
 
 Impact: a user who filters `WHERE event_region = 'MP+CG'` on a 5 GB Parquet
-file reads **one row group = ~32 MB**, not 5 GB. Our NVMe holds
-150-200× more working set than a file-block cache.
+file reads **one row group = ~32 MB**, not 5 GB. Cache density is
+typically 5-20×, up to 100× on narrow predicates over wide tables;
+measurement to be published from the 7-day `trino_logs` replay
+(SHELF-26).
 
 Implementation note: the cache key for a row group is
 `sha256(etag || rg_ordinal || offset || length)`. Iceberg gives us the
@@ -444,20 +483,26 @@ attempted here — doing so would re-implement `IcebergSplitSource`.
 Row-group byte ranges come from two signals, neither of which asks us
 to replicate split generation:
 
-1. **Plugin-side observation.** `ShelfFileSystem` sits in the worker
-  read path. When a worker issues a Parquet footer range-GET for
-    file X, Shelf has the footer bytes on the same node — it can parse
-    the page index + row-group statistics *on the spot*, correlate
-    them against the predicate we captured from `QueryCreatedEvent`,
-    and prefetch the likely matching row groups before the worker's
-    next range-GET arrives. No new Trino-side hook needed; the
-    plugin already observes every read.
-2. `**SplitCompletedEvent` learning.** Each completed split reports
-  its (file, byte ranges) to the coordinator. The nightly trainer
-    aggregates this into `(table, snapshot_hash, partition_key,   predicate_sketch) → hot_row_group_ids`. For any future query
-    matching the same sketch, Phase 2a's prefetch promotes from
-    "fetch all footers" to "fetch footers + the N row groups
-    historically likely to match".
+> **Note — Trino PR #26436 (merged 2025-08-19) removed
+> `EventListener#splitCompleted`.** Operators are directed to
+> `QueryStatistics#getOperatorSummaries` at `QueryCompletedEvent`
+> time instead. Any earlier draft of this blueprint that cited PR
+> #26425 (worker-side `SplitCompletedEvent`) is stale.
+
+1. **Plugin-side observation (primary).** `ShelfFileSystem` sits in
+  the worker read path. When a worker issues a Parquet footer
+    range-GET for file X, Shelf has the footer bytes on the same
+    node — it can parse the page index + row-group statistics *on
+    the spot*, correlate them against the predicate we captured from
+    `QueryCreatedEvent`, and prefetch the likely matching row groups
+    before the worker's next range-GET arrives. No new Trino-side
+    hook needed; the plugin already observes every read. **This is
+    the row-group-level prefetch mechanism for v1.**
+2. **Post-hoc learning via
+  `QueryCompletedEvent.getStatistics().getOperatorSummaries()`** —
+    coarser than split-level, but live on all shipped Trino. Trainer
+    aggregates `(query_sketch → operator_summaries)` nightly and
+    feeds the pin list / future admission model.
 
 #### Validation we will run BEFORE building Phase 2
 
@@ -474,10 +519,12 @@ WHERE event_region = 'MP+CG' LIMIT 10;
 ```
 
 Then install a throwaway event listener that logs
-`SplitCompletedEvent.getStatistics().getSplitsSpec()` / split byte
-ranges for one table for one day. If that payload is rich enough,
-Phase 2b-signal-2 is viable. If not, fall back to plugin-observation
-only (Phase 2b-signal-1).
+`QueryCompletedEvent.getStatistics().getOperatorSummaries()` for one
+table for one day. This is the richest post-hoc signal available
+after PR #26436 removed `splitCompleted`. If the operator-summary
+payload is rich enough to identify hot files per
+`(table, predicate_sketch)`, the Phase 2b post-hoc learner is viable.
+If not, Phase 2 ships with plugin-side observation only.
 
 Neither of these requires us to replicate Iceberg split generation.
 If both fail, Phase 2 still ships Phase 2a (file + footer prefetch),
@@ -499,26 +546,37 @@ SIEVE is great on hit-path, but it admits blindly. For ad-hoc
 multi-gigabyte scans we want to *not* pollute the NVMe with bytes we'll
 only read once.
 
-On every miss larger than `admission.size_threshold`:
+**v1 — size-threshold admission + pin list.** Refuse admission for
+any object larger than `admission.size_threshold` (default 1 GiB)
+unless the key matches a pin-list entry. The pin list is built
+nightly by the trainer from `cdp.trino_logs.trino_queries` — top-N
+objects per tenant sorted by
+`scanned_bytes × wall_time × frequency` — and published as a
+versioned S3 ConfigMap, merged via ops-reviewed PR. No model
+inference on the admission path in v1.
+
+Target: eliminate the bulk of ad-hoc-scan bytes from NVMe without
+losing dashboard hit rate, measured against the `trino_logs`
+replay.
+
+#### v1.x possible upgrade — LightGBM model
+
+If after Phase 1 we measure a ≥ 5 pp hit-rate gap between
+size-threshold admission and the pin-list augmented variant on
+replay, we add a LightGBM model (tiny C runtime, no ORT dependency)
+as an optional admission input:
 
 1. Build feature vector: `[table_tf_7d, table_tu_7d, partition_depth,
   user_type (dashboard/adhoc), size_MB, hour_of_day, recency_days,
    query_cost_rank, file_is_recent, file_is_on_pin_list]`.
-2. Score via cached ONNX model (3-layer MLP). Realistic single-inference
-  latency on a modern CPU with ONNX Runtime: **10-50 µs**, dominated
-   by graph dispatch and input binding rather than the actual matmuls.
-   This is fine: admission is on the cold-miss path (we're already
-   about to do an S3 GET that takes 20-100 ms), not the hit path.
-   If we ever needed µs-scale, hand-rolling the MLP in SIMD would get
-   us there — explicitly out of scope for v1.
+2. Score via LightGBM (tree model, ≤ 5 µs inference on a modern
+  CPU). Admission is on the cold-miss path (we're already about
+   to do an S3 GET that takes 20-100 ms), not the hit path.
 3. Admit iff `P(reaccess < 1h) > 0.3`.
 
-Model trained on `cdp.trino_logs.trino_queries`, refreshed nightly.
-Target: eliminate 80 % of ad-hoc-scan bytes from NVMe without losing
-dashboard hit rate.
-
-Fallback if model unavailable: size-based admission (refuse objects ≥
-1 GB unless on pin list).
+LightGBM is chosen over an ONNX-packed MLP to avoid the ORT
+dependency and to stay in tree-model territory, which is a better
+fit for the small tabular features we have.
 
 ### 7.4 Approximate in-cache indexes (closing the Warp Speed gap)
 
@@ -528,11 +586,12 @@ per column on SSD. Shelf does not build inverted indexes — but it
 doesn't have to. Three cheap mechanisms close ~80 % of the gap without
 a new index subsystem.
 
-#### 7.4.1 Bring-your-own: Parquet bloom filters at write time
+#### 7.4.1 Bring-your-own: Parquet bloom filters at write time (ops playbook, no Shelf code in v1)
 
 Parquet has supported bloom filters in the footer since v2.9; Trino
 (400+) reads them for predicate pushdown. Most production tables don't
-have them only because nobody set the write property. Workflow:
+have them only because nobody set the write property. **This is an
+ops-playbook item: no Shelf code ships for it in v1.** Workflow:
 
 1. The trainer analyses `cdp.trino_logs.trino_queries` for
   `WHERE col = literal` patterns, computes per-column "equality
@@ -554,7 +613,7 @@ Zero Shelf code. Expected effect: 40-60 % reduction in scanned bytes
 for equality predicates on high-cardinality columns, measured against
 `trino_logs`.
 
-#### 7.4.2 Side-built bloom filters in `shelfd` (for tables we can't re-write)
+#### 7.4.2 Side-built bloom filters in `shelfd` — **Phase 8 only, not v1**
 
 For legacy / external tables we cannot re-write, `shelfd` builds its
 own bloom filters lazily from observed reads:
@@ -582,11 +641,7 @@ correctness risk.
 based on query-log evidence only. Low-signal columns are never
 indexed, so memory spend is bounded.
 
-This is genuinely novel — no open-source analytical cache does this.
-Target paper: *"Cache-resident approximate indexes for columnar
-lakehouses"*.
-
-#### 7.4.3 Z-order and sort-order awareness
+#### 7.4.3 Z-order and sort-order awareness — **Phase 8 only, not v1**
 
 If a table is Z-ordered or sorted on column C, plain Parquet min/max
 on C gives Warp-Speed-grade selectivity for free — we just need to
@@ -628,14 +683,21 @@ Shelf doesn't compute aggregates — but by co-designing with Trino's
 existing materialised-view support, we match or beat Firebolt on the
 common case using only OSS components.
 
-#### 7.5.1 Tier 1 — `shelf-result-cache` (already in § 13.5)
+#### 7.5.1 Tier 1 — result cache (owned by COMPARISON.md Phase 0, not `shelfd`)
 
 Literal-repeat queries on the same Iceberg snapshot return from a
-snapshot-keyed Redis / sled-backed result cache in <5 ms. Covers
-~60-70 % of Metabase / PBI / Superset dashboard traffic (same query,
-same snapshot). No Trino cooperation needed; this sits in front.
+snapshot-keyed Redis result cache sitting behind the Trino Gateway.
+Covers ~60-70 % of Metabase / PBI / Superset dashboard traffic (same
+query, same snapshot). **The v1 result cache is the Redis +
+Trino-Gateway plugin documented in `COMPARISON.md` Phase 0 — it is
+*not* built inside `shelfd`, and `shelf-result-cache` is not a v1
+artefact.**
 
 #### 7.5.2 Tier 2 — Iceberg materialised views, accelerated by Shelf
+
+Shelf caches MV files like any other Iceberg file. Explicit MV
+pinning in the DRAM hot pool is a **Phase 9** item, not core v1
+behaviour — the description below is the Phase 9 target state.
 
 Trino 468+ supports Iceberg materialised views with automatic rewrite:
 a query against the base table is transparently routed to the MV when
@@ -660,7 +722,7 @@ trick); Shelf eliminates the I/O tax on the MV (our trick). On a
 `SUM(revenue) GROUP BY region` query that takes Firebolt ~80 ms via
 aggregating index, this combo delivers ~10-20 ms.
 
-#### 7.5.3 Tier 3 — Shelf as MV catalogue
+#### 7.5.3 Tier 3 — Shelf as MV catalogue — **Phase 9, not v1**
 
 Shelf's control plane tracks:
 
@@ -692,31 +754,23 @@ not latency-sensitive.
 
 ## 8. API
 
-### 8.1 Data-plane — hybrid HTTP + Arrow Flight
+### 8.1 Data-plane — HTTP/2 range-GET (v1)
 
-Arrow Flight is excellent for MB-to-GB payloads (6 GB/s single-stream
-throughput, zero-copy into Arrow buffers). It is **wrong** for KB-scale
-payloads: IPC schema transmission, `FlightDescriptor` framing, and
-`RecordBatch` metadata cost thousands of ns even for near-empty batches
-([apache/arrow benchmarks](https://github.com/apache/arrow)). At 8 KB
-Parquet footers and 10 KB Iceberg `metadata.json`, framing is a
-meaningful fraction of the payload.
+**v1 uses HTTP/2 range-GET for all payload sizes.** The original
+DaMoN '22 Arrow Flight throughput number (6 GB/s single-stream) was
+measured on Mellanox InfiniBand; commodity EKS ENIs cap at
+10-25 Gbps per node with per-stream throughput of 1-3 GB/s, so the
+Flight advantage is much smaller than the headline suggests. Given
+that, v1 runs a single protocol — HTTP/2 with `Range:` header — for
+manifests, footers, page indexes, and row groups alike. One
+connection pool, h2 multiplexing, no IPC framing to decide on per
+payload.
 
-So Shelf's data plane is **two protocols on the same endpoint**, branched
-by payload size:
-
-
-| Payload size                                               | Protocol                                                                  | Reason                                                                        |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| < 1 MB (manifests, footers, page indexes, tiny row groups) | HTTP/2 GET with `Range:` header, `Content-Type: application/octet-stream` | Sub-ms latency; no IPC framing overhead; reuses the S3-compat shim from § 8.3 |
-| ≥ 1 MB (bulk row groups)                                   | Arrow Flight `DoGet`                                                      | Zero-copy, columnar, 6 GB/s throughput                                        |
-
-
-The Trino plugin looks at `PrefetchTarget.length` before picking a
-protocol. Client reuses the same connection pool for both; h2
-multiplexing keeps this cheap.
+**Arrow Flight is a v1.x upgrade** contingent on a measured ≥ 20 %
+throughput gain over HTTP/2 at our per-stream realistic bandwidth.
 
 ```protobuf
+// Reserved for v1.x Flight use. Not wired up in v1.
 // FlightDescriptor.cmd = serialized ShelfReadRequest
 message ShelfReadRequest {
   string object_key = 1;          // e.g. "s3://pw-data-cdp-prod-gold-layer/silver/..."
@@ -728,8 +782,8 @@ message ShelfReadRequest {
 }
 ```
 
-Flight returns one or more `RecordBatch` or raw bytes depending on payload
-(row group vs manifest). Zero-copy memory mapping when possible.
+The proto definition is kept in the repo but marked "reserved for
+v1.x"; no Flight server is shipped in v1.
 
 ### 8.2 Control-plane — gRPC
 
@@ -758,9 +812,11 @@ message PrefetchTarget {
 ### 8.3 S3-compatible shim (optional, for non-Flight engines)
 
 Any engine that speaks S3 (Spark, DuckDB, Polars, boto3) can point
-`endpoint_url` at Shelf and transparently get cache. Shelf implements a
-minimal subset: `GetObject` with `Range` header, `HeadObject`. Gives us
-a free migration path for Python notebooks and Spark.
+`endpoint_url` at Shelf and transparently get cache. Shelf implements
+**only `GetObject` with `Range` header and `HeadObject`** — no
+`PutObject`, no `ListObjects`, no bucket management. Read-only,
+scope deliberately minimal. Gives us a free migration path for
+Python notebooks and Spark.
 
 ---
 
@@ -812,7 +868,7 @@ keys refetched from S3 transparently.
 | CM / config files | 4 configmaps                                            | 1                                                      |
 | Lines of YAML     | ~510 in alluxio-values.yaml                             | ~150 target                                            |
 | External deps     | ZK / embedded Raft + S3                                 | embedded Raft + S3                                     |
-| Pool timeouts     | pre-fix: 3 900 / 10 min                                 | design target: 0 by construction (SDK v2 pool + async) |
+| Pool timeouts     | pre-fix: 3 900 / 10 min                                 | explicit failure modes documented: Tokio task starvation under NVMe write pressure; Foyer write back-pressure; per-prefix origin-pool saturation. Mitigations itemised in §9.4. |
 
 
 ### 9.3 Runbook surface
@@ -838,6 +894,12 @@ re-fetch is authoritative).
 | NVMe full                | Admission refuses new inserts; existing cache continues to serve.                                                                                                |
 | Corrupt object           | Content-addressed key mismatch detected on read; object evicted + refetched.                                                                                     |
 | Trino plugin unavailable | Shelf still usable via S3-shim for other engines.                                                                                                                |
+| All Shelf pods down simultaneously (cluster network partition or KEDA mass-rotation) | Plugin falls through to direct S3; per-prefix rate limiter on the fallback path caps S3 GET rate at 5 000 / s / prefix to avoid `SlowDown` responses. |
+
+> **Per-prefix rate limiting on the fallback path is mandatory, not
+> optional.** A mass fall-through from every Trino worker to S3 with
+> no throttle is the fastest path to provoking `SlowDown` 503s and
+> amplifying the incident.
 
 
 ### 9.5 `ShelfFileSystem` client resilience state machine
@@ -879,8 +941,17 @@ is draining.
 - **Half-open**: after 10 s, the next request is allowed through as a
 probe. Success → closed. Failure → back to open, double the timer.
 
-We will publish this state machine as a reference Java implementation
-alongside the plugin; every user of `ShelfFileSystem` gets it for free.
+This state machine ships as a **committed Java reference
+implementation + unit tests in v0.1 (SHELF-11)**, not as
+blueprint-only pseudocode. Every user of `ShelfFileSystem` gets it
+for free.
+
+**Membership is re-read on retry.** Inside the retry path,
+`hash_ring.owner_for(key)` must recompute against the *current*
+DNS-refreshed K8s headless-service membership — never the snapshot
+cached at the start of the request. If a pod died between the
+initial call and the retry, the new owner comes from the live DNS
+answer, not stale state in the client.
 
 **Invariant the plugin guarantees to Trino:** `ShelfFileSystem`
 *never* returns a `Shelf-specific` error. Every Shelf failure becomes a
@@ -970,26 +1041,25 @@ All results + traces published under `benchmarks/` in the repo.
 ## 12. Roadmap
 
 
-| Phase                                                    | Window     | Scope                                                                                                                                                                                                                                   | Success gate                                                                                                                                                       |
-| -------------------------------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **−1 — Stabilise with existing tools** (no new services) | 1 week     | Replace `emptyDir` → `hostPath` for all Trino `fs.cache` volumes on rep-1/2/3. Ship `iceberg.metadata-cache.enabled=false` + `hive.metastore-cache-ttl=10m` audit across replicas. Already-running Alluxio stays.                       | Worker cache survives pod restart. `fs.cache` hit rate climbs from 15-20 % to ≥ 45 %.                                                                              |
-| **0 — Proof of concept**                                 | 2 weeks    | Rust `shelfd` with DRAM-only Foyer cache, file-granularity, no plan-hint. Trino plugin that does S3 read-through via Shelf.                                                                                                             | A single query against `cdp.icesheet.silver_offline_event_data_2026` served from cache on rep-0.                                                                   |
-| **1 — Columnar granularity**                             | 3 weeks    | Parquet footer + row-group ranges. Content-addressed keys. NVMe tier via Foyer hybrid.                                                                                                                                                  | TPC-DS Q1-Q5 beats Alluxio OSS 2.9 on p95.                                                                                                                         |
-| **2 — Plan-aware prefetch**                              | 2 weeks    | `ShelfPrefetchListener` + prefetch queue + cancellation on query finish.                                                                                                                                                                | Cold-start benchmark: TTFQ ≤ 3 s after 10× scale-up.                                                                                                               |
-| **3 — Consistent-hash ring + Raft**                      | 3 weeks    | Multi-node, ring rebalance, pod replace. S3-compat shim.                                                                                                                                                                                | Chaos test: kill 1 pod / 5 min, hit rate stable.                                                                                                                   |
-| **4 — Learned admission**                                | 3 weeks    | Nightly trainer on `trino_logs`, ONNX inference in `shelfd`, admission decision on large scans.                                                                                                                                         | NVMe-byte admission rate cut by 60 % without losing dashboard hit rate.                                                                                            |
-| **5 — Productionise rep-2**                              | 2 weeks    | Grafana dashboards, runbook, oncall handoff, HA config, capacity plan.                                                                                                                                                                  | 7 days zero-incident on rep-2; cut `alluxio-worker` headcount.                                                                                                     |
-| **6 — Roll to rep-0/1/3**                                | 3 weeks    | Multi-tenant (one Shelf cluster shared across replicas).                                                                                                                                                                                | All 4 replicas on Shelf, Alluxio retired.                                                                                                                          |
-| **7 — Open-source launch**                               | 2 weeks    | Public repo, docs, blog, benchmarks.                                                                                                                                                                                                    | HN front page / repo starred / first external PR merged.                                                                                                           |
-| **8 — Approximate in-cache indexes** (§ 7.4)             | 4 weeks    | Parquet bloom-filter recommender (trainer side) + ops playbook for writer configs. Side-built bloom filters in `shelfd` with `ShelfFilterService` gRPC. Z-order / sort-order detection in the control plane.                            | Selective-equality benchmark: scanned-bytes cut ≥ 60 % on top 20 `WHERE col = literal` queries vs phase 7 baseline.                                                |
-| **9 — MV-aware caching** (§ 7.5)                         | 3 weeks    | MV recommender in the trainer; Shelf pins MV files in the DRAM hot pool; control-plane tracks MV → base-table graph and per-MV hit rate.                                                                                                | Top 10 dashboard aggregations served from MV + Shelf in < 20 ms p95.                                                                                               |
-| **10 — Incremental MV refresh on snapshot delta**        | 8-12 weeks | Snapshot-watcher emits `(table, snap_from → snap_to)` deltas; a new `shelf-mv-refresh` service reads only delta files, computes the incremental aggregate, and commits via Iceberg `MERGE`. Trino TIP drafted & upstreamed in parallel. | MV refresh wall-time drops from O(table) to O(delta): ≥ 20× speed-up on 1 TB fact-table MV with 100 MB daily delta. TIP accepted (or at least discussed) upstream. |
+| Phase | Window | Scope | Success gate |
+|-------|--------|-------|--------------|
+| −1 | 1 w | Stabilise existing stack | fs.cache ≥ 45% for 5 days |
+| 0 | 2-3 w | v0.1 single-pod DRAM PoC; shadow traffic | Plugin overhead ≤ 5% on rep-2 canary |
+| 0R | 2-3 w (parallel) | Redis + Gateway result cache | ≥ 60% BI hit rate for 5 days |
+| 1 | 6-8 w | v0.5 row-group + NVMe + HRW + 3-pod StatefulSet | Beat Alluxio on rep-2 for 7 consecutive days |
+| 2 | 4-5 w | Plan-aware prefetch (2a + 2b-signal-1) | TTFQ ≤ 3 s p95 after 10× scale-up |
+| 3 | 3-4 w | Scale to 5-7 pods; per-prefix S3 limiter; tokio hardening | Chaos drills pass; no per-prefix throttles in cold-replay |
+| 4 | 2-6 w | Pin list live; LightGBM evaluated (only shipped if ≥ 5 pp) | NVMe write bytes cut ≥ 40% |
+| 5 | 3-4 w | Productionise rep-2; retire rep-2 Alluxio | 7 days zero pages on rep-2; Alluxio pods = 0 |
+| 6 | 4-6 w | Roll to rep-0/1/3 | Alluxio retired across all 4 replicas |
+| 7 | 3-4 w | OSS launch | Public repo + blog + benchmark + first external PR response in 48 h |
+| 8 | 4-6 w (parallel w/ 7 if team ≥ 4) | Approximate in-cache indexes | Selective-equality scanned bytes cut ≥ 60% |
+| 9 | 3 w (parallel w/ 7 if team ≥ 4) | MV-aware pinning | Top 10 dashboard aggregates < 20 ms p95 |
+| **10** | **—** | **REMOVED** — incremental MV refresh is a compute service, not a cache (see ADR-0007). | — |
 
 
-Total ≈ 37-41 weeks (≈ 9-10 months) to Phase 10. Production value
-delivered from phase 2 onward; phases 8-10 are the "close the gap vs
-Warp Speed / Firebolt" track and can run in parallel with phase 7 if
-we staff them.
+Total ≈ 36-44 calendar weeks to OSS launch for a 3-person team.
+Phases 8 and 9 parallelise with Phase 7 only if team expands to 4+.
 
 ---
 
@@ -998,8 +1068,8 @@ we staff them.
 
 | Risk                                                                                                                   | Mitigation                                                                                                                                                                                                   |
 | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| "Yet another cache" fatigue in the community                                                                           | Lead with benchmarks and the plan-aware differentiator. Don't frame as Alluxio-replacement; frame as *analytic-engine-aware* cache.                                                                          |
-| Trino `EventListener` currently runs only on coordinator; plan may not be rich enough to enumerate row groups up-front | Two-phase: phase 2a uses file-level prefetch from `QueryCreatedEvent`, phase 2b adds worker-side `SplitCompletedEvent` for row-group-level hints. Upstream PR #26425 already enables worker event listeners. |
+| "Yet another cache" fatigue in the community                                                                           | Lead with numerically-measured comparison against the stabilised Alluxio 2.9.5 baseline on our real workload. Do not frame Shelf as an Alluxio-replacement in marketing; frame as an analytic-engine-aware cache with row-group granularity. |
+| Trino `EventListener` currently runs only on coordinator; plan may not be rich enough to enumerate row groups up-front | Trino PR #26436 (merged 2025-08-19) **removed** `EventListener#splitCompleted` entirely. Phase 2b redesigned to plugin-observation + `QueryCompletedEvent` operator summaries. Do **not** cite PR #26425 as if its direction prevailed. |
 | Learned model drift / staleness                                                                                        | Trainer reports feature-distribution drift; fall back to SIEVE-only below a confidence threshold. Nightly retrain + canary.                                                                                  |
 | Ring rebalance thundering herd on S3                                                                                   | Rate-limit refetch per-prefix; exponential backoff; and the lost pod's hot keys are usually a minority of total traffic.                                                                                     |
 | Iceberg schema evolution on cached data                                                                                | Content-addressed keys include ETag, so schema-evolution rewrites create new keys. Old keys TTL out naturally.                                                                                               |
@@ -1009,14 +1079,17 @@ we staff them.
 | Do we want to cache result sets (query → result)?                                                                      | **No**, explicitly out of scope. Result caching belongs in the engine (Trino already has some); Shelf is a data-cache. Stay focused.                                                                         |
 
 
-Open questions for the team:
+Open questions — resolved for v0.4 (per plan §8):
 
-1. Name: keep **Shelf**? Alternatives: Tundra, Reef, Ledge, Gale.
-2. Home: standalone repo `github.com/penpencil-services/shelf`, or under
-  `github.com/penpencil-oss/shelf`?
-3. Launch post coauthors: who (data-platform + infra + eng-leadership)?
-4. Do we want to donate to Apache from day 1, or self-govern for a year?
-5. Do we aim for a Spark plugin in v1 or keep Trino-only for focus?
+1. **Name.** TBD; "Shelf" stays as working codename until we ship
+  v0.1. Alternatives (Tundra, Reef, Ledge, Gale) remain open.
+2. **Repo home.** TBD — to be decided before Phase 7 (OSS launch).
+3. **Launch-post co-authors.** TBD — lined up closer to Phase 7.
+4. **Apache donation.** **Deferred 12 months.** Self-govern until
+  we have ≥ 10 external contributors and a track record.
+5. **Spark client.** **Not in v1.** Trino-only for focus; the S3
+  shim gives Spark / DuckDB / boto3 a read-path today without a
+  dedicated client.
 
 ---
 
@@ -1032,15 +1105,14 @@ We adopt this in two places:
     a table gets a new snapshot, the old key is dead by construction —
     no invalidation storm, no TTL staleness. Keys naturally evict via
     cold-LRU on the old snapshot ID.
-2. **Result cache (separate companion binary — not part of `shelfd`).**
-  Shelf ships an optional `shelf-result-cache` binary — deployed as
-    either a Trino Gateway plugin or a thin HTTP proxy — that caches
-    whole query results keyed by
-    `sha256(normalized_sql + map_of_referenced_tables_to_snapshot_ids)`.
-    It is explicitly **not bundled into `shelfd`** (see § 14): `shelfd`
-    stays a pure byte-range data cache, `shelf-result-cache` is
-    independently deployable and optional. They share the control
-    plane (snapshot map, tenant config) but no data-path dependency.
+2. **Result cache (v2+ — not a v1 artefact).** `shelf-result-cache`
+  is **out of scope for v1**. The v1 result-cache shipping vehicle
+    is the Redis + Trino-Gateway plugin documented in
+    `COMPARISON.md` Phase 0, which keys whole query results by
+    `sha256(normalized_sql + referenced_tables → snapshot_ids)` and
+    sits in front of Trino. The discussion below of an independent
+    `shelf-result-cache` binary is retained as **v2+ design notes**
+    only; no such binary ships with v1.
   - Dashboard queries (pbi_online, mbuser, Metabase) return in
   < 5 ms without touching Trino at all.
   - When any referenced Iceberg table gets a new snapshot, the key
@@ -1052,14 +1124,13 @@ We adopt this in two places:
   data cache speeds up misses, result cache eliminates repeated queries.
   Together they compound.
 
-A small companion service `snapshot-watcher` polls the Hive metastore
-every 30 s, maintains a `(table → current snapshot_id)` map in Shelf's
-control plane, and serves it to both the metadata cache and the result
-cache. On a snapshot change, Shelf publishes an event internally so any
-plan-hint prefetches referencing the old snapshot are cancelled.
-
-This tier was NOT in Shelf v0.1. Adding it as a first-class component,
-targeted for Phase 1.5 (between phase 1 and phase 2).
+`snapshot-watcher` is a **COMPARISON.md Phase 0 deliverable** (not
+net-new from Shelf) that polls the Hive metastore every 30 s and
+maintains a `(table → current snapshot_id)` map. In v1 it is
+consumed by the Redis-Gateway result cache; Shelf re-uses the same
+signal for its metadata-tier keys. On a snapshot change, the Redis
+cache invalidates naturally and Shelf cancels any plan-hint
+prefetches referencing the old snapshot.
 
 ---
 
@@ -1067,19 +1138,17 @@ targeted for Phase 1.5 (between phase 1 and phase 2).
 
 Listed because every ambitious OSS project dies from scope creep.
 
-- `**shelfd` (the data plane) is not a result cache.** `shelfd` caches
-file-system bytes — Iceberg manifests, Parquet footers, row-group
-ranges. It never sees row-set result frames. `shelf-result-cache` is
-a **separate companion binary** in the same repo that caches query
-results keyed on snapshot IDs (§ 13.5); it *shares* Shelf's control
-plane (snapshot map, tenant config) but is independently deployable
-and optional. If you run `shelfd` alone, you get a data cache. If
-you run only `shelf-result-cache`, you get a Redis-backed Trino
-Gateway result cache. They compose but do not depend on each other.
+- **`shelfd` caches file-system bytes only.** Result caching in v1
+is handled by the separate Redis + Trino-Gateway plugin documented
+in `COMPARISON.md` Phase 0 — that is the v1 result-cache shipping
+vehicle, and it is **not** in this repo. A future
+`shelf-result-cache` binary is speculative, not a v1 artefact (see
+§ 13.5, tagged v2+).
 - Shelf is not a filesystem. No `ls`, no `mv`, no POSIX.
 - Shelf is not a metastore. HMS / Glue / Nessie still own that.
 - Shelf is not an index. Warp-Speed-style columnar indexes are a
-phase 8+ experiment, not v1.
+**Phase 8** experiment, not v1. In-cache side-built blooms (§ 7.4.2)
+are Phase 8+, not v1.
 - Shelf is not write-through. It is read-through only. All writes go
 straight to S3, Iceberg commit semantics unchanged.
 - Shelf is not a compute engine. No pushdown of filters inside Shelf
@@ -1120,11 +1189,9 @@ Even though these are proprietary, their design choices inform Shelf:
 | Firebolt                      | Tablet storage on SSD with modified LRU persisting until engine shutdown | Foyer NVMe tier with SIEVE+GL-Cache eviction                                                               |
 | Firebolt                      | RAM + SSD cache pools, separate eviction per pool                        | Per-pool byte quotas (§ 6.1)                                                                               |
 | Firebolt                      | Sparse primary index per data block                                      | Cache Parquet page index + row-group stats aggressively; they ARE our sparse index                         |
-| Firebolt                      | Aggregating indexes (pre-computed GROUP BYs, auto-synced)                | **Out of scope for v1.** Potential phase 8+ experiment: Iceberg materialized views + Shelf pre-compute.    |
 | Firebolt                      | Warmup-engines API                                                       | Validates our plan-aware prefetch; directly inspired the `Pin`/`Prefetch` gRPC methods                     |
 | Databricks Photon             | Auto-managed local NVMe, Parquet + stats cached                          | Similar to our NVMe tier but coupled to their runtime; we stay engine-agnostic                             |
 | Snowflake                     | Result cache at virtual warehouse level                                  | We do this in `shelf-result-cache`, keyed on snapshot ID (correct invalidation, which Snowflake also does) |
-| Starburst Warp Speed (Varada) | Block-level bitmap / dictionary / tree indexes on NVMe                   | **Phase 8+ possibility**: per-column indexes for predicate pre-evaluation. v1 sticks to byte-ranges.       |
 | Dremio C3                     | NVMe local cache + Arrow-based zero copy                                 | Same tech choices (Foyer ≈ CacheLib, Arrow Flight)                                                         |
 
 
@@ -1146,7 +1213,9 @@ Minimum viable next step (≤ 1 day of work) to decide whether to proceed:
     good.
 2. Spike: write the `**shelfd` skeleton** in Rust (`foyer` + Axum +
   Tonic), DRAM-only, single-node. Measure p99 read latency on a 1 MB
-    object. Target ≤ 1 ms from DRAM.
+    object. Target: **p99 DRAM read 1-3 ms, p99.9 10-50 ms under
+    NVMe pressure** (honest tail-latency expectation — p99.9 gets
+    worse as the NVMe tier fills).
 3. Pick a name.
 4. Open a private repo, import this blueprint as `docs/BLUEPRINT.md`,
   start tracking decisions in `docs/adr/`.
@@ -1155,4 +1224,4 @@ If the spike numbers hold, we move to phase 0.
 
 ---
 
-*Last edited: 2026-04-23. Owner: @aamir. Status: draft, seeking review.*
+*Last edited: 2026-04-23. Version: v0.4. Owner: @aamir. Status: draft, seeking review.*

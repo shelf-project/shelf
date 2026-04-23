@@ -1,0 +1,14 @@
+# SHELF-04 golden vectors — shared by Rust and Java key tests.
+#
+# Each non-empty, non-comment line is the lowercase-hex sha256 output
+# of `key_from_tuple(etag, offset, length, rg_ordinal)` for the input
+# tuple at the same position in GOLDEN_INPUTS (shelfd/src/store.rs)
+# and GOLDEN_INPUTS (clients/trino/src/test/java/io/shelf/client/KeyTest.java).
+#
+# Changing any line here changes the on-disk cache layout. See ADR-0011.
+# Regenerate by running `python3 tools/gen_shelf04_golden.py` (kept
+# deliberately language-neutral so the fixture remains auditable).
+a20c55bf6027ead48730675b898e153adce33de97301947bef0b95a9614c8718
+01d567e3977aa2a65a568387ec30182f9efaa981c3010b6f3d1f7890b49a3ebb
+dfb9946fbe295435bd36fd91a95ee7b03058fbde3b664e5018f943e87a04ea4d
+e20b4b06c648865290786e52f7cc1ea26479d96a87a573fd9301b0ee59fb185c

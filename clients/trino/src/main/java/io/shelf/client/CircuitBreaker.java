@@ -35,11 +35,16 @@ import java.util.concurrent.atomic.AtomicReference;
  *   <li><b>Open</b>: for the next 10 s, bypass Shelf entirely for any key
  *     hashing to this pod. No retries.</li>
  *   <li><b>Half-open</b>: after the timer expires, exactly one in-flight
- *     probe is permitted. Success → closed. Failure → open with the timer
- *     doubled (exponential back-off, capped).</li>
+ *     probe is permitted. Success &rarr; closed. Failure &rarr; open with
+ *     the timer doubled (exponential back-off, capped).</li>
  * </ul>
  *
  * <p>Instances are keyed by pod id in {@link HashRing}; one breaker per pod.
+ *
+ * <p><b>Thread safety.</b> All public methods are safe for concurrent
+ * invocation from any Trino worker thread. The state machine is
+ * implemented as a CAS loop over {@link State}; no lock is held across
+ * a network call.
  */
 public final class CircuitBreaker
 {
@@ -62,15 +67,21 @@ public final class CircuitBreaker
 
     private final String podId;
     private final int failureThreshold;
-    private final Duration initialOpenDuration;
-    private final Duration maxOpenDuration;
+    private final long initialOpenDurationNanos;
+    private final long maxOpenDurationNanos;
     private final Clock clock;
 
     private final AtomicReference<State> state = new AtomicReference<>(State.CLOSED);
     private final AtomicInteger consecutiveFailures = new AtomicInteger();
     private final AtomicLong openedAtNanos = new AtomicLong();
     private final AtomicLong currentOpenDurationNanos;
-    private final AtomicInteger halfOpenProbeToken = new AtomicInteger();
+    /**
+     * Monotonically increasing ticket. Each time we enter OPEN we bump
+     * this. {@link #tryAcquireProbeToken()} in HALF_OPEN uses a CAS that
+     * only succeeds once per OPEN episode, guaranteeing at most one probe.
+     */
+    private final AtomicInteger probeGeneration = new AtomicInteger();
+    private final AtomicInteger probeClaim = new AtomicInteger(-1);
 
     public CircuitBreaker(String podId)
     {
@@ -85,11 +96,22 @@ public final class CircuitBreaker
             Clock clock)
     {
         this.podId = Objects.requireNonNull(podId, "podId");
+        if (failureThreshold < 1) {
+            throw new IllegalArgumentException("failureThreshold must be >= 1");
+        }
+        Objects.requireNonNull(initialOpenDuration, "initialOpenDuration");
+        Objects.requireNonNull(maxOpenDuration, "maxOpenDuration");
+        if (initialOpenDuration.isNegative() || initialOpenDuration.isZero()) {
+            throw new IllegalArgumentException("initialOpenDuration must be positive");
+        }
+        if (maxOpenDuration.compareTo(initialOpenDuration) < 0) {
+            throw new IllegalArgumentException("maxOpenDuration must be >= initialOpenDuration");
+        }
         this.failureThreshold = failureThreshold;
-        this.initialOpenDuration = Objects.requireNonNull(initialOpenDuration, "initialOpenDuration");
-        this.maxOpenDuration = Objects.requireNonNull(maxOpenDuration, "maxOpenDuration");
+        this.initialOpenDurationNanos = initialOpenDuration.toNanos();
+        this.maxOpenDurationNanos = maxOpenDuration.toNanos();
         this.clock = Objects.requireNonNull(clock, "clock");
-        this.currentOpenDurationNanos = new AtomicLong(initialOpenDuration.toNanos());
+        this.currentOpenDurationNanos = new AtomicLong(this.initialOpenDurationNanos);
     }
 
     public String podId()
@@ -97,52 +119,120 @@ public final class CircuitBreaker
         return podId;
     }
 
+    /**
+     * Current observed state. Note this is a <em>snapshot</em>; the
+     * breaker may transition between the read and the next call. Use
+     * {@link #isOpen()} to drive actual routing decisions.
+     */
     public State state()
     {
+        maybeExpireOpenTimer();
         return state.get();
     }
 
     /**
      * Decide whether the next call should short-circuit to direct S3.
      *
-     * @return {@code true} if the breaker is OPEN and not yet ready to probe.
+     * @return {@code true} iff the breaker is OPEN and the open timer
+     *         has not yet elapsed. Returns {@code false} in CLOSED and
+     *         HALF_OPEN: in HALF_OPEN exactly one caller (the holder of
+     *         {@link #tryAcquireProbeToken()}) should actually call
+     *         Shelf; others should fall through.
      */
     public boolean isOpen()
     {
-        // TODO(SHELF-11): implement timer expiry + CLOSED→OPEN→HALF_OPEN transitions
-        //   per BLUEPRINT §9.5. Must never throw; must be safe to call from
-        //   multiple Trino worker threads concurrently (see class javadoc).
-        return false;
+        maybeExpireOpenTimer();
+        return state.get() == State.OPEN;
     }
 
     /**
-     * Check out a half-open probe token. Exactly one caller wins; every other
-     * concurrent caller sees the breaker as OPEN.
+     * Attempt to acquire the single probe slot in HALF_OPEN.
+     *
+     * <p>Returns {@code true} for exactly one caller per OPEN episode.
+     * All other callers during the HALF_OPEN window see {@code false}
+     * and must fall through to direct S3.
      */
     public boolean tryAcquireProbeToken()
     {
-        // TODO(SHELF-11): single-probe contention test per 03-plan.md §4 SHELF-11.
-        return false;
+        maybeExpireOpenTimer();
+        if (state.get() != State.HALF_OPEN) {
+            return false;
+        }
+        int gen = probeGeneration.get();
+        // Winner is the first thread to CAS probeClaim from a value
+        // other than `gen` to `gen`.
+        int prev = probeClaim.get();
+        if (prev == gen) {
+            return false;
+        }
+        return probeClaim.compareAndSet(prev, gen);
     }
 
-    /** Record a Shelf-originated success. Transitions half-open → closed. */
+    /**
+     * Record a Shelf-originated success. Transitions HALF_OPEN &rarr;
+     * CLOSED, resets failure count and back-off timer.
+     */
     public void recordSuccess()
     {
-        // TODO(SHELF-11): reset consecutiveFailures, reset open timer, state=CLOSED.
+        consecutiveFailures.set(0);
+        currentOpenDurationNanos.set(initialOpenDurationNanos);
+        state.set(State.CLOSED);
     }
 
     /**
      * Record a Shelf-originated failure.
      *
-     * <p>Only the following exception types are {@link CircuitBreaker} failures:
-     * {@code IOException}, {@code TimeoutException}, {@code ConnectException},
-     * HTTP 503, HTTP 504. Real S3 errors (AccessDenied, NoSuchKey) bubble up
-     * unchanged.
+     * <p>Only the following exception types are {@link CircuitBreaker}
+     * failures: {@code IOException}, {@code TimeoutException},
+     * {@code ConnectException}, HTTP 503, HTTP 504. Real S3 errors
+     * (AccessDenied, NoSuchKey) bubble up unchanged.
+     *
+     * <p>From CLOSED: increment counter; trip to OPEN when the counter
+     * reaches {@link #failureThreshold}. From HALF_OPEN: trip back to
+     * OPEN immediately and double the open timer (capped at
+     * {@link #DEFAULT_MAX_OPEN_DURATION}).
      */
     public void recordFailure()
     {
-        // TODO(SHELF-11): 5-failure threshold → OPEN; HALF_OPEN failure → OPEN
-        //   with currentOpenDurationNanos = min(current * 2, maxOpenDuration).
+        maybeExpireOpenTimer();
+        State current = state.get();
+        if (current == State.HALF_OPEN) {
+            // Probe failed — back off harder.
+            long next = Math.min(currentOpenDurationNanos.get() * 2L, maxOpenDurationNanos);
+            // Guard against overflow on pathological durations.
+            if (next < 0) {
+                next = maxOpenDurationNanos;
+            }
+            currentOpenDurationNanos.set(next);
+            tripOpen();
+            return;
+        }
+        if (current == State.OPEN) {
+            // Already open — a stray failure in this window is ignored.
+            return;
+        }
+        // CLOSED: count consecutive failures.
+        if (consecutiveFailures.incrementAndGet() >= failureThreshold) {
+            tripOpen();
+        }
+    }
+
+    private void tripOpen()
+    {
+        openedAtNanos.set(clock.nanoTime());
+        probeGeneration.incrementAndGet();
+        state.set(State.OPEN);
+    }
+
+    private void maybeExpireOpenTimer()
+    {
+        if (state.get() != State.OPEN) {
+            return;
+        }
+        long elapsed = clock.nanoTime() - openedAtNanos.get();
+        if (elapsed >= currentOpenDurationNanos.get()) {
+            state.compareAndSet(State.OPEN, State.HALF_OPEN);
+        }
     }
 
     /** Testable clock seam. Production uses {@link Clock#system()}. */
@@ -155,5 +245,4 @@ public final class CircuitBreaker
             return System::nanoTime;
         }
     }
-
 }

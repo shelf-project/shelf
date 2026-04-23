@@ -49,6 +49,10 @@ pub enum Error {
     #[error("membership error: {0}")]
     Membership(String),
 
+    /// Invalid key-derivation input (SHELF-04).
+    #[error("invalid key input: {0}")]
+    InvalidKey(&'static str),
+
     /// Catch-all for code paths that have not been tightened yet.
     /// Owning ticket must remove these before their PR merges.
     #[error("internal: {0}")]
@@ -67,6 +71,7 @@ impl Error {
             Error::Router(_) => "router",
             Error::Admission(_) => "admission",
             Error::Membership(_) => "membership",
+            Error::InvalidKey(_) => "key",
             Error::Internal(_) => "internal",
         }
     }
