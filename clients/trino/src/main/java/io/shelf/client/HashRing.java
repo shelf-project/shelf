@@ -13,6 +13,9 @@
  */
 package io.shelf.client;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -22,9 +25,21 @@ import java.util.Optional;
  *
  * <p>Per ADR-0002, Shelf uses HRW over the live K8s headless-service membership
  * instead of a 2000-vnode consistent hash ring. For each key, the pod with the
- * largest {@code sha256(key || node_id) * weight(node)} owns the key. The plugin
- * and {@code shelfd} compute the owner identically (golden-vector crosscheck
- * lands in ticket SHELF-19).
+ * largest {@code weight / -ln(x)} owns the key, where
+ *
+ * <pre>{@code
+ *   h      = sha256(key || pod_id.getBytes(UTF_8))
+ *   u64_be = big-endian u64 from h[0..8]
+ *   top53  = u64_be >>> 11           // top 53 bits, fits a double exactly
+ *   x      = top53 / 2^53            // in [0, 1)
+ *   score  = weight / (-ln x)
+ * }</pre>
+ *
+ * <p>Ties are broken by lexicographically-smaller {@code podId}. The Rust
+ * daemon (see {@code shelfd/src/router.rs}) implements the same function; the
+ * cross-language golden-vector fixture
+ * {@code shelfd/tests/fixtures/hrw_golden_vectors.txt} is consumed by both
+ * sides' test suites so a drift breaks the build immediately.
  *
  * <p>Weights come from each pod's {@code /stats} endpoint
  * ({@code capacity_bytes - used_bytes}).
@@ -69,19 +84,55 @@ public final class HashRing
      * Return the pod that owns the given content-addressed key.
      *
      * @param contentAddressedKey {@code sha256(etag || offset || length)} bytes
-     *                            produced by {@code shelf-key} (SHELF-04).
+     *                            produced by {@link Key} (SHELF-04), or in the
+     *                            test fixture any 32-byte sequence.
      * @return the owning pod, or {@link Optional#empty()} if the ring is empty.
      */
     public Optional<Node> ownerFor(byte[] contentAddressedKey)
     {
         Objects.requireNonNull(contentAddressedKey, "contentAddressedKey");
-        // TODO(SHELF-19): implement HRW per ADR-0002.
-        //   For each node compute score = hashScore(key || podId) * weight;
-        //   argmax wins. Golden-vector test cross-checks Rust and Java
-        //   (see SHELF-04 + SHELF-19).
-        if (members.isEmpty()) {
-            return Optional.empty();
+        Node best = null;
+        double bestScore = Double.NEGATIVE_INFINITY;
+        for (Node n : members) {
+            double s = score(contentAddressedKey, n);
+            boolean take = (best == null)
+                    || s > bestScore
+                    || (s == bestScore && n.podId().compareTo(best.podId()) < 0);
+            if (take) {
+                best = n;
+                bestScore = s;
+            }
         }
-        return Optional.of(members.get(0));
+        return Optional.ofNullable(best);
+    }
+
+    /**
+     * Capacity-weighted HRW score for a single (key, node) pair. Exposed for
+     * the golden-vector test; not part of the stable API.
+     */
+    public static double score(byte[] key, Node node)
+    {
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        }
+        catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 unavailable", impossible);
+        }
+        digest.update(key);
+        digest.update(node.podId().getBytes(StandardCharsets.UTF_8));
+        byte[] h = digest.digest();
+
+        long u64 = 0L;
+        for (int i = 0; i < 8; i++) {
+            u64 = (u64 << 8) | (h[i] & 0xffL);
+        }
+        long top53 = u64 >>> 11;
+        double x = (double) top53 / (double) (1L << 53);
+        if (x <= 0.0) {
+            return Double.POSITIVE_INFINITY;
+        }
+        double negLn = -Math.log(x);
+        return node.weight() / negLn;
     }
 }

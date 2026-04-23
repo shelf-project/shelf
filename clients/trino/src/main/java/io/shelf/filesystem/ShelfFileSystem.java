@@ -13,6 +13,9 @@
  */
 package io.shelf.filesystem;
 
+import io.shelf.client.CircuitBreaker;
+import io.shelf.client.Pool;
+import io.shelf.client.RangeFetcher;
 import io.shelf.config.ShelfConfig;
 import io.trino.filesystem.FileIterator;
 import io.trino.filesystem.Location;
@@ -23,23 +26,34 @@ import io.trino.filesystem.TrinoOutputFile;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.Collection;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
 /**
- * Shelf implementation of {@link TrinoFileSystem}.
+ * Shelf implementation of {@link TrinoFileSystem} that wraps a delegate
+ * {@link TrinoFileSystem} (e.g. Trino's native S3 implementation).
  *
  * <p><b>Fail-open invariant (BLUEPRINT §9.5).</b> Trino must <em>never</em>
  * observe a Shelf-specific error. Every Shelf-originated failure —
- * connection closed, 503, 504, TimeoutException — is caught inside this
- * class (or its delegates) and transparently degraded to a direct-S3 read.
- * The only errors that surface are legitimate S3 errors (AccessDenied,
- * NoSuchKey, real network partitions to S3), which Trino already handles.
+ * connection closed, 503, 504, TimeoutException — is caught inside
+ * {@link ShelfInputStream} and transparently degraded to a direct read
+ * against the delegate. The only errors that surface here are legitimate
+ * S3 errors (AccessDenied, NoSuchKey, real network partitions), which Trino
+ * already handles.
  *
- * <p><b>Not-yet-implemented.</b> This is the Phase 0 scaffold. Bodies are
- * {@code UnsupportedOperationException} stubs. Every method is tagged with
- * the ticket that delivers its real implementation.
+ * <p><b>Delegation scope.</b> All write operations, all listing operations,
+ * and all metadata calls (exists, length, lastModified) go straight to the
+ * delegate. Only the read path through {@link TrinoInputFile#newStream()}
+ * is intercepted.
+ *
+ * <p><b>Pool selection.</b> {@link ShelfFileSystem#newInputFile(Location)}
+ * looks at the filename suffix to pick between the metadata pool and the
+ * rowgroup pool. Iceberg {@code .json} / {@code .avro} and Parquet
+ * {@code .parquet} footers go to metadata; everything else goes to rowgroup.
+ * This is a coarse heuristic per BLUEPRINT §6.1; a connector-aware strategy
+ * lands in SHELF-17.
  *
  * <p><b>Concurrency.</b> Instances are obtained per Trino session via
  * {@link ShelfFileSystemFactory}. Methods are called from worker threads
@@ -50,10 +64,20 @@ public final class ShelfFileSystem
         implements TrinoFileSystem
 {
     private final ShelfConfig config;
+    private final TrinoFileSystem delegate;
+    private final RangeFetcher fetcher;
+    private final CircuitBreaker breaker;
 
-    public ShelfFileSystem(ShelfConfig config)
+    public ShelfFileSystem(
+            ShelfConfig config,
+            TrinoFileSystem delegate,
+            RangeFetcher fetcher,
+            CircuitBreaker breaker)
     {
         this.config = Objects.requireNonNull(config, "config");
+        this.delegate = Objects.requireNonNull(delegate, "delegate");
+        this.fetcher = Objects.requireNonNull(fetcher, "fetcher");
+        this.breaker = Objects.requireNonNull(breaker, "breaker");
     }
 
     public ShelfConfig config()
@@ -64,108 +88,111 @@ public final class ShelfFileSystem
     @Override
     public TrinoInputFile newInputFile(Location location)
     {
-        // TODO(SHELF-10): wrap ShelfInputFile; delegate to S3 for non-Shelf prefixes.
-        throw new UnsupportedOperationException("SHELF-10: ShelfFileSystem.newInputFile not wired");
+        return wrapInputFile(delegate.newInputFile(location), location);
     }
 
     @Override
     public TrinoInputFile newInputFile(Location location, long length)
     {
-        // TODO(SHELF-10): length-hint path; plumb into ShelfInputFile.
-        throw new UnsupportedOperationException("SHELF-10: ShelfFileSystem.newInputFile(length) not wired");
+        return wrapInputFile(delegate.newInputFile(location, length), location);
     }
 
     @Override
     public TrinoInputFile newInputFile(Location location, long length, Instant lastModified)
     {
-        // TODO(SHELF-10): length+lastModified-hint path.
-        throw new UnsupportedOperationException("SHELF-10: ShelfFileSystem.newInputFile(length,lastModified) not wired");
+        return wrapInputFile(delegate.newInputFile(location, length, lastModified), location);
     }
 
     @Override
     public TrinoOutputFile newOutputFile(Location location)
     {
-        // TODO(SHELF-10): writes bypass Shelf entirely; straight delegation to S3.
-        throw new UnsupportedOperationException("SHELF-10: ShelfFileSystem.newOutputFile not wired");
+        return delegate.newOutputFile(location);
     }
 
     @Override
     public void deleteFile(Location location)
             throws IOException
     {
-        // TODO(SHELF-10): delegate to S3 via the underlying TrinoFileSystem.
-        throw new UnsupportedOperationException("SHELF-10: ShelfFileSystem.deleteFile not wired");
+        delegate.deleteFile(location);
     }
 
     @Override
     public void deleteFiles(Collection<Location> locations)
             throws IOException
     {
-        // TODO(SHELF-10): batch delegation to the underlying S3 filesystem.
-        throw new UnsupportedOperationException("SHELF-10: ShelfFileSystem.deleteFiles not wired");
+        delegate.deleteFiles(locations);
     }
 
     @Override
     public void deleteDirectory(Location location)
             throws IOException
     {
-        // TODO(SHELF-10): delegate to S3.
-        throw new UnsupportedOperationException("SHELF-10: ShelfFileSystem.deleteDirectory not wired");
+        delegate.deleteDirectory(location);
     }
 
     @Override
     public void renameFile(Location source, Location target)
             throws IOException
     {
-        // TODO(SHELF-10): S3 delegation (unsupported on blob stores).
-        throw new UnsupportedOperationException("SHELF-10: ShelfFileSystem.renameFile not wired");
+        delegate.renameFile(source, target);
     }
 
     @Override
     public FileIterator listFiles(Location location)
             throws IOException
     {
-        // TODO(SHELF-10): delegate to S3 (listing is not a cacheable workload in v1).
-        throw new UnsupportedOperationException("SHELF-10: ShelfFileSystem.listFiles not wired");
+        return delegate.listFiles(location);
     }
 
     @Override
     public Optional<Boolean> directoryExists(Location location)
             throws IOException
     {
-        // TODO(SHELF-10): delegate to S3.
-        throw new UnsupportedOperationException("SHELF-10: ShelfFileSystem.directoryExists not wired");
+        return delegate.directoryExists(location);
     }
 
     @Override
     public void createDirectory(Location location)
             throws IOException
     {
-        // TODO(SHELF-10): delegate to S3 (no-op on blob stores).
-        throw new UnsupportedOperationException("SHELF-10: ShelfFileSystem.createDirectory not wired");
+        delegate.createDirectory(location);
     }
 
     @Override
     public void renameDirectory(Location source, Location target)
             throws IOException
     {
-        // TODO(SHELF-10): S3 delegation.
-        throw new UnsupportedOperationException("SHELF-10: ShelfFileSystem.renameDirectory not wired");
+        delegate.renameDirectory(source, target);
     }
 
     @Override
     public Set<Location> listDirectories(Location location)
             throws IOException
     {
-        // TODO(SHELF-10): S3 delegation.
-        throw new UnsupportedOperationException("SHELF-10: ShelfFileSystem.listDirectories not wired");
+        return delegate.listDirectories(location);
     }
 
     @Override
     public Optional<Location> createTemporaryDirectory(Location targetPath, String temporaryPrefix, String relativePrefix)
             throws IOException
     {
-        // TODO(SHELF-10): S3 delegation.
-        throw new UnsupportedOperationException("SHELF-10: ShelfFileSystem.createTemporaryDirectory not wired");
+        return delegate.createTemporaryDirectory(targetPath, temporaryPrefix, relativePrefix);
+    }
+
+    private TrinoInputFile wrapInputFile(TrinoInputFile inner, Location location)
+    {
+        if (!config.isEnabled()) {
+            return inner;
+        }
+        return new ShelfInputFile(inner, fetcher, breaker, config.getEndpoint(), poolFor(location));
+    }
+
+    static Pool poolFor(Location location)
+    {
+        String path = location.path().toLowerCase(Locale.ROOT);
+        if (path.endsWith(".json") || path.endsWith(".avro") || path.endsWith("metadata.json")) {
+            return Pool.METADATA;
+        }
+        return Pool.ROWGROUP;
     }
 }

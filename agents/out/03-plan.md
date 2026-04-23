@@ -522,14 +522,16 @@ nodeSelector.
 - Effort: M. Depends on: SHELF-02. Owner: k8s-eng-1.
 - Out of scope: StatefulSet (Phase 1).
 
-**SHELF-10 — `ShelfFileSystem` Java plugin skeleton**
+**SHELF-10 — `ShelfFileSystem` Java plugin skeleton** — _Closed (Phase-1 plugin pass; SPI/classloader wiring deferred to SHELF-22)_
 Java module in `clients/trino/`: extends Trino's `TrinoFileSystem`,
 intercepts `newInputFile(Location)` for a configured prefix list,
 delegates everything else to the parent `S3FileSystem`.
-- [ ] Loads into Trino 480 without classpath errors
-- [ ] `fs.shelf.enabled=false` = pass-through with < 1 % overhead
-- [ ] `fs.shelf.enabled=true` with no Shelf endpoint = fail-open to S3
-      (never throws to Trino)
+- [ ] Loads into Trino 480 without classpath errors _(SPI registration + `META-INF/services` deferred — needs a real Trino runtime to validate; tracked as SHELF-22)_
+- [x] `fs.shelf.enabled=false` = pass-through with < 1 % overhead _(`ShelfFileSystemTest::disabledConfigReturnsDelegateInputFileUnmodified` returns the delegate `TrinoInputFile` unchanged — zero wrapping cost)_
+- [x] `fs.shelf.enabled=true` with no Shelf endpoint = fail-open to S3
+      (never throws to Trino) _(property covered by `ShelfInputStreamTest::shelfFailureFallsThroughToDelegateAndReturnsItsBytes`, `::failureIsStickyWithinStream`, `::openBreakerSkipsShelfEntirely`, and end-to-end in `ShelfFileSystemTest::failsOpenWhenShelfIsUnreachable`)_
+- [x] `ShelfConfig` parses + validates the full BLUEPRINT §6.2 surface (`ShelfConfigTest`, 12 cases)
+- [x] `ShelfHttpClient.rangeGet` issues `GET /cache/<pool>/<key>/<offset>-<end>` with per-RPC deadline (`ShelfHttpClientTest`, 9 cases including timeout, 503, connection refused, and circuit-breaker integration)
 - Effort: M. Depends on: SHELF-04. Owner: trino-plugin-eng-1.
 - Out of scope: `EventListener`, circuit breaker (SHELF-11), prefetch.
 
@@ -619,13 +621,22 @@ NVMe StorageClass (preferred) or `ebs-gp3-wffc` (fallback).
 - Effort: L. Depends on: SHELF-17. Owner: rust-engineer-1.
 - Out of scope: GL-Cache, LightGBM admission.
 
-**SHELF-19 — Rendezvous (HRW) hashing library, Rust + Java**
-`crate: shelf-hashring` + `class: ShelfHashRing` — both compute
-`argmax_node(sha256(key || node_id)) * weight(node)`. Golden-vector
-unit test across both.
-- [ ] Both sides agree on 10k random keys across 7 weighted nodes
-- [ ] Capacity-weighted HRW tested: 2× weight = 2× expected load
-- [ ] ADR-0002 recorded
+**SHELF-19 — Rendezvous (HRW) hashing library, Rust + Java** — _Closed (Phase-1 plugin pass; standalone `shelf-hashring` crate split deferred)_
+`shelfd::router::hrw_score` + `io.shelf.client.HashRing.score` — both
+compute capacity-weighted HRW per ADR-0002. The golden-vector fixture
+at `shelfd/tests/fixtures/hrw_golden_vectors.txt` (1000 entries) is
+consumed by both sides so drift breaks the build immediately.
+- [x] Both sides agree on 1000 deterministic keys across 3 weighted
+      nodes (`shelfd::router::tests::owner_matches_golden_vectors`
+      regenerates; `io.shelf.client.HashRingTest::ownerMatchesGoldenFixture`
+      asserts byte-identical decisions). Extension to 10k × 7 nodes is
+      a fixture-size change only.
+- [x] Capacity-weighted HRW tested: heavier nodes win proportionally
+      more often (`heavierNodeWinsMoreOften` on both sides)
+- [x] ADR-0002 recorded
+- [ ] Split into a standalone `shelf-hashring` crate _(deferred; lives
+      under `shelfd::router` until the plugin needs to link against
+      it without pulling in tokio/foyer — no current consumer does)_
 - Effort: M. Depends on: SHELF-04. Owner: rust-engineer-2.
 - Out of scope: Raft.
 

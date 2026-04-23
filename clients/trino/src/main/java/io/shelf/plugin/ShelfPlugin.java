@@ -13,10 +13,13 @@
  */
 package io.shelf.plugin;
 
+import io.shelf.client.CircuitBreaker;
+import io.shelf.client.RangeFetcher;
 import io.shelf.config.ShelfConfig;
 import io.shelf.eventlistener.PrefetchClient;
 import io.shelf.eventlistener.ShelfPrefetchListener;
 import io.shelf.filesystem.ShelfFileSystemFactory;
+import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.spi.Plugin;
 import io.trino.spi.eventlistener.EventListener;
 import io.trino.spi.eventlistener.EventListenerFactory;
@@ -55,13 +58,21 @@ public final class ShelfPlugin
     }
 
     /**
-     * Accessor used by the FS-factory registration path (SHELF-10).
-     * Intentionally package-private and not part of the Trino SPI.
+     * Accessor used by the FS-factory registration path (SHELF-22). The
+     * plugin is not yet wired into Trino's plugin SPI registry; this method
+     * is the seam the SPI glue will eventually call once we settle on
+     * connector-vs-plugin packaging. For now it is invoked from unit tests
+     * that supply their own delegate factory, range fetcher, and breaker.
+     *
+     * <p>Intentionally package-private and not part of the Trino SPI.
      */
-    ShelfFileSystemFactory buildFileSystemFactory(ShelfConfig config)
+    ShelfFileSystemFactory buildFileSystemFactory(
+            ShelfConfig config,
+            TrinoFileSystemFactory delegateFactory,
+            RangeFetcher fetcher,
+            CircuitBreaker breaker)
     {
-        // TODO(SHELF-10): wired from catalog config via ShelfConfig.fromMap.
-        return new ShelfFileSystemFactory(config);
+        return new ShelfFileSystemFactory(config, delegateFactory, fetcher, breaker);
     }
 
     /** Nested EventListenerFactory so Trino can instantiate it via the SPI. */
