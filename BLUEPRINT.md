@@ -76,11 +76,12 @@ These hold on every build, every release, forever. They are not
 tuneables. If any of these is broken, it is a release-blocker bug,
 not a configuration problem.
 
-1. **Fallback-to-S3 is unconditional.** If any Shelf component
-   (`shelfd`, `shelf-result-cache`, `shelf-advisor`, snapshot-watcher,
-   Raft quorum, Arrow Flight server, HTTP server) is down, slow,
-   unreachable, mid-restart, draining, or returning any error, the
-   Trino query **must still succeed** using the default S3 endpoint.
+1. **Fallback-to-S3 is unconditional.** If any Shelf v1 component
+   (`shelfd`, `shelf-advisor`, `snapshot-watcher`, the HTTP/2 data
+   plane, the K8s-headless-service membership path, or the S3-backed
+   ConfigMap pin list) is down, slow, unreachable, mid-restart,
+   draining, or returning any error, the Trino query **must still
+   succeed** using the default S3 endpoint.
    The user never sees a Shelf error code; they may see higher
    latency. This is implemented by the circuit-breaker state machine
    in § 9.5 and enforced by a mandatory chaos conformance test owned
@@ -206,8 +207,10 @@ we use them as-is rather than implementing custom policies.
 ### 4.4 Distributed topology
 
 - **Alluxio DORA (2023 blog + code)** — consistent-hash ring over workers,
-clients talk directly to the owning worker in 1 hop. We borrow this idea
-but ship it in Rust + Raft for the ring membership.
+clients talk directly to the owning worker in 1 hop. We borrow the
+one-hop idea but replace the ring + consensus stack with HRW (Rendezvous)
+hashing over K8s headless-service membership: no ring data structure, no
+embedded consensus, no Raft (see ADR-0001 / ADR-0002).
 - **Ceph CRUSH** — deterministic placement under heterogeneous capacity.
 Inspiration for our capacity-weighted ring.
 
@@ -270,23 +273,24 @@ reads.
       │  Planner  ──────────────►  PrefetchHintListener ──gRPC──┐   │
       │  (existing)                (new plugin, event listener) │   │
       │                                                         │   │
-      │  Workers  ──read──►  ShelfFileSystem ──Arrow Flight──┐  │   │
-      │           (TrinoFileSystem SPI plugin)               │  │   │
-      └──────────────────────────────────────────────────────┼──┼───┘
-                                                             │  │
-                                     ┌───────────────────────┘  │
-                                     │                          │
-                                     ▼                          ▼
-                      ┌──── Shelf cache plane (StatefulSet) ────┐
-                      │                                         │
-                      │  ┌──── cache-node-1 ────┐               │
-                      │  │  control (Raft)      │  \            │
-                      │  │  router (hashring)   │   ) gossip    │
-                      │  │  data (Foyer: DRAM+NVMe)             │
-                      │  │  prefetch worker     │               │
-                      │  │  stats exporter      │               │
-                      │  └──────────────────────┘               │
-                      │      × N nodes (replicated peers)       │
+      │  Workers  ──read──►  ShelfFileSystem ──HTTP/2──────┐   │   │
+      │           (TrinoFileSystem SPI plugin)             │   │   │
+      └────────────────────────────────────────────────────┼───┼───┘
+                                                           │   │
+                                     ┌─────────────────────┘   │
+                                     │                         │
+                                     ▼                         ▼
+                      ┌──── Shelf cache plane (StatefulSet) ───┐
+                      │                                        │
+                      │  ┌──── cache-node-1 ────┐              │
+                      │  │  HTTP/2 data plane   │              │
+                      │  │  router (HRW, DNS)   │              │
+                      │  │  data (Foyer: DRAM+NVMe S3-FIFO)    │
+                      │  │  prefetch worker     │              │
+                      │  │  stats exporter      │              │
+                      │  └──────────────────────┘              │
+                      │   × N pods (stateless peers, K8s       │
+                      │     headless-service membership)       │
                       │                                         │
                       └─────────────┬───────────────────────────┘
                                     │
@@ -867,7 +871,7 @@ keys refetched from S3 transparently.
 | JVMs to tune      | 3 heaps × 4 roles                                       | 0                                                      |
 | CM / config files | 4 configmaps                                            | 1                                                      |
 | Lines of YAML     | ~510 in alluxio-values.yaml                             | ~150 target                                            |
-| External deps     | ZK / embedded Raft + S3                                 | embedded Raft + S3                                     |
+| External deps     | ZK / embedded Raft + S3                                 | K8s headless service + S3 (no embedded consensus)      |
 | Pool timeouts     | pre-fix: 3 900 / 10 min                                 | explicit failure modes documented: Tokio task starvation under NVMe write pressure; Foyer write back-pressure; per-prefix origin-pool saturation. Mitigations itemised in §9.4. |
 
 
@@ -889,8 +893,8 @@ re-fetch is authoritative).
 | Failure                  | Behaviour                                                                                                                                                        |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Entire Shelf DOWN        | Plugin falls through to direct S3 via circuit breaker (see § 9.5). Queries slow, not failing.                                                                    |
-| One Shelf pod gone       | Consistent-hash ring re-elects; in-flight reads to that pod retry once, then fall through to S3; missing keys re-fetched from S3 on first miss to the new owner. |
-| Raft quorum loss         | Cache still serves reads (ring is in-process); no new prefetch hints accepted.                                                                                   |
+| One Shelf pod gone       | HRW re-election off the next DNS refresh; in-flight reads to that pod retry once, then fall through to S3; missing keys re-fetched from S3 on first miss to the new owner. |
+| K8s headless-service DNS stale | Plugin sees the stale set for up to `shelf.membership.dns_ttl` (default 15 s); mis-routed requests are absorbed by the receiving pod with an HRW re-hash + one hop, or fall through to S3 on breaker open. |
 | NVMe full                | Admission refuses new inserts; existing cache continues to serve.                                                                                                |
 | Corrupt object           | Content-addressed key mismatch detected on read; object evicted + refetched.                                                                                     |
 | Trino plugin unavailable | Shelf still usable via S3-shim for other engines.                                                                                                                |
@@ -969,8 +973,7 @@ never a `shelf-specific` error:
 | Scenario | Expected outcome |
 |---|---|
 | All `shelfd` pods killed mid-query | All queries succeed via S3 fallback; ≤ 3× latency regression |
-| Raft quorum lost mid-query | All queries succeed; prefetch disabled silently |
-| `shelf-result-cache` returns 500 | Queries bypass and go to Trino normally |
+| K8s headless-service DNS record empty (zero Shelf pods) | Plugin circuit-breaker opens across every pod id within 5 s; all reads flow to S3 |
 | Snapshot-watcher down | Prefetch uses last-known-good snapshot map or falls back to S3-only; queries succeed |
 | Network partition between Trino and all Shelf pods | Every read goes to S3; circuit breaker opens across all keys within 5 s |
 | Half of Shelf pods in `Terminating` state (rolling restart) | Hit rate drops; no query fails |
@@ -1169,7 +1172,7 @@ measured pain we lived through in the last 90 days:
 | Alluxio proxy SDK v1 connection-pool saturation (~3 900 timeouts / 10 min) | AWS SDK v2 + pool-per-prefix + async + fallback to S3                                           |
 | Alluxio `UfsIOManager` default 36 threads bottlenecks throughput           | Rust async runtime, no fixed IO pool; concurrency = node CPU × N                                |
 | Alluxio caches whole 512 MB files to serve 1 row group                     | Row-group-level caching                                                                         |
-| `TempBlockMeta not found` races in zero-copy gRPC reader                   | Content-addressed keys + single-writer-per-key + Arrow Flight zero-copy                         |
+| `TempBlockMeta not found` races in zero-copy gRPC reader                   | Content-addressed keys + single-writer-per-key; reads served over HTTP/2 range-GET (zero-copy Arrow Flight is a v1.x option) |
 | Metadata sync WARNs on Iceberg `_.metadata.json` subpaths                  | Iceberg-native cache: we cache manifests as known entities, not as a filesystem path to sync    |
 | `hive.metastore-cache-ttl=0s` on 3 catalogs causing excessive HMS load     | Shelf caches the metastore table snapshot too (Iceberg `metadata.json` is the snapshot pointer) |
 | 4 Trino replicas each warming the same files                               | Shared Shelf cache across replicas = 4× effective cache size                                    |
@@ -1186,13 +1189,13 @@ Even though these are proprietary, their design choices inform Shelf:
 
 | System                        | Design choice                                                            | Shelf's analogue                                                                                           |
 | ----------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| Firebolt                      | Tablet storage on SSD with modified LRU persisting until engine shutdown | Foyer NVMe tier with SIEVE+GL-Cache eviction                                                               |
+| Firebolt                      | Tablet storage on SSD with modified LRU persisting until engine shutdown | Foyer NVMe tier with S3-FIFO eviction (SOSP '23)                                                           |
 | Firebolt                      | RAM + SSD cache pools, separate eviction per pool                        | Per-pool byte quotas (§ 6.1)                                                                               |
 | Firebolt                      | Sparse primary index per data block                                      | Cache Parquet page index + row-group stats aggressively; they ARE our sparse index                         |
 | Firebolt                      | Warmup-engines API                                                       | Validates our plan-aware prefetch; directly inspired the `Pin`/`Prefetch` gRPC methods                     |
 | Databricks Photon             | Auto-managed local NVMe, Parquet + stats cached                          | Similar to our NVMe tier but coupled to their runtime; we stay engine-agnostic                             |
-| Snowflake                     | Result cache at virtual warehouse level                                  | We do this in `shelf-result-cache`, keyed on snapshot ID (correct invalidation, which Snowflake also does) |
-| Dremio C3                     | NVMe local cache + Arrow-based zero copy                                 | Same tech choices (Foyer ≈ CacheLib, Arrow Flight)                                                         |
+| Snowflake                     | Result cache at virtual warehouse level                                  | Out of scope for v1; result caching lives in the Redis + Trino-Gateway plugin from COMPARISON.md Phase 0   |
+| Dremio C3                     | NVMe local cache + Arrow-based zero copy                                 | Shared NVMe tier (Foyer ≈ CacheLib); data plane is HTTP/2 range-GET in v1, Arrow Flight reserved for v1.x  |
 
 
 **The three things all of these systems independently converged on** and
