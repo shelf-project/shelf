@@ -110,12 +110,34 @@ fn request_id() -> String {
     format!("{:016x}", nanos ^ pid)
 }
 
-/// Parse `Range: bytes=<start>-<end>`; `end` is INCLUSIVE in HTTP.
+/// Parsed shape of a `Range:` header, pre-resolution.
 ///
-/// Returns `(offset, length)` on success.
-/// `Ok(None)` ⇒ no `Range` header at all.
-/// `Err(())` ⇒ malformed header (InvalidRange).
-fn parse_range_header(headers: &HeaderMap) -> Result<Option<(u64, u64)>, ()> {
+/// We deliberately do *not* collapse these into `(offset, length)` at
+/// parse time: `RangeFrom` and `Suffix` both need `total_size` from a
+/// subsequent `HeadObject`, and the "closed" shape is the only one we
+/// can resolve without it. The caller in `handle_get_object` does the
+/// resolution after `head_meta` returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeSpec {
+    /// `bytes=<start>-<end>` (both inclusive per RFC 9110).
+    Closed { start: u64, end: u64 },
+    /// `bytes=<start>-` — read from `start` to end of object.
+    /// Used by streaming readers that don't yet know the object size.
+    From { start: u64 },
+    /// `bytes=-<n>` — read the *last* `n` bytes of the object.
+    /// This is the Parquet / Avro footer-read shape and is what
+    /// Trino's native S3 client uses via `readTail(n)`.
+    Suffix { last: u64 },
+}
+
+/// Parse `Range: bytes=<spec>` per RFC 9110 §14.1.
+///
+/// Returns:
+/// - `Ok(None)` — no `Range` header at all
+/// - `Ok(Some(spec))` — a single-range spec the caller resolves
+///   after `HeadObject`
+/// - `Err(())` — malformed header (caller returns 416 `InvalidRange`)
+fn parse_range_header(headers: &HeaderMap) -> Result<Option<RangeSpec>, ()> {
     let Some(raw) = headers.get(header::RANGE) else {
         return Ok(None);
     };
@@ -128,15 +150,65 @@ fn parse_range_header(headers: &HeaderMap) -> Result<Option<(u64, u64)>, ()> {
         return Err(());
     }
     let (start, end) = rest.split_once('-').ok_or(())?;
-    let start: u64 = start.parse().map_err(|_| ())?;
-    if end.is_empty() {
-        return Err(());
+    match (start.is_empty(), end.is_empty()) {
+        // `bytes=-<n>` — suffix read (Parquet/Avro footer shape).
+        // RFC 9110: zero-length suffix is malformed.
+        (true, false) => {
+            let last: u64 = end.parse().map_err(|_| ())?;
+            if last == 0 {
+                return Err(());
+            }
+            Ok(Some(RangeSpec::Suffix { last }))
+        }
+        // `bytes=<start>-` — open-ended read to end-of-object.
+        (false, true) => {
+            let start: u64 = start.parse().map_err(|_| ())?;
+            Ok(Some(RangeSpec::From { start }))
+        }
+        // `bytes=<start>-<end>` — closed range.
+        (false, false) => {
+            let start: u64 = start.parse().map_err(|_| ())?;
+            let end: u64 = end.parse().map_err(|_| ())?;
+            if end < start {
+                return Err(());
+            }
+            Ok(Some(RangeSpec::Closed { start, end }))
+        }
+        // `bytes=-` — malformed.
+        (true, true) => Err(()),
     }
-    let end: u64 = end.parse().map_err(|_| ())?;
-    if end < start {
-        return Err(());
+}
+
+/// Resolve a `RangeSpec` against the object's total size into the
+/// canonical `(offset, length)` the cache layer keys on. Returns
+/// `None` when the range is unsatisfiable (caller returns 416).
+fn resolve_range(spec: RangeSpec, total_size: u64) -> Option<(u64, u64)> {
+    match spec {
+        RangeSpec::Closed { start, end } => {
+            if total_size == 0 || start >= total_size {
+                return None;
+            }
+            // RFC 9110: the client may ask for past-end; we clamp.
+            let last = end.min(total_size - 1);
+            Some((start, last - start + 1))
+        }
+        RangeSpec::From { start } => {
+            if total_size == 0 || start >= total_size {
+                return None;
+            }
+            Some((start, total_size - start))
+        }
+        RangeSpec::Suffix { last } => {
+            if total_size == 0 {
+                return None;
+            }
+            // RFC 9110 §14.1.2: if suffix > total_size, return the
+            // whole object. S3 matches this behaviour.
+            let length = last.min(total_size);
+            let offset = total_size - length;
+            Some((offset, length))
+        }
     }
-    Ok(Some((start, end - start + 1)))
 }
 
 /// Convert an RFC 3339 UTC timestamp (the shape produced by
@@ -201,7 +273,7 @@ pub async fn handle_get_object(
     Path((bucket, key)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let range = match parse_range_header(&headers) {
+    let range_spec = match parse_range_header(&headers) {
         Ok(r) => r,
         Err(()) => {
             // No size context yet → `bytes */0` is still a valid
@@ -217,13 +289,11 @@ pub async fn handle_get_object(
     };
     let total_size = meta.content_length;
 
-    let (offset, length, is_partial) = match range {
-        Some((start, len)) => {
-            if total_size == 0 || start >= total_size || start + len > total_size {
-                return invalid_range(total_size);
-            }
-            (start, len, true)
-        }
+    let (offset, length, is_partial) = match range_spec {
+        Some(spec) => match resolve_range(spec, total_size) {
+            Some((offset, length)) => (offset, length, true),
+            None => return invalid_range(total_size),
+        },
         None => {
             let cap = state
                 .s3_shim_max_full_object_bytes
@@ -269,8 +339,34 @@ pub async fn handle_get_object(
         .get_or_fetch(pool, key_obj, state.admission.as_ref(), fetcher)
         .await;
 
+    // Bookkeeping parity with the native `/cache/...` data plane: a
+    // shim read that hits Foyer is a cache hit and must bump
+    // `shelf_hits_total{pool=...}`; a miss bumps `shelf_misses_total`.
+    // Without this, operators watching the dashboard after an
+    // `s3.endpoint` swap would see a flat 0-hit line and assume the
+    // cache is broken. The data-plane path in `http.rs` does the
+    // same dance against the same counters.
+    let pool_label = match pool {
+        Pool::Metadata => "metadata",
+        Pool::RowGroup => "rowgroup",
+    };
     let bytes = match outcome {
-        Ok(ReadOutcome::Hit(b)) | Ok(ReadOutcome::Miss(b)) => b,
+        Ok(ReadOutcome::Hit(b)) => {
+            state
+                .metrics
+                .hits_total
+                .with_label_values(&[pool_label])
+                .inc();
+            b
+        }
+        Ok(ReadOutcome::Miss(b)) => {
+            state
+                .metrics
+                .misses_total
+                .with_label_values(&[pool_label])
+                .inc();
+            b
+        }
         Err(e) => return s3_internal_error("origin/store", &e.to_string()),
     };
 
@@ -432,6 +528,135 @@ mod tests {
         let id = request_id();
         assert_eq!(id.len(), 16);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ---- Range parsing (SHELF-22 Trino wiring) ----
+    //
+    // Trino's `S3Input.readTail(n)` (`io.trino.filesystem.s3`) is the
+    // pivotal client: it issues `Range: bytes=-<n>` suffix reads for
+    // Parquet + Avro footers. The earlier parser treated that as
+    // malformed and responded 416, which broke every Iceberg query
+    // the moment we pointed `s3.endpoint` at the shim. These tests
+    // pin the RFC-9110 shapes that unblock the Trino read path.
+
+    fn range_headers(v: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::RANGE, HeaderValue::from_str(v).unwrap());
+        h
+    }
+
+    #[test]
+    fn parse_range_closed() {
+        let h = range_headers("bytes=0-99");
+        assert_eq!(
+            parse_range_header(&h).unwrap(),
+            Some(RangeSpec::Closed { start: 0, end: 99 })
+        );
+    }
+
+    #[test]
+    fn parse_range_open_ended() {
+        let h = range_headers("bytes=1024-");
+        assert_eq!(
+            parse_range_header(&h).unwrap(),
+            Some(RangeSpec::From { start: 1024 })
+        );
+    }
+
+    #[test]
+    fn parse_range_suffix_used_by_trino_readtail() {
+        // `S3Input.readTail(8)` → `bytes=-8`. Critical path for
+        // Parquet footer magic-number checks and Avro footer sync
+        // markers.
+        let h = range_headers("bytes=-8");
+        assert_eq!(
+            parse_range_header(&h).unwrap(),
+            Some(RangeSpec::Suffix { last: 8 })
+        );
+    }
+
+    #[test]
+    fn parse_range_malformed_cases() {
+        assert!(parse_range_header(&range_headers("bytes=")).is_err());
+        assert!(parse_range_header(&range_headers("bytes=-")).is_err());
+        assert!(parse_range_header(&range_headers("bytes=-0")).is_err());
+        assert!(parse_range_header(&range_headers("bytes=10-5")).is_err());
+        assert!(parse_range_header(&range_headers("bytes=abc-10")).is_err());
+        // Multi-range: S3 rejects these for GetObject; we match.
+        assert!(parse_range_header(&range_headers("bytes=0-10,20-30")).is_err());
+        // Missing unit prefix.
+        assert!(parse_range_header(&range_headers("0-10")).is_err());
+    }
+
+    #[test]
+    fn parse_range_absent_when_no_header() {
+        assert_eq!(parse_range_header(&HeaderMap::new()).unwrap(), None);
+    }
+
+    #[test]
+    fn resolve_range_closed_basic() {
+        let spec = RangeSpec::Closed { start: 0, end: 99 };
+        assert_eq!(resolve_range(spec, 1_000), Some((0, 100)));
+    }
+
+    #[test]
+    fn resolve_range_closed_clamps_past_end() {
+        // RFC 9110: past-end is not unsatisfiable as long as start is
+        // within the object; we clamp the end to total-1.
+        let spec = RangeSpec::Closed {
+            start: 900,
+            end: 10_000,
+        };
+        assert_eq!(resolve_range(spec, 1_000), Some((900, 100)));
+    }
+
+    #[test]
+    fn resolve_range_rejects_start_at_or_past_end() {
+        let spec = RangeSpec::Closed {
+            start: 1_000,
+            end: 2_000,
+        };
+        assert_eq!(resolve_range(spec, 1_000), None);
+    }
+
+    #[test]
+    fn resolve_range_suffix_within_object() {
+        // Typical Parquet footer: last 8 bytes of a 5 MiB file.
+        let spec = RangeSpec::Suffix { last: 8 };
+        assert_eq!(
+            resolve_range(spec, 5 * 1024 * 1024),
+            Some((5 * 1024 * 1024 - 8, 8))
+        );
+    }
+
+    #[test]
+    fn resolve_range_suffix_larger_than_object_returns_full_object() {
+        // RFC 9110 §14.1.2: `bytes=-N` where N > size returns the
+        // whole object, not an error. S3 behaves the same.
+        let spec = RangeSpec::Suffix { last: 10_000 };
+        assert_eq!(resolve_range(spec, 1_000), Some((0, 1_000)));
+    }
+
+    #[test]
+    fn resolve_range_from_returns_tail() {
+        let spec = RangeSpec::From { start: 750 };
+        assert_eq!(resolve_range(spec, 1_000), Some((750, 250)));
+    }
+
+    #[test]
+    fn resolve_range_from_past_end_is_unsatisfiable() {
+        let spec = RangeSpec::From { start: 1_000 };
+        assert_eq!(resolve_range(spec, 1_000), None);
+    }
+
+    #[test]
+    fn resolve_range_on_empty_object_is_always_unsatisfiable() {
+        assert_eq!(
+            resolve_range(RangeSpec::Closed { start: 0, end: 0 }, 0),
+            None
+        );
+        assert_eq!(resolve_range(RangeSpec::From { start: 0 }, 0), None);
+        assert_eq!(resolve_range(RangeSpec::Suffix { last: 8 }, 0), None);
     }
 
     fn extract_between<'a>(haystack: &'a str, open: &str, close: &str) -> Option<&'a str> {

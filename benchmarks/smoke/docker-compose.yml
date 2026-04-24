@@ -120,6 +120,7 @@ services:
     command: ["--config", "/etc/shelfd/shelfd.yaml"]
     ports:
       - "127.0.0.1:9091:9090"  # data-plane port (hosts /metrics per SHELF-02) mapped as 9091 externally
+      - "127.0.0.1:9092:9092"  # SHELF-22 S3-compat read shim (Iceberg s3.endpoint points here)
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:9090/healthz || exit 1"]
       interval: 3s

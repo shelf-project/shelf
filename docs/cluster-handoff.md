@@ -87,6 +87,21 @@ Green criteria:
 - **S3-compat shim** — port `:9092` on every pod. boto3/DuckDB/Polars
   access path in `shelfd/docs/design-notes/SHELF-22-s3-compat-shim.md`.
   No auth today; expose behind the same network policy as `:8080`.
+  **Trino wiring**: this is *also* the Trino read-path wiring —
+  Trino 480's public `Plugin` SPI does not expose
+  `getFileSystemFactories()`, so we cannot register a Java FS
+  factory through the plugin path. Instead, point the Iceberg
+  catalog's `s3.endpoint` at `http://shelfd:9092` (see
+  `benchmarks/smoke/config/trino/etc/catalog/iceberg.properties`).
+  Trino's native S3 client then issues normal
+  `HeadObject`/`GetObject(Range)` calls; the shim ignores SigV4
+  signatures by design, caches in Foyer under the same
+  content-addressed key the Java plugin would have used, and falls
+  through to MinIO/S3 on miss. For the smoke harness,
+  `iceberg.metadata-cache.enabled=false` forces the warm run to
+  re-hit the shim so `shelf_hits_total` is observable; in production
+  leave it at the default (the Iceberg JVM cache is a latency win
+  on top of Shelf).
 - **shelfctl** — `cargo build -p shelfctl --release` produces the
   operator CLI. Subcommands: `stats`, `ring`, `pin`, `unpin`, `evict`,
   `reload`. All talk to `/admin/*` over HTTP (default endpoint
