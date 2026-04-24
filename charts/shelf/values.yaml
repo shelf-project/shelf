@@ -275,3 +275,30 @@ logging:
 # Environment-variable overrides. Useful in dev for pointing shelfd at a
 # MinIO endpoint or injecting AWS_* credentials. Prefer IRSA in prod.
 extraEnv: []
+
+# ---------------------------------------------------------------------------
+# Grafana dashboards + alerts — [plan §4 SHELF-27]
+#
+# The shelf chart ships its dashboard JSON and Prometheus alert rules as
+# ConfigMaps picked up by the kube-prometheus-stack Grafana sidecar
+# (label selector is configurable below). Files live under
+# `charts/shelf/grafana/` and are Files.Get'd into the ConfigMap at
+# render time, so editing the JSON / YAML is a pure content change with
+# no template surgery.
+# ---------------------------------------------------------------------------
+grafana:
+  # -- Render the dashboard + alerts ConfigMaps. Opt-in so clusters
+  # without the kube-prometheus-stack Grafana sidecar don't end up with
+  # orphan ConfigMaps. [plan §4 SHELF-27]
+  enabled: true
+  dashboardLabel:
+    # -- Label key the Grafana sidecar selects on (default: grafana_dashboard).
+    key: grafana_dashboard
+    # -- Label value the sidecar matches (default: "1").
+    value: "1"
+  alertLabel:
+    # -- Label key the alert sidecar selects on. Kept separate from the
+    # dashboard label so alerts can be disabled without hiding the
+    # dashboard (set .Values.grafana.enabled=false to disable both).
+    key: grafana_alert
+    value: "1"

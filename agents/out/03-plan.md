@@ -896,17 +896,40 @@ under different Foyer configs.
 - Effort: L. Depends on: SHELF-06. Owner: data-eng-1.
 - Out of scope: live replay.
 
-**SHELF-27 — Grafana dashboard (insight-first)**
-Single Grafana dashboard UID `shelf-overview`. Four top-row big
-numbers: cumulative hit rate, p95 latency, fallback rate, pod health.
-Second row: per-pool hit rate, NVMe used, DRAM used. Follow
-AGENTS.md's traffic-light conventions.
-- [ ] Dashboard JSON committed to `charts/shelf/grafana/`
-- [ ] Alerting rules for: hit rate < 60 % for 10 m, fallback rate > 5 %
-      for 5 m, any pod unready for 2 m
-- [ ] On-call can diagnose in ≤ 3 clicks per AGENTS.md rubric
+**SHELF-27 — Grafana dashboard (insight-first)** — **CLOSED**
+Read-path dashboard UID `shelf-read-path` (read-path scope; the
+overview rollup is a follow-up). Four top-row **big-number** stat
+panels — hit ratio (overall + per pool), p99 latency, miss volume,
+error rate — sit above per-pool / per-route / HEAD drill-down rows and
+an origin + pinning row. Follows AGENTS.md's traffic-light conventions.
+Ships as a ConfigMap via the kube-prometheus-stack Grafana sidecar so
+clusters pick it up without a dashboards-as-code job.
+- [x] Dashboard JSON committed to `charts/shelf/grafana/`
+      (canonical: `charts/shelf/grafana/dashboards/shelf-read-path.json`;
+      SHELF-08 starter at `observability/dashboards/shelf-read-path.json`
+      retained for backward-compat.)
+- [x] Alerting rules for: 5xx rate > 1 % for 10 m (`ShelfReadPathHighErrorRate`,
+      severity=page), p99 latency > 100 ms for 10 m (`ShelfReadPathP99Degraded`,
+      severity=warn), overall hit-ratio < 40 % for 30 m
+      (`ShelfReadPathHitRatioCollapsed`, severity=info). Committed at
+      `charts/shelf/grafana/alerts/shelf-read-path.yml`. (The originally-
+      scoped "hit rate < 60 % / fallback rate > 5 % / pod unready 2 m"
+      trio was rewritten to match the metrics actually emitted —
+      `fallback_rate` is not a `shelfd` series and pod-unready belongs
+      on a kube-state-metrics panel not the read-path dashboard.)
+- [x] On-call can diagnose in ≤ 3 clicks per AGENTS.md rubric (big-
+      numbers row answers health in one glance; drill rows below are
+      two clicks away).
+- Design notes at
+  [`shelfd/docs/design-notes/SHELF-27-observability-dashboard.md`](../../shelfd/docs/design-notes/SHELF-27-observability-dashboard.md)
+  (layout, thresholds, metric-label gap list for `status`, `route`,
+  `shelf_pinned_bytes`, `shelf_origin_requests_total`,
+  `shelf_singleflight_followers_total`).
+- Helm wiring: `charts/shelf/templates/grafana-dashboard.yaml` +
+  `grafana.*` block in `charts/shelf/values.yaml`.
 - Effort: M. Depends on: SHELF-08. Owner: sre-1.
-- Out of scope: ML-dashboards.
+- Out of scope: ML-dashboards; `shelf-overview` / `shelf-tenant`
+  rollup dashboards (tracked as SHELF-27 follow-ups).
 
 **SHELF-28 — Chaos drills + v0.5 gate runbook**
 Write + schedule two weekly drills: (a) KEDA-style rotation (kill 50 %

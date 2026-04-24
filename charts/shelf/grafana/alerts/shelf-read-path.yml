@@ -1,0 +1,51 @@
+# SHELF-27 — Prometheus alert rules for the Shelf read path.
+#
+# Thresholds and windows are documented in
+# shelfd/docs/design-notes/SHELF-27-observability-dashboard.md.
+#
+# NOTE: `shelf_request_seconds` is emitted with labels `path` and
+# `outcome`; it does NOT currently carry a `status` label. The
+# `ShelfReadPathHighErrorRate` rule ships with the literal
+# `status=~"5.."` selector the SHELF-27 spec calls for — once the
+# histogram is augmented with a status (or we introduce a dedicated
+# shelf_http_requests_total counter) this rule starts firing on real
+# data. Until then the selector matches zero series, which means the
+# rule evaluates to NaN and does NOT page (Prometheus treats NaN > 0.01
+# as false). See shelfd/docs/metrics.md for the authoritative label
+# surface.
+
+groups:
+  - name: shelf-read-path
+    rules:
+      - alert: ShelfReadPathHighErrorRate
+        expr: |
+          sum(rate(shelf_request_seconds_count{status=~"5.."}[10m]))
+            / sum(rate(shelf_request_seconds_count[10m])) > 0.01
+        for: 10m
+        labels:
+          severity: page
+          service: shelf
+        annotations:
+          summary: "Shelf 5xx rate above 1% for 10m"
+          runbook: "https://internal/runbooks/shelf-errors"  # SHELF-28 runbook
+
+      - alert: ShelfReadPathP99Degraded
+        expr: |
+          histogram_quantile(0.99, sum by (le) (rate(shelf_request_seconds_bucket[10m]))) > 0.1
+        for: 10m
+        labels:
+          severity: warn
+          service: shelf
+        annotations:
+          summary: "Shelf p99 read latency > 100ms for 10m"
+
+      - alert: ShelfReadPathHitRatioCollapsed
+        expr: |
+          (sum(rate(shelf_hits_total[30m])) /
+           (sum(rate(shelf_hits_total[30m])) + sum(rate(shelf_misses_total[30m])))) < 0.4
+        for: 30m
+        labels:
+          severity: info
+          service: shelf
+        annotations:
+          summary: "Shelf hit-ratio < 40% for 30m — check rotation / warmup"
