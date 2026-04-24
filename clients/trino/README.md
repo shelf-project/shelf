@@ -73,13 +73,27 @@ clients/trino/
 
 ## State machine (CircuitBreaker, BLUEPRINT §9.5)
 
-```
-             5 consecutive failures
-  CLOSED  ─────────────────────────►  OPEN ──────── 10 s ──────►  HALF-OPEN
-     ▲                                 ▲                              │
-     │           success               │        failure               │
-     └─────────────────────────────────┴──────────────────────────────┘
-                                             timer doubled on re-open
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> OPEN: 5 consecutive failures
+    OPEN --> HALF_OPEN: cooldown elapsed (10s, doubles on re-open, max 60s)
+    HALF_OPEN --> CLOSED: probe succeeds
+    HALF_OPEN --> OPEN: probe fails (cooldown doubled)
+    CLOSED --> CLOSED: success resets failure counter
 ```
 
-See `io.shelf.client.CircuitBreaker` javadoc for exact semantics.
+Semantics (see [`io.shelf.client.CircuitBreaker`](src/main/java/io/shelf/client/CircuitBreaker.java)):
+
+- **CLOSED** — all requests dispatched; any success clears the rolling failure
+  counter; five consecutive failures trip the breaker.
+- **OPEN** — every `tryAcquire()` short-circuits to the fail-open path
+  (direct-S3 fallback) until the cooldown expires. Initial cooldown is 10 s;
+  it doubles on each re-open up to a 60 s ceiling and resets on the first
+  successful `HALF_OPEN` probe.
+- **HALF_OPEN** — exactly one in-flight probe is admitted. Success → `CLOSED`,
+  cooldown reset. Failure → back to `OPEN`, cooldown doubled.
+
+Covered end-to-end by [`io.shelf.client.CircuitBreakerTest`](src/test/java/io/shelf/client/CircuitBreakerTest.java)
+(12 cases across the full state surface, including exponential-backoff bounds
+and single-probe admission in `HALF_OPEN`).

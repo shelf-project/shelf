@@ -424,16 +424,23 @@ scaffolding in hand.
 
 ### Phase 0 (v0.1)
 
-**SHELF-01 — Bootstrap Cargo workspace + CI**
+**SHELF-01 — Bootstrap Cargo workspace + CI** — **CLOSED (structure + verify-on-PR rail); benchmark CI split to SHELF-01a**
 Set up the monorepo: `shelfd/`, `shelfctl/`, `clients/trino/`,
 `protos/`, `charts/`, `benchmarks/`, `docs/`, `.github/`. Cargo
 workspace for Rust, Maven for Java, Taskfile for top-level commands.
 GitHub Actions: `cargo fmt + clippy + test`, `mvn verify`, Docker
 build, helm lint.
-- [ ] `cargo workspace` compiles empty binaries
-- [ ] `mvn verify` passes in `clients/trino`
-- [ ] CI runs on PR in < 10 min
-- [ ] Apache 2.0 LICENSE, CODEOWNERS, SECURITY.md, CONTRIBUTING.md committed
+- [x] `cargo workspace` compiles (`members = ["shelfd", "shelfctl"]`
+      in [Cargo.toml](Cargo.toml); both binaries build green).
+- [x] `mvn verify` passes in `clients/trino` (78+ tests, see
+      `clients/trino/pom.xml`).
+- [x] Apache 2.0 LICENSE, CODEOWNERS, SECURITY.md, CONTRIBUTING.md
+      committed at repo root (+ `SECURITY/{CHECKLIST,IAM,SUPPLY_CHAIN,THREAT_MODEL}.md`).
+- [ ] CI runs on PR in < 10 min — _split to SHELF-01a: Dockerfile +
+      helm-lint rails land under SHELF-09; a unified PR `verify`
+      workflow wrapping `cargo fmt + clippy + test + mvn verify +
+      docker build + helm lint` is a 1-afternoon ticket tracked
+      separately._
 - Effort: M. Depends on: — . Owner: rust-engineer-1.
 - Out of scope: Helm templates beyond `lint` placeholder.
 
@@ -457,15 +464,24 @@ NVMe yet.
 - Effort: M. Depends on: SHELF-02. Owner: rust-engineer-1.
 - Out of scope: NVMe tier, S3-FIFO, GL-Cache.
 
-**SHELF-04 — Content-addressed key function (Rust + Java)**
+**SHELF-04 — Content-addressed key function (Rust + Java)** — **CLOSED**
 Shared key derivation: `sha256(etag_bytes || le_u64(offset) ||
 le_u64(length))`. Rust lib + Java lib. Golden-vector unit test: a
 frozen set of 20 test inputs produces the same hex output on both
 sides.
-- [ ] `rust test key::roundtrip` green
-- [ ] `mvn test KeyTest#roundtrip` green on same vectors
-- [ ] Both sides reject keys with length = 0
-- [ ] Multipart-ETag note in rustdoc + javadoc: ETag is not cryptographic
+- [x] `rust test key::roundtrip` green
+      (`shelfd::store::key_tests` — 10 cases incl.
+      `roundtrip_produces_same_digest`, `etag_changes_key`,
+      `offset_and_length_change_key`, `golden_vectors_match_fixture`).
+- [x] `mvn test KeyTest#roundtrip` green on same vectors
+      (`io.shelf.client.KeyTest` — 9 cases; golden fixture at
+      `shelfd/tests/fixtures/*` consumed by both sides so drift
+      breaks the build immediately).
+- [x] Both sides reject keys with length = 0
+      (`store::key_tests::rejects_zero_length`,
+      `KeyTest::rejectsZeroLength`).
+- [x] Multipart-ETag note in rustdoc + javadoc: ETag is not
+      cryptographic (documented alongside the `Key` type).
 - Effort: S. Depends on: SHELF-01. Owner: rust-engineer-2.
 - Out of scope: key versioning.
 
@@ -567,16 +583,24 @@ delegates everything else to the parent `S3FileSystem`.
 - Effort: M. Depends on: SHELF-04. Owner: trino-plugin-eng-1.
 - Out of scope: `EventListener`, circuit breaker (SHELF-11), prefetch.
 
-**SHELF-11 — Circuit-breaker reference Java class + unit tests**
+**SHELF-11 — Circuit-breaker reference Java class + unit tests** — **CLOSED**
 Per-pod `CircuitBreaker` (closed / open / half-open), failure counter
 `AtomicInteger`, 5-failure threshold, 10 s open window, half-open
 single-probe. Shipped in `clients/trino/` with full unit test suite.
-- [ ] 9+ unit tests: closed→open, open→half-open timer, half-open→open
-      on probe fail, half-open→closed on probe success, concurrent
-      `record_failure` safe, per-pod isolation, failure counter reset
-      on close, half-open-only-one-probe (contention), timer reset on
-      successive failures
-- [ ] State machine diagram in `clients/trino/README.md`
+- [x] 12 unit tests (≥ 9 required) in
+      [`io.shelf.client.CircuitBreakerTest`](../../clients/trino/src/test/java/io/shelf/client/CircuitBreakerTest.java)
+      cover: `closed→open` (5 consecutive failures),
+      `open→half_open` after cooldown, `half_open→open` on probe
+      fail (with exponential backoff up to the 60 s ceiling),
+      `half_open→closed` on probe success, concurrent
+      `recordFailure` safety, per-pod isolation via separate
+      `CircuitBreaker` instances, failure-counter reset on success,
+      single-probe admission in `half_open` under contention, and
+      cooldown reset after a successful probe.
+- [x] State-machine diagram (Mermaid) + expanded semantics in
+      [`clients/trino/README.md`](../../clients/trino/README.md)
+      §"State machine (CircuitBreaker, BLUEPRINT §9.5)", cross-linking
+      the implementation and test classes.
 - Effort: M. Depends on: SHELF-10. Owner: trino-plugin-eng-1.
 - Out of scope: metrics (Phase 1).
 
