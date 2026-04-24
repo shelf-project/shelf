@@ -652,11 +652,28 @@ pub mod handlers {
         let metadata = PoolStats {
             capacity_bytes: state.store.capacity_bytes(Pool::Metadata),
             used_bytes: state.store.used_bytes(Pool::Metadata),
+            disk_used_bytes: state.store.disk_bytes_used(Pool::Metadata),
+            disk_capacity_bytes: state.store.disk_bytes_capacity(Pool::Metadata),
         };
         let rowgroup = PoolStats {
             capacity_bytes: state.store.capacity_bytes(Pool::RowGroup),
             used_bytes: state.store.used_bytes(Pool::RowGroup),
+            disk_used_bytes: state.store.disk_bytes_used(Pool::RowGroup),
+            disk_capacity_bytes: state.store.disk_bytes_capacity(Pool::RowGroup),
         };
+        // Keep the dashboard-bound Prometheus gauges aligned with
+        // the `/stats` payload so scrapes arriving between the two
+        // observe a consistent snapshot.
+        state
+            .metrics
+            .disk_bytes_used
+            .with_label_values(&["rowgroup"])
+            .set(rowgroup.disk_used_bytes as i64);
+        state
+            .metrics
+            .disk_bytes_capacity
+            .with_label_values(&["rowgroup"])
+            .set(rowgroup.disk_capacity_bytes as i64);
         let stats = Stats {
             pod_id: state.pod_id.as_ref().to_owned(),
             capacity_bytes: metadata
@@ -1008,10 +1025,14 @@ mod tests {
             metadata_pool: PoolStats {
                 capacity_bytes: 1024,
                 used_bytes: 128,
+                disk_used_bytes: 0,
+                disk_capacity_bytes: 0,
             },
             rowgroup_pool: PoolStats {
                 capacity_bytes: 1024,
                 used_bytes: 384,
+                disk_used_bytes: 8,
+                disk_capacity_bytes: 2048,
             },
             pinned_bytes: 0,
             pinned_count: 0,
@@ -1038,8 +1059,16 @@ mod tests {
             assert!(md.contains_key(key), "metadata_pool.{key} missing");
         }
         let rg = obj["rowgroup_pool"].as_object().expect("rowgroup_pool");
-        for key in ["capacity_bytes", "used_bytes"] {
+        for key in [
+            "capacity_bytes",
+            "used_bytes",
+            // SHELF-18: additive disk-tier exposition.
+            "disk_used_bytes",
+            "disk_capacity_bytes",
+        ] {
             assert!(rg.contains_key(key), "rowgroup_pool.{key} missing");
         }
+        assert_eq!(rg["disk_used_bytes"].as_u64(), Some(8));
+        assert_eq!(rg["disk_capacity_bytes"].as_u64(), Some(2048));
     }
 }

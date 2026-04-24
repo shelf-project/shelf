@@ -34,6 +34,18 @@ pub struct Registry {
     pub errors_total: IntCounterVec,
     pub bytes_used: IntGaugeVec,
     pub request_seconds: HistogramVec,
+    /// SHELF-18 — disk-tier hits for pools that run as a Foyer
+    /// `HybridCache`. Only the `rowgroup` pool ever observes a
+    /// non-zero value today; the label is kept so future pools
+    /// can join without a metric rename.
+    pub disk_hits_total: IntCounterVec,
+    /// SHELF-18 — disk-tier misses (memory miss → disk miss).
+    pub disk_misses_total: IntCounterVec,
+    /// SHELF-18 — best-effort bytes resident on the NVMe tier. See
+    /// `FoyerStore::disk_bytes_used` for the approximation used.
+    pub disk_bytes_used: IntGaugeVec,
+    /// SHELF-18 — NVMe quota from `pools.rowgroup.nvme_bytes`.
+    pub disk_bytes_capacity: IntGaugeVec,
 }
 
 impl Registry {
@@ -97,6 +109,18 @@ impl Registry {
         )
         .map_err(|e| crate::Error::Internal(anyhow::anyhow!("register req_seconds: {e}")))?;
 
+        // SHELF-18 disk-tier series.
+        //
+        // These live as module-level `Lazy` statics so the
+        // `FoyerStore::get` hot path can bump them without owning
+        // an `Arc<Registry>` handle. `Registry::init` clones the
+        // handles in so `/metrics` touches and the `Registry`
+        // struct surface stay symmetric with the other series.
+        let disk_hits_total = DISK_HITS_TOTAL.clone();
+        let disk_misses_total = DISK_MISSES_TOTAL.clone();
+        let disk_bytes_used = DISK_BYTES_USED.clone();
+        let disk_bytes_capacity = DISK_BYTES_CAPACITY.clone();
+
         Ok(Self {
             hits_total,
             misses_total,
@@ -105,9 +129,61 @@ impl Registry {
             errors_total,
             bytes_used,
             request_seconds,
+            disk_hits_total,
+            disk_misses_total,
+            disk_bytes_used,
+            disk_bytes_capacity,
         })
     }
 }
+
+/// SHELF-18 disk-tier counters / gauges, registered lazily into the
+/// global [`REGISTRY`].
+///
+/// Exposed as module-level statics so modules that do not hold an
+/// `Arc<Registry>` (e.g. the hot-path `store.rs`) can increment them
+/// directly. `Registry::init` clones these handles for the `Registry`
+/// struct so consumers that already read from the struct keep
+/// working.
+pub static DISK_HITS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_disk_hits_total",
+        "Cache hits served from the NVMe tier of a hybrid pool (SHELF-18).",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register disk_hits")
+});
+
+pub static DISK_MISSES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_disk_misses_total",
+        "Misses that reached the NVMe tier of a hybrid pool and still missed.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register disk_misses")
+});
+
+pub static DISK_BYTES_USED: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_disk_bytes_used",
+        "Best-effort bytes held on the NVMe tier of each pool.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register disk_bytes_used")
+});
+
+pub static DISK_BYTES_CAPACITY: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_disk_bytes_capacity",
+        "Configured NVMe capacity for each pool (pools.<pool>.nvme_bytes).",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register disk_bytes_capacity")
+});
 
 /// Stable list of metric series `shelfd` exposes on `/metrics` in the
 /// Phase-0 gate build. Kept as module-level data so `docs/metrics.md`
@@ -121,6 +197,11 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelfd_error_total",
     "shelf_bytes_used",
     "shelf_request_seconds",
+    // SHELF-18 — disk-tier telemetry.
+    "shelf_disk_hits_total",
+    "shelf_disk_misses_total",
+    "shelf_disk_bytes_used",
+    "shelf_disk_bytes_capacity",
 ];
 
 #[cfg(test)]
@@ -163,6 +244,10 @@ mod tests {
             reg.errors_total.desc(),
             reg.bytes_used.desc(),
             reg.request_seconds.desc(),
+            reg.disk_hits_total.desc(),
+            reg.disk_misses_total.desc(),
+            reg.disk_bytes_used.desc(),
+            reg.disk_bytes_capacity.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -200,6 +285,16 @@ mod tests {
         reg.request_seconds
             .with_label_values(&["/cache", "hit"])
             .observe(0.0);
+        reg.disk_hits_total
+            .with_label_values(&["rowgroup"])
+            .inc_by(0);
+        reg.disk_misses_total
+            .with_label_values(&["rowgroup"])
+            .inc_by(0);
+        reg.disk_bytes_used.with_label_values(&["rowgroup"]).set(0);
+        reg.disk_bytes_capacity
+            .with_label_values(&["rowgroup"])
+            .set(0);
 
         let families = REGISTRY.gather();
         let names: HashSet<String> = families.iter().map(|f| f.get_name().to_owned()).collect();

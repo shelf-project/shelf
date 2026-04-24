@@ -5,8 +5,10 @@
 //! - SHELF-17 — separate DRAM pool for Iceberg manifests / Parquet
 //!   footers / page indexes. ADR-0008 mandates exactly two pools in v1.
 //! - SHELF-18 — hybrid DRAM + NVMe `pool.rowgroup` with S3-FIFO
-//!   eviction per ADR-0009. **Deferred in phase-0 — rowgroup is DRAM
-//!   only; NVMe tier lands once we have a PVC-backed test loop.**
+//!   admission per ADR-0009. When `pools.rowgroup.nvme_bytes > 0`
+//!   the pool is built as a `foyer::HybridCache`; otherwise it
+//!   stays DRAM-only so dev clusters and CI without a PVC keep
+//!   working. See `shelfd/docs/design-notes/SHELF-18-nvme-hybrid-pool.md`.
 //! - SHELF-04 — content-addressed keys:
 //!   `sha256(etag_bytes || le_u64(offset) || le_u64(length) || le_u32(rg_ordinal))`.
 //! - SHELF-06 — [`FoyerStore::get_or_fetch`] is the single-flight
@@ -19,10 +21,16 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 
 use bytes::Bytes;
+use foyer::{
+    DirectFsDeviceOptions, Engine, HybridCache, HybridCacheBuilder, LargeEngineOptions,
+    S3FifoConfig,
+};
 use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::OnceCell;
 
@@ -56,7 +64,7 @@ pub enum Pool {
 /// opaque version token that changes whenever S3 observes a new
 /// version. SHA-256 over the concatenated inputs is what gives us the
 /// content-addressed property inside the cache.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Key(pub [u8; 32]);
 
 impl Key {
@@ -153,15 +161,163 @@ pub trait Store: Send + Sync + Debug + 'static {
 /// up without a separate reaper task.
 type InflightMap = Mutex<HashMap<(Pool, Key), Weak<OnceCell<Result<Bytes, String>>>>>;
 
-/// Pool-segmented Foyer cache. Phase-0 holds both pools as DRAM-only
-/// `foyer::Cache<Key, Bytes>`; SHELF-18 will swap `rowgroup` for
-/// `HybridCache` once the PVC-backed test loop exists.
+/// Internal: one pool worth of Foyer state.
+///
+/// `Dram` matches the SHELF-17 path (both pools DRAM-only). `Hybrid`
+/// wraps a `foyer::HybridCache` for SHELF-18 once the operator
+/// configures `pools.rowgroup.nvme_bytes > 0`. The enum is private
+/// so the rest of `shelfd` keeps treating pools uniformly via the
+/// [`FoyerStore`] surface.
+#[derive(Debug)]
+enum PoolHandle {
+    Dram {
+        cache: foyer::Cache<Key, Bytes>,
+        /// DRAM budget as configured — Foyer's `Cache::capacity`
+        /// applies internal alignment we would rather not surface
+        /// on `/stats`.
+        dram_capacity: u64,
+    },
+    Hybrid {
+        cache: HybridCache<Key, Bytes>,
+        dram_capacity: u64,
+        disk_capacity: u64,
+    },
+}
+
+/// Tier of the pool that served a `get`. Used internally to route
+/// the disk hit/miss counter increments — never leaves the module.
+#[derive(Debug, Clone, Copy)]
+enum Tier {
+    Dram,
+    Disk,
+}
+
+impl PoolHandle {
+    fn dram_capacity(&self) -> u64 {
+        match self {
+            PoolHandle::Dram { dram_capacity, .. } | PoolHandle::Hybrid { dram_capacity, .. } => {
+                *dram_capacity
+            }
+        }
+    }
+
+    fn disk_capacity(&self) -> u64 {
+        match self {
+            PoolHandle::Dram { .. } => 0,
+            PoolHandle::Hybrid { disk_capacity, .. } => *disk_capacity,
+        }
+    }
+
+    fn used_bytes(&self) -> u64 {
+        match self {
+            PoolHandle::Dram { cache, .. } => cache.usage() as u64,
+            PoolHandle::Hybrid { cache, .. } => cache.memory().usage() as u64,
+        }
+    }
+
+    /// SHELF-18 best-effort disk occupancy.
+    ///
+    /// Foyer 0.12 does not expose a live "bytes on disk" counter on
+    /// `HybridCache`; the closest proxy is `DeviceStats.write_bytes`
+    /// (monotonic lifetime write volume). Once the on-disk ring has
+    /// wrapped the reported value equals or exceeds the configured
+    /// capacity, so we clamp with `min`. Operators who need a
+    /// precise number reach for `foyer_storage_op_total{op="write"}`
+    /// on the Foyer-emitted series; `shelf_disk_bytes_used` is
+    /// meant as a "disk has started filling" signal for dashboards.
+    fn disk_used_bytes(&self) -> u64 {
+        match self {
+            PoolHandle::Dram { .. } => 0,
+            PoolHandle::Hybrid {
+                cache,
+                disk_capacity,
+                ..
+            } => {
+                let stats = cache.stats();
+                let written = stats.write_bytes.load(Ordering::Relaxed) as u64;
+                written.min(*disk_capacity)
+            }
+        }
+    }
+
+    /// Load a value from the pool.
+    ///
+    /// Returns `(bytes, tier)` on hit. For the DRAM path `tier` is
+    /// always [`Tier::Dram`]. For the hybrid path we first consult
+    /// the in-memory cache to differentiate a memory hit (no disk
+    /// traffic) from a disk hit (storage engine `load` succeeded).
+    async fn get(&self, key: &Key) -> crate::Result<Option<(Bytes, Tier)>> {
+        match self {
+            PoolHandle::Dram { cache, .. } => {
+                Ok(cache.get(key).map(|e| (e.value().clone(), Tier::Dram)))
+            }
+            PoolHandle::Hybrid { cache, .. } => {
+                if let Some(entry) = cache.memory().get(key) {
+                    return Ok(Some((entry.value().clone(), Tier::Dram)));
+                }
+                match cache
+                    .get(key)
+                    .await
+                    .map_err(|e| crate::Error::Store(format!("hybrid get: {e}")))?
+                {
+                    Some(entry) => Ok(Some((entry.value().clone(), Tier::Disk))),
+                    None => Ok(None),
+                }
+            }
+        }
+    }
+
+    fn insert(&self, key: Key, bytes: Bytes) {
+        match self {
+            PoolHandle::Dram { cache, .. } => {
+                cache.insert(key, bytes);
+            }
+            PoolHandle::Hybrid { cache, .. } => {
+                cache.insert(key, bytes);
+            }
+        }
+    }
+
+    fn contains(&self, key: &Key) -> bool {
+        match self {
+            PoolHandle::Dram { cache, .. } => cache.contains(key),
+            // `contains` is a membership hint only (used by the pin
+            // path for the length lookup); we deliberately check the
+            // memory tier only so pinning stays synchronous, matching
+            // SHELF-24's "pin requires resident" contract.
+            PoolHandle::Hybrid { cache, .. } => cache.memory().contains(key),
+        }
+    }
+
+    fn memory_get_len(&self, key: &Key) -> Option<u64> {
+        match self {
+            PoolHandle::Dram { cache, .. } => cache.get(key).map(|e| e.value().len() as u64),
+            PoolHandle::Hybrid { cache, .. } => {
+                cache.memory().get(key).map(|e| e.value().len() as u64)
+            }
+        }
+    }
+
+    fn remove(&self, key: &Key) {
+        match self {
+            PoolHandle::Dram { cache, .. } => {
+                cache.remove(key);
+            }
+            PoolHandle::Hybrid { cache, .. } => {
+                cache.remove(key);
+            }
+        }
+    }
+}
+
+/// Pool-segmented Foyer cache. `metadata` is always DRAM-only per
+/// ADR-0008 / SHELF-17. `rowgroup` is DRAM-only when
+/// `pools.rowgroup.nvme_bytes == 0` and a Foyer `HybridCache`
+/// otherwise (SHELF-18, ADR-0009).
 #[derive(Debug)]
 pub struct FoyerStore {
-    metadata: foyer::Cache<Key, Bytes>,
-    rowgroup: foyer::Cache<Key, Bytes>,
-    metadata_capacity: u64,
-    rowgroup_capacity: u64,
+    metadata: PoolHandle,
+    rowgroup: PoolHandle,
     inflight: InflightMap,
     /// SHELF-24 allowlist. Held separately from the two Foyer caches
     /// so that (1) eviction of the bytes does not also unpin the key
@@ -173,10 +329,17 @@ pub struct FoyerStore {
 impl FoyerStore {
     /// Open the Foyer pools from the daemon config.
     ///
-    /// Phase-0: both pools are DRAM-only `foyer::Cache`. The weighter
-    /// charges each entry its byte length so eviction honours the
-    /// byte budget rather than entry count. NVMe hybrid-tier wiring
-    /// for `rowgroup` lands with SHELF-18.
+    /// `metadata` is always DRAM-only. `rowgroup` is DRAM-only when
+    /// `pools.rowgroup.nvme_bytes == 0` and a Foyer `HybridCache`
+    /// with a `DirectFsDevice` disk engine otherwise (SHELF-18,
+    /// ADR-0009). The in-memory eviction algorithm on the hybrid
+    /// pool is `S3FifoConfig::default()` so the ADR-0009 admission
+    /// story (small → main promotion before any disk write) is
+    /// honoured by construction.
+    ///
+    /// Fails fast with `Error::Store("pool.rowgroup NVMe init …")`
+    /// on any disk-engine error — operators should see the failure,
+    /// not a silent fall-back to DRAM.
     pub async fn open(config: &crate::config::PoolsConfig) -> crate::Result<Self> {
         let metadata_capacity = config.metadata.dram_bytes;
         let rowgroup_capacity = config.rowgroup.dram_bytes;
@@ -191,24 +354,104 @@ impl FoyerStore {
             ));
         }
 
-        let metadata = foyer::CacheBuilder::new(metadata_capacity as usize)
+        let metadata_cache = foyer::CacheBuilder::new(metadata_capacity as usize)
             .with_weighter(|_k: &Key, v: &Bytes| v.len())
             .build();
-        let rowgroup = foyer::CacheBuilder::new(rowgroup_capacity as usize)
-            .with_weighter(|_k: &Key, v: &Bytes| v.len())
-            .build();
+        let metadata = PoolHandle::Dram {
+            cache: metadata_cache,
+            dram_capacity: metadata_capacity,
+        };
+
+        let rowgroup = if config.rowgroup.nvme_bytes == 0 {
+            let cache = foyer::CacheBuilder::new(rowgroup_capacity as usize)
+                .with_weighter(|_k: &Key, v: &Bytes| v.len())
+                .build();
+            PoolHandle::Dram {
+                cache,
+                dram_capacity: rowgroup_capacity,
+            }
+        } else {
+            Self::build_hybrid_rowgroup(&config.rowgroup).await?
+        };
 
         Ok(Self {
             metadata,
             rowgroup,
-            metadata_capacity,
-            rowgroup_capacity,
             inflight: Mutex::new(HashMap::new()),
             pin_set: RwLock::new(HashMap::new()),
         })
     }
 
-    fn cache_for(&self, pool: Pool) -> &foyer::Cache<Key, Bytes> {
+    /// Build the `rowgroup` pool as a Foyer `HybridCache` backed by
+    /// `nvme_dir`. Kept as its own method so the `open` path reads
+    /// linearly; the error wrapping funnels every possible failure
+    /// (missing dir, zero-after-alignment capacity, device IO) into
+    /// a single `Error::Store("pool.rowgroup NVMe init failed: …")`
+    /// for ops.
+    async fn build_hybrid_rowgroup(
+        cfg: &crate::config::RowGroupPoolConfig,
+    ) -> crate::Result<PoolHandle> {
+        cfg.validate_nvme()
+            .map_err(|e| crate::Error::Store(format!("pool.rowgroup NVMe init failed: {e}")))?;
+        std::fs::create_dir_all(&cfg.nvme_dir).map_err(|e| {
+            crate::Error::Store(format!(
+                "pool.rowgroup NVMe init failed: create `{}`: {e}",
+                cfg.nvme_dir.display()
+            ))
+        })?;
+
+        let dram_capacity = cfg.dram_bytes as usize;
+        let disk_capacity = cfg.nvme_bytes as usize;
+        // `DirectFsDeviceOptions::with_file_size` must be <=
+        // capacity and aligned; pick the smaller of 64 MiB and
+        // `disk_capacity / 4` so small (test) pools still get
+        // multiple regions for the reclaim loop.
+        let file_size = (disk_capacity / 4).clamp(1 << 20, 64 * 1024 * 1024);
+
+        let device = DirectFsDeviceOptions::new(&cfg.nvme_dir)
+            .with_capacity(disk_capacity)
+            .with_file_size(file_size);
+
+        let cache: HybridCache<Key, Bytes> = HybridCacheBuilder::new()
+            .with_name("shelfd.rowgroup")
+            .memory(dram_capacity)
+            .with_weighter(|_k: &Key, v: &Bytes| v.len())
+            // ADR-0009 — S3-FIFO governs memory-tier promotion so
+            // only the "warm" entries ever touch the disk ring.
+            .with_eviction_config(S3FifoConfig::default())
+            .storage(Engine::Large)
+            .with_device_options(device)
+            .with_large_object_disk_cache_options(LargeEngineOptions::new())
+            .build()
+            .await
+            .map_err(|e| crate::Error::Store(format!("pool.rowgroup NVMe init failed: {e}")))?;
+
+        // Pre-touch the disk-tier counters/gauges so Prometheus
+        // emits a child row even before the first hit/miss. This
+        // keeps dashboards green on a freshly-booted hybrid pool
+        // that has not yet served any traffic.
+        let label = pool_label(Pool::RowGroup);
+        crate::metrics::DISK_HITS_TOTAL
+            .with_label_values(&[label])
+            .inc_by(0);
+        crate::metrics::DISK_MISSES_TOTAL
+            .with_label_values(&[label])
+            .inc_by(0);
+        crate::metrics::DISK_BYTES_USED
+            .with_label_values(&[label])
+            .set(0);
+        crate::metrics::DISK_BYTES_CAPACITY
+            .with_label_values(&[label])
+            .set(cfg.nvme_bytes as i64);
+
+        Ok(PoolHandle::Hybrid {
+            cache,
+            dram_capacity: cfg.dram_bytes,
+            disk_capacity: cfg.nvme_bytes,
+        })
+    }
+
+    fn handle_for(&self, pool: Pool) -> &PoolHandle {
         match pool {
             Pool::Metadata => &self.metadata,
             Pool::RowGroup => &self.rowgroup,
@@ -238,7 +481,7 @@ impl FoyerStore {
         A: crate::admission::AdmissionPolicy + ?Sized,
         F: Future<Output = crate::Result<Bytes>> + Send,
     {
-        if let Some(bytes) = self.get(pool, &key).await? {
+        if let Some(bytes) = <Self as Store>::get(self, pool, &key).await? {
             return Ok(ReadOutcome::Hit(bytes));
         }
 
@@ -325,8 +568,13 @@ impl FoyerStore {
         if self.pin_set.read().contains_key(key) {
             return true;
         }
-        let len = match self.cache_for(pool).get(key) {
-            Some(entry) => entry.value().len() as u64,
+        // SHELF-18: on a hybrid pool we only honour `pin()` when the
+        // key is already memory-resident — a disk-only pin would
+        // require async I/O which the admin surface does not do.
+        // Operators can always re-fetch to warm the memory tier and
+        // then pin.
+        let len = match self.handle_for(pool).memory_get_len(key) {
+            Some(len) => len,
             None => return false,
         };
         self.pin_set.write().insert(key.clone(), len);
@@ -362,14 +610,30 @@ impl FoyerStore {
 
     /// Evict a key from `pool`. Preserves the pin-set so a subsequent
     /// re-fetch still goes through admission with `ctx.pinned = true`.
-    /// Returns `true` iff the key was resident in `pool`.
+    /// Returns `true` iff the key was resident in the pool's memory
+    /// tier before the call. For a hybrid pool, `remove` also drops
+    /// the disk-tier copy; the boolean reflects the memory-tier
+    /// membership check so the `evict` admin handler can still
+    /// return a correct `404` when the key is genuinely absent.
     pub fn evict_in_pool(&self, pool: Pool, key: &Key) -> bool {
-        let cache = self.cache_for(pool);
-        let had = cache.get(key).is_some();
+        let handle = self.handle_for(pool);
+        let had = handle.contains(key);
         if had {
-            cache.remove(key);
+            handle.remove(key);
         }
         had
+    }
+
+    /// SHELF-18 — bytes currently held on the NVMe tier of `pool`.
+    /// Always `0` for `Pool::Metadata` (DRAM-only per ADR-0008).
+    pub fn disk_bytes_used(&self, pool: Pool) -> u64 {
+        self.handle_for(pool).disk_used_bytes()
+    }
+
+    /// SHELF-18 — configured NVMe capacity for `pool` (0 when the
+    /// pool runs DRAM-only).
+    pub fn disk_bytes_capacity(&self, pool: Pool) -> u64 {
+        self.handle_for(pool).disk_capacity()
     }
 }
 
@@ -395,13 +659,32 @@ impl ReadOutcome {
 
 impl Store for FoyerStore {
     async fn get(&self, pool: Pool, key: &Key) -> crate::Result<Option<Bytes>> {
-        let cache = self.cache_for(pool);
-        Ok(cache.get(key).map(|entry| entry.value().clone()))
+        // SHELF-18: a `None` on a hybrid pool means both DRAM and
+        // the NVMe tier missed; we record the miss unconditionally
+        // so dashboards see disk-miss pressure even for pools that
+        // would otherwise never report. DRAM-only pools do not
+        // bump either counter (hence the guard on `Tier::Disk`).
+        match self.handle_for(pool).get(key).await? {
+            Some((bytes, Tier::Dram)) => Ok(Some(bytes)),
+            Some((bytes, Tier::Disk)) => {
+                crate::metrics::DISK_HITS_TOTAL
+                    .with_label_values(&[pool_label(pool)])
+                    .inc();
+                Ok(Some(bytes))
+            }
+            None => {
+                if matches!(self.handle_for(pool), PoolHandle::Hybrid { .. }) {
+                    crate::metrics::DISK_MISSES_TOTAL
+                        .with_label_values(&[pool_label(pool)])
+                        .inc();
+                }
+                Ok(None)
+            }
+        }
     }
 
     async fn insert(&self, pool: Pool, key: Key, bytes: Bytes) -> crate::Result<()> {
-        let cache = self.cache_for(pool);
-        cache.insert(key, bytes);
+        self.handle_for(pool).insert(key, bytes);
         Ok(())
     }
 
@@ -436,14 +719,26 @@ impl Store for FoyerStore {
     }
 
     fn used_bytes(&self, pool: Pool) -> u64 {
-        self.cache_for(pool).usage() as u64
+        self.handle_for(pool).used_bytes()
     }
 
     fn capacity_bytes(&self, pool: Pool) -> u64 {
-        match pool {
-            Pool::Metadata => self.metadata_capacity,
-            Pool::RowGroup => self.rowgroup_capacity,
-        }
+        // SHELF-18 contract: `capacity_bytes` reports the DRAM budget
+        // only. The NVMe tier is exposed separately via
+        // [`FoyerStore::disk_bytes_capacity`] so ops dashboards can
+        // graph the two tiers independently without an extra join on
+        // `/stats`. HRW weighting (SHELF-20) stays anchored on DRAM
+        // for cache-sizing purposes.
+        self.handle_for(pool).dram_capacity()
+    }
+}
+
+/// Prometheus label for a pool. Kept as a separate fn so the HTTP
+/// and store layers emit the same string.
+pub(crate) fn pool_label(pool: Pool) -> &'static str {
+    match pool {
+        Pool::Metadata => "metadata",
+        Pool::RowGroup => "rowgroup",
     }
 }
 
@@ -1016,5 +1311,121 @@ mod store_tests {
         let key = k(45);
         assert!(!store.evict(Pool::RowGroup, &key));
         assert!(!store.evict(Pool::Metadata, &key));
+    }
+
+    // --- SHELF-18 hybrid-pool unit tests ---
+    //
+    // These exercise the `PoolHandle::Hybrid` branch at unit scope.
+    // Integration tests against the HTTP surface live in
+    // `shelfd/tests/it_hybrid_pool.rs`.
+
+    fn hybrid_pools(nvme_dir: std::path::PathBuf) -> PoolsConfig {
+        PoolsConfig {
+            metadata: MetadataPoolConfig {
+                dram_bytes: 1 << 20,
+            },
+            rowgroup: RowGroupPoolConfig {
+                dram_bytes: 1 << 20,
+                nvme_dir,
+                nvme_bytes: 64 * 1024 * 1024,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_nvme_bytes_stays_dram_only() {
+        // Regression guard for the "SHELF-17 behaviour is unchanged
+        // when NVMe is off" contract. `test_pools()` builds with
+        // `nvme_bytes = 0`, so capacity_bytes reports the DRAM
+        // budget, disk capacity is 0, and no temp dir is ever
+        // consulted even though `nvme_dir` is a nonsense path.
+        let store = new_store().await;
+        assert_eq!(store.capacity_bytes(Pool::RowGroup), 1 << 20);
+        assert_eq!(store.disk_bytes_capacity(Pool::RowGroup), 0);
+        assert_eq!(store.disk_bytes_used(Pool::RowGroup), 0);
+    }
+
+    #[tokio::test]
+    async fn hybrid_pool_uses_tempdir_under_nvme_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pools = hybrid_pools(dir.path().to_path_buf());
+        let store = FoyerStore::open(&pools).await.expect("open hybrid");
+
+        // We report DRAM capacity on `capacity_bytes`; NVMe shows
+        // up on `disk_bytes_capacity`. Either shape was acceptable
+        // per SHELF-18 spec; the DRAM-only reporting keeps HRW
+        // (SHELF-20) weighting stable.
+        assert_eq!(store.capacity_bytes(Pool::RowGroup), 1 << 20);
+        assert_eq!(store.disk_bytes_capacity(Pool::RowGroup), 64 * 1024 * 1024);
+        // A hybrid pool that has never been written to reports zero
+        // disk bytes used.
+        assert_eq!(store.disk_bytes_used(Pool::RowGroup), 0);
+
+        // The directory must contain Foyer's on-disk layout after
+        // open (at minimum a region file). This is a cheap sanity
+        // check on "NVMe init really happened".
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("readdir")
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "hybrid pool open must populate nvme_dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_pool_insert_then_get_is_hit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pools = hybrid_pools(dir.path().to_path_buf());
+        let store = FoyerStore::open(&pools).await.expect("open");
+        let key = k(60);
+        store
+            .insert(
+                Pool::RowGroup,
+                key.clone(),
+                Bytes::from_static(b"hybrid-hit"),
+            )
+            .await
+            .unwrap();
+        let got = store.get(Pool::RowGroup, &key).await.unwrap();
+        assert_eq!(got.as_deref(), Some(&b"hybrid-hit"[..]));
+    }
+
+    #[tokio::test]
+    async fn hybrid_pool_disk_miss_bumps_counter() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pools = hybrid_pools(dir.path().to_path_buf());
+        let store = FoyerStore::open(&pools).await.expect("open");
+        let baseline = crate::metrics::DISK_MISSES_TOTAL
+            .with_label_values(&["rowgroup"])
+            .get();
+        let key = k(61);
+        assert!(store.get(Pool::RowGroup, &key).await.unwrap().is_none());
+        let now = crate::metrics::DISK_MISSES_TOTAL
+            .with_label_values(&["rowgroup"])
+            .get();
+        assert_eq!(
+            now - baseline,
+            1,
+            "a miss on a hybrid pool must increment shelf_disk_misses_total"
+        );
+    }
+
+    #[tokio::test]
+    async fn dram_only_miss_does_not_bump_disk_counter() {
+        let store = new_store().await; // nvme_bytes=0
+        let baseline = crate::metrics::DISK_MISSES_TOTAL
+            .with_label_values(&["rowgroup"])
+            .get();
+        let key = k(62);
+        assert!(store.get(Pool::RowGroup, &key).await.unwrap().is_none());
+        let now = crate::metrics::DISK_MISSES_TOTAL
+            .with_label_values(&["rowgroup"])
+            .get();
+        assert_eq!(
+            now, baseline,
+            "DRAM-only pools must not bump the disk-miss counter"
+        );
     }
 }

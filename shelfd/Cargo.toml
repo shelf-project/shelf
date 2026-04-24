@@ -36,7 +36,7 @@ opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 prometheus = { workspace = true }
-bytes = { workspace = true }
+bytes = { workspace = true, features = ["serde"] }
 futures = { workspace = true }
 once_cell = { workspace = true }
 sha2 = { workspace = true }
@@ -54,6 +54,10 @@ prost = { workspace = true }
 criterion = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
+# SHELF-18 — integration tests for the hybrid NVMe pool need a
+# per-test temp directory that the foyer `DirectFsDevice` can own
+# and clean up on drop.
+tempfile = "3"
 
 [features]
 # Feature flags track ADR-0001/2/3/4/8/9 scope. The defaults represent

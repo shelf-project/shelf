@@ -158,10 +158,57 @@ pub struct MetadataPoolConfig {
 pub struct RowGroupPoolConfig {
     /// DRAM portion of the hybrid pool.
     pub dram_bytes: u64,
-    /// NVMe directory (the PVC mount point).
+    /// NVMe directory (the PVC mount point). Ignored when
+    /// [`RowGroupPoolConfig::nvme_bytes`] is `0`.
     pub nvme_dir: PathBuf,
-    /// NVMe capacity in bytes.
+    /// NVMe capacity in bytes. `0` disables the hybrid tier and
+    /// keeps `rowgroup` DRAM-only — see ADR-0009 and SHELF-18.
     pub nvme_bytes: u64,
+}
+
+impl RowGroupPoolConfig {
+    /// Validate the NVMe block. SHELF-18: if `nvme_bytes > 0` the
+    /// directory must be non-empty, absolute, and either already
+    /// exist or be creatable. When `nvme_bytes == 0` we skip
+    /// validation entirely so an unused `nvme_dir` field (dev,
+    /// unit tests) does not block startup.
+    pub fn validate_nvme(&self) -> crate::Result<()> {
+        if self.nvme_bytes == 0 {
+            return Ok(());
+        }
+        if self.nvme_dir.as_os_str().is_empty() {
+            return Err(crate::Error::Config(
+                "pools.rowgroup.nvme_dir must be non-empty when nvme_bytes > 0".into(),
+            ));
+        }
+        if !self.nvme_dir.is_absolute() {
+            return Err(crate::Error::Config(format!(
+                "pools.rowgroup.nvme_dir must be absolute, got `{}`",
+                self.nvme_dir.display()
+            )));
+        }
+        // If the path exists it must be a directory. If it does
+        // not exist we do a dry-run `create_dir_all` so the daemon
+        // fails at boot rather than at first insert. `FoyerStore::open`
+        // will call `create_dir_all` again — that is a cheap no-op
+        // once the dir exists and keeps the two callsites honest.
+        if self.nvme_dir.exists() {
+            if !self.nvme_dir.is_dir() {
+                return Err(crate::Error::Config(format!(
+                    "pools.rowgroup.nvme_dir `{}` exists but is not a directory",
+                    self.nvme_dir.display()
+                )));
+            }
+        } else {
+            std::fs::create_dir_all(&self.nvme_dir).map_err(|e| {
+                crate::Error::Config(format!(
+                    "pools.rowgroup.nvme_dir `{}` is not creatable: {e}",
+                    self.nvme_dir.display()
+                ))
+            })?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -374,6 +421,7 @@ impl Config {
                 "pools.rowgroup.dram_bytes must be > 0".into(),
             ));
         }
+        self.pools.rowgroup.validate_nvme()?;
         if self.admission.size_threshold_bytes == 0 {
             return Err(crate::Error::Config(
                 "admission.size_threshold_bytes must be > 0".into(),
@@ -471,5 +519,96 @@ pin_list:
         let bad = MINIMAL.to_owned() + "\ngrafana: true\n";
         let err = Config::from_yaml_str(&bad, None).unwrap_err();
         assert!(matches!(err, crate::Error::Config(_)));
+    }
+
+    // SHELF-18 — `RowGroupPoolConfig::validate_nvme` unit tests.
+    //
+    // Path handling is intentionally strict at boot (absolute path,
+    // reject files-that-look-like-dirs) so operators hear about
+    // misconfigurations before the daemon binds its listener. The
+    // `nvme_bytes == 0` path is the noop-escape used by SHELF-17
+    // tests and the no-PVC dev cluster.
+
+    #[test]
+    fn validate_nvme_noop_when_zero_bytes() {
+        let cfg = RowGroupPoolConfig {
+            dram_bytes: 1,
+            nvme_dir: PathBuf::from(""),
+            nvme_bytes: 0,
+        };
+        cfg.validate_nvme().expect("zero nvme bytes must be valid");
+    }
+
+    #[test]
+    fn validate_nvme_rejects_empty_dir_when_enabled() {
+        let cfg = RowGroupPoolConfig {
+            dram_bytes: 1,
+            nvme_dir: PathBuf::from(""),
+            nvme_bytes: 1,
+        };
+        let err = cfg.validate_nvme().unwrap_err();
+        assert!(
+            matches!(&err, crate::Error::Config(m) if m.contains("nvme_dir must be non-empty"))
+        );
+    }
+
+    #[test]
+    fn validate_nvme_rejects_relative_path() {
+        let cfg = RowGroupPoolConfig {
+            dram_bytes: 1,
+            nvme_dir: PathBuf::from("relative/path"),
+            nvme_bytes: 1,
+        };
+        let err = cfg.validate_nvme().unwrap_err();
+        assert!(matches!(&err, crate::Error::Config(m) if m.contains("must be absolute")));
+    }
+
+    #[test]
+    fn validate_nvme_creates_missing_absolute_dir() {
+        // Pick a deterministic per-test path under `std::env::temp_dir`
+        // so we do not pull in `tempfile` for what is a ~ms
+        // existence check. The test cleans up after itself.
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "shelfd-validate-nvme-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!dir.exists(), "precondition: dir must not exist");
+        let cfg = RowGroupPoolConfig {
+            dram_bytes: 1,
+            nvme_dir: dir.clone(),
+            nvme_bytes: 1,
+        };
+        cfg.validate_nvme().expect("creatable dir must validate");
+        assert!(dir.is_dir(), "validator must create the missing dir");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_nvme_rejects_non_directory_path() {
+        // Create a temp *file* and point the validator at it — the
+        // validator must refuse rather than silently accept.
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "shelfd-validate-nvme-file-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"x").expect("seed file");
+        let cfg = RowGroupPoolConfig {
+            dram_bytes: 1,
+            nvme_dir: path.clone(),
+            nvme_bytes: 1,
+        };
+        let err = cfg.validate_nvme().unwrap_err();
+        assert!(matches!(&err, crate::Error::Config(m) if m.contains("not a directory")));
+        let _ = std::fs::remove_file(&path);
     }
 }

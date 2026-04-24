@@ -60,10 +60,25 @@ pub struct Stats {
 }
 
 /// Per-pool capacity / usage section of [`Stats`].
+///
+/// SHELF-17 keeps `metadata` DRAM-only so the two disk fields are
+/// `0` there by definition. SHELF-18 adds the disk tier to
+/// `rowgroup`; both fields use `#[serde(default)]` so old clients
+/// that never request them (and the metadata serialization path)
+/// stay byte-compatible with pre-SHELF-18 payloads.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PoolStats {
     pub capacity_bytes: u64,
     pub used_bytes: u64,
+    /// Bytes held on the NVMe tier. See
+    /// [`crate::store::FoyerStore::disk_bytes_used`] for the
+    /// best-effort approximation the daemon reports.
+    #[serde(default)]
+    pub disk_used_bytes: u64,
+    /// Configured NVMe capacity (`pools.<pool>.nvme_bytes`). `0`
+    /// when the pool runs DRAM-only.
+    #[serde(default)]
+    pub disk_capacity_bytes: u64,
 }
 
 /// Serve the control plane (HTTP + gRPC stub).
