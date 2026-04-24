@@ -13,8 +13,8 @@
  */
 package io.shelf.filesystem;
 
-import io.shelf.client.CircuitBreaker;
 import io.shelf.client.Key;
+import io.shelf.client.MembershipResolver;
 import io.shelf.client.Pool;
 import io.shelf.client.RangeFetcher;
 import io.trino.filesystem.Location;
@@ -25,6 +25,7 @@ import io.trino.filesystem.TrinoInputStream;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Shelf-aware {@link TrinoInputFile} that wraps a delegate
@@ -39,27 +40,32 @@ import java.util.Objects;
  * <p>Inherits the fail-open invariant from {@link ShelfFileSystem}: any
  * Shelf-originated failure during a read degrades transparently to a
  * direct-delegate read.
+ *
+ * <p><b>Target selection (Phase-1).</b> {@link #newStream()} asks the
+ * {@link MembershipResolver} for the owning pod at stream construction
+ * time and captures that {@code (endpoint, CircuitBreaker)} pair for
+ * the life of the stream. If the ring is empty (every pod unreachable,
+ * DNS failure with no previous snapshot), the delegate stream is
+ * returned directly — Trino reads S3 and never sees a Shelf error.
+ * Subsequent {@code newStream()} calls observe fresh membership.
  */
 public final class ShelfInputFile
         implements TrinoInputFile
 {
     private final TrinoInputFile delegate;
     private final RangeFetcher fetcher;
-    private final CircuitBreaker breaker;
-    private final String endpoint;
+    private final MembershipResolver resolver;
     private final Pool pool;
 
     public ShelfInputFile(
             TrinoInputFile delegate,
             RangeFetcher fetcher,
-            CircuitBreaker breaker,
-            String endpoint,
+            MembershipResolver resolver,
             Pool pool)
     {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.fetcher = Objects.requireNonNull(fetcher, "fetcher");
-        this.breaker = Objects.requireNonNull(breaker, "breaker");
-        this.endpoint = Objects.requireNonNull(endpoint, "endpoint");
+        this.resolver = Objects.requireNonNull(resolver, "resolver");
         this.pool = Objects.requireNonNull(pool, "pool");
     }
 
@@ -78,14 +84,21 @@ public final class ShelfInputFile
             throws IOException
     {
         long length = delegate.length();
-        String key = deriveKey(length, delegate.lastModified());
+        Key key = deriveKey(length, delegate.lastModified());
+        Optional<MembershipResolver.Target> target = resolver.ownerFor(key.asBytes());
+        if (target.isEmpty()) {
+            // Ring is empty — nothing to route to. Fail open: Trino
+            // reads straight from S3 via the delegate stream.
+            return delegate.newStream();
+        }
+        MembershipResolver.Target t = target.get();
         return new ShelfInputStream(
                 delegate.newStream(),
                 fetcher,
-                breaker,
-                endpoint,
+                t.breaker(),
+                t.endpoint().toString(),
                 pool,
-                key,
+                key.toHex(),
                 length);
     }
 
@@ -124,9 +137,9 @@ public final class ShelfInputFile
      * S3 object is overwritten. SHELF-07's HEAD endpoint will let us swap in
      * the real ETag without changing any wire format.
      */
-    private String deriveKey(long length, Instant lastModified)
+    private Key deriveKey(long length, Instant lastModified)
     {
         String versionIdentity = lastModified.toEpochMilli() + "-" + length;
-        return Key.fromTuple(versionIdentity, 0L, length, 0).toHex();
+        return Key.fromTuple(versionIdentity, 0L, length, 0);
     }
 }

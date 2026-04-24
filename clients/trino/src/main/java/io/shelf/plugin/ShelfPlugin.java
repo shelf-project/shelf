@@ -13,7 +13,7 @@
  */
 package io.shelf.plugin;
 
-import io.shelf.client.CircuitBreaker;
+import io.shelf.client.MembershipResolver;
 import io.shelf.client.RangeFetcher;
 import io.shelf.config.ShelfConfig;
 import io.shelf.eventlistener.PrefetchClient;
@@ -70,9 +70,9 @@ public final class ShelfPlugin
             ShelfConfig config,
             TrinoFileSystemFactory delegateFactory,
             RangeFetcher fetcher,
-            CircuitBreaker breaker)
+            MembershipResolver resolver)
     {
-        return new ShelfFileSystemFactory(config, delegateFactory, fetcher, breaker);
+        return new ShelfFileSystemFactory(config, delegateFactory, fetcher, resolver);
     }
 
     /** Nested EventListenerFactory so Trino can instantiate it via the SPI. */

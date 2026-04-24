@@ -141,4 +141,58 @@ class ShelfConfigTest
                 ShelfConfig.KEY_RPC_TIMEOUT_MS, "fast")))
                 .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    void membershipKeysDefaultToBlueprintValues()
+    {
+        ShelfConfig cfg = ShelfConfig.fromMap(Map.of());
+        assertThat(cfg.getMembershipRefreshInterval()).isEqualTo(Duration.ofMillis(5000));
+        assertThat(cfg.getMembershipStatsTimeout()).isEqualTo(Duration.ofMillis(2000));
+    }
+
+    @Test
+    void parsesMembershipKeys()
+    {
+        ShelfConfig cfg = ShelfConfig.fromMap(Map.of(
+                ShelfConfig.KEY_MEMBERSHIP_REFRESH_INTERVAL_MS, "1500",
+                ShelfConfig.KEY_MEMBERSHIP_STATS_TIMEOUT_MS, "750"));
+        assertThat(cfg.getMembershipRefreshInterval()).isEqualTo(Duration.ofMillis(1500));
+        assertThat(cfg.getMembershipStatsTimeout()).isEqualTo(Duration.ofMillis(750));
+    }
+
+    @Test
+    void rejectsNonPositiveMembershipRefreshInterval()
+    {
+        assertThatThrownBy(() -> ShelfConfig.fromMap(Map.of(
+                ShelfConfig.KEY_MEMBERSHIP_REFRESH_INTERVAL_MS, "0")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(ShelfConfig.KEY_MEMBERSHIP_REFRESH_INTERVAL_MS);
+    }
+
+    @Test
+    void rejectsNonPositiveMembershipStatsTimeout()
+    {
+        assertThatThrownBy(() -> ShelfConfig.fromMap(Map.of(
+                ShelfConfig.KEY_MEMBERSHIP_STATS_TIMEOUT_MS, "-1")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(ShelfConfig.KEY_MEMBERSHIP_STATS_TIMEOUT_MS);
+    }
+
+    @Test
+    void rejectsUnreasonablyLargeMembershipRefreshInterval()
+    {
+        assertThatThrownBy(() -> ShelfConfig.fromMap(Map.of(
+                ShelfConfig.KEY_MEMBERSHIP_REFRESH_INTERVAL_MS, "600000")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exceeds");
+    }
+
+    @Test
+    void rejectsNonNumericMembershipKey()
+    {
+        assertThatThrownBy(() -> ShelfConfig.fromMap(Map.of(
+                ShelfConfig.KEY_MEMBERSHIP_STATS_TIMEOUT_MS, "soon")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(ShelfConfig.KEY_MEMBERSHIP_STATS_TIMEOUT_MS);
+    }
 }

@@ -496,10 +496,23 @@ so every request is self-contained (no custom header dispatch).
 - Out of scope: coalescing perfection (can ship single-flight via
   `moka::Cache` or simple mutex); NVMe.
 
-**SHELF-07 — `HEAD /cache/<key>` and range metadata endpoint**
+**SHELF-07 — `HEAD /cache/<key>` and range metadata endpoint** — **CLOSED**
 For the S3-shim path and for the plugin's pre-flight size check.
-- [ ] Returns S3's Content-Length without a full GET
-- [ ] Caches the HEAD result in a small DRAM LRU (10k entries)
+- [x] Returns S3's Content-Length without a full GET
+      (route `HEAD /cache/:pool/origin/:bucket/*s3_key`, headers
+      `Content-Length`, `X-Shelf-ETag`, `X-Shelf-LastModified`;
+      `Origin::head` now returns `Ok(None)` on 404 so the handler maps
+      cleanly to HTTP 404).
+- [x] Caches the HEAD result in a small DRAM LRU (10k entries)
+      (`shelfd/src/head_lru.rs`, foyer-backed with entry-count weighter;
+      configurable via `head_lru_entries`, default 10 000).
+- Metrics: `shelf_head_hits_total{pool}` / `shelf_head_misses_total{pool}`.
+- Tests: `head_lru::tests` (4 unit), `it_head_stats::*` (4 integration,
+  `SHELF_INTEGRATION=1`, MinIO-backed).
+- Bundled in the same commit: `GET /stats` JSON contract consumed by
+  SHELF-20. See `shelfd/docs/design-notes/SHELF-07-head-and-stats.md`.
+- Deferred: single-flight on HEAD misses, origin-side `HEAD` rate
+  limiter, `pinned_bytes` on `/stats` (requires SHELF-24).
 - Effort: S. Depends on: SHELF-06. Owner: rust-engineer-2.
 - Out of scope: full S3 ListObjects.
 
@@ -640,14 +653,37 @@ consumed by both sides so drift breaks the build immediately.
 - Effort: M. Depends on: SHELF-04. Owner: rust-engineer-2.
 - Out of scope: Raft.
 
-**SHELF-20 — K8s headless service membership resolver**
+**SHELF-20 — K8s headless service membership resolver** — **CLOSED (Java side + `/stats` contract); cluster-level conformance deferred**
 Plugin resolves `shelf.shelf.svc.cluster.local` every 5 s (Java DNS
 cache override), builds a `ShelfHashRing` over current pod IPs +
 `/stats` capacity. `shelfd` pods expose `/stats` with `{capacity_bytes,
 used_bytes}` for the weighting.
-- [ ] DNS refresh observed in logs every 5 ± 1 s
+- [x] DNS refresh observed in logs every 5 ± 1 s
+      (`io.shelf.client.MembershipResolver` schedules on a daemon
+      `ScheduledExecutorService`; `MembershipResolverTest` exercises the
+      refresh cycle with a `FakeClock`).
 - [ ] Pod rotation (delete 1, wait 30 s, recreate) re-balances cleanly
-      with < 1 % mis-routed requests (E7)
+      with < 1 % mis-routed requests (E7) — deferred to SHELF-21 Helm
+      chart bring-up (needs a real 3-pod StatefulSet).
+- `shelfd` side: `GET /stats` shipped under SHELF-07 with contract
+  `{pod_id, capacity_bytes, used_bytes, metadata_pool{...}, rowgroup_pool{...}}`.
+- Java side: hand-rolled zero-dependency JSON parser; no Jackson/Gson
+  added (keeps the plugin jar small). `MembershipResolver.Snapshot`
+  publishes `(HashRing, pod→URI, pod→CircuitBreaker)` atomically;
+  breakers are retained across refreshes via a `ConcurrentHashMap`.
+- Config keys: `shelf.membership.refresh-interval-ms` (default 5000),
+  `shelf.membership.stats-timeout-ms` (default 2000); full validation in
+  `ShelfConfig.fromMap` + `ShelfConfigTest`.
+- `ShelfFileSystemFactory` now takes a `MembershipResolver` instead of
+  a fixed `(endpoint, breaker)` pair; `ShelfInputFile.newStream()`
+  calls `resolver.ownerFor(keyBytes)` per stream (Phase-1 choice (b):
+  sticky for the stream, not per-read). Empty ring → raw delegate
+  stream, i.e. direct-S3.
+- Fail-open matrix documented in
+  `clients/trino/docs/design-notes/SHELF-20-membership-resolver.md`.
+- Tests (JDK-only, no testcontainers): `MembershipResolverTest` (9
+  cases), `ShelfFileSystemFactoryTest` (2), new config parse cases in
+  `ShelfConfigTest`.
 - Effort: M. Depends on: SHELF-19. Owner: k8s-eng-1.
 - Out of scope: gossip; Raft.
 

@@ -12,6 +12,9 @@ verbatim.
 | `shelf.fallback.on-error` | enum          | `direct-s3`                              | `direct-s3` \| `fail`                                                   | `direct-s3` = fail-open to S3 (the only sane production value). `fail` exists strictly for integration tests.  |
 | `shelf.prefetch.enabled`  | boolean       | `false`                                  | `true` / `false`                                                        | Controls `ShelfPrefetchListener`. Stays off in Phase 0; turned on by SHELF-PHASE-2 after E1 confirms signal.   |
 | `shelf.granularity`       | csv string    | `row-group,footer,manifest`              | subset of `row-group`, `footer`, `manifest`, `page-index`, `file`       | Which object levels the plugin is willing to route through Shelf. Everything else passes through to S3.        |
+| `shelf.rpc.timeout-ms`                    | int (ms) | `200`     | `1` .. `60000`  | Per-request deadline for the hot-path `/cache/...` range-GET. Aligns with `ShelfHttpClient.DEFAULT_TIMEOUT`.                                          |
+| `shelf.membership.refresh-interval-ms`    | int (ms) | `5000`    | `1` .. `300000` | `MembershipResolver` DNS-resolve + `/stats` polling cadence (BLUEPRINT §6.3). Requires JVM DNS TTL ≤ this value (`-Dsun.net.inetaddr.ttl=0` is typical). |
+| `shelf.membership.stats-timeout-ms`       | int (ms) | `2000`    | `1` .. `60000`  | Per-pod `/stats` poll deadline. Runs on the resolver's background scheduler — deliberately larger than the hot-path deadline.                         |
 
 ## Example catalog properties
 
@@ -40,7 +43,6 @@ are in 03-plan.md §4:
 | `shelf.footer.prefetch.kib`              | SHELF-15       | default 64, max 256                                                       |
 | `shelf.admission.size_threshold_mib`     | SHELF-25       | default 1024; pinned-bypass defaults `true`                               |
 | `shelf.admission.pinned_bypass`          | SHELF-25       | boolean                                                                   |
-| `shelf.rpc.timeout-ms`                   | SHELF-10       | default 200 (matches `ShelfHttpClient.DEFAULT_TIMEOUT`)                  |
 | `shelf.circuit.failure-threshold`        | SHELF-11       | default 5 (BLUEPRINT §9.5)                                                |
 | `shelf.circuit.open-duration-ms`         | SHELF-11       | default 10000 (BLUEPRINT §9.5)                                            |
 

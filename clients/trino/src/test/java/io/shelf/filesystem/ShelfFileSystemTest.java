@@ -14,6 +14,7 @@
 package io.shelf.filesystem;
 
 import io.shelf.client.CircuitBreaker;
+import io.shelf.client.MembershipResolver;
 import io.shelf.client.Pool;
 import io.shelf.client.RangeFetcher;
 import io.shelf.client.ShelfHttpClient.ShelfUnavailableException;
@@ -28,6 +29,7 @@ import io.trino.filesystem.TrinoOutputFile;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.net.URI;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Collection;
@@ -61,7 +63,7 @@ class ShelfFileSystemTest
                 enabledConfig(),
                 delegate,
                 alwaysSucceedFetcher(),
-                new CircuitBreaker("shelf-0"));
+                fixedResolver());
 
         fs.deleteFile(DATA);
         fs.createDirectory(DATA);
@@ -81,7 +83,7 @@ class ShelfFileSystemTest
                 ShelfConfig.fromMap(Map.of()),      // disabled by default
                 delegate,
                 alwaysSucceedFetcher(),
-                new CircuitBreaker("shelf-0"));
+                fixedResolver());
 
         assertThat(fs.newInputFile(DATA))
                 .as("disabled Shelf must not wrap the delegate")
@@ -106,7 +108,7 @@ class ShelfFileSystemTest
                 enabledConfig(),
                 delegate,
                 fetcher,
-                new CircuitBreaker("shelf-0"));
+                fixedResolver());
 
         TrinoInputFile wrapped = fs.newInputFile(DATA);
         try (TrinoInputStream in = wrapped.newStream()) {
@@ -134,7 +136,7 @@ class ShelfFileSystemTest
                 enabledConfig(),
                 delegate,
                 broken,
-                new CircuitBreaker("shelf-0"));
+                fixedResolver());
 
         TrinoInputFile wrapped = fs.newInputFile(META);
         try (TrinoInputStream in = wrapped.newStream()) {
@@ -153,7 +155,7 @@ class ShelfFileSystemTest
     {
         RecordingDelegate delegate = new RecordingDelegate();
         ShelfFileSystem fs = new ShelfFileSystem(
-                enabledConfig(), delegate, alwaysSucceedFetcher(), new CircuitBreaker("shelf-0"));
+                enabledConfig(), delegate, alwaysSucceedFetcher(), fixedResolver());
 
         fs.directoryExists(DATA);
         fs.listDirectories(DATA);
@@ -174,6 +176,14 @@ class ShelfFileSystemTest
     private static RangeFetcher alwaysSucceedFetcher()
     {
         return (ep, pool, k, off, len) -> new byte[(int) len];
+    }
+
+    private static MembershipResolver fixedResolver()
+    {
+        return MembershipResolver.fixed(
+                "shelf-0",
+                URI.create("http://shelf.local:9090"),
+                new CircuitBreaker("shelf-0"));
     }
 
     /** Hand-rolled TrinoFileSystem stub that records method calls. */

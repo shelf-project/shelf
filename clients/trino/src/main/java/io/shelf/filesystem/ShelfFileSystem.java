@@ -13,7 +13,7 @@
  */
 package io.shelf.filesystem;
 
-import io.shelf.client.CircuitBreaker;
+import io.shelf.client.MembershipResolver;
 import io.shelf.client.Pool;
 import io.shelf.client.RangeFetcher;
 import io.shelf.config.ShelfConfig;
@@ -66,23 +66,28 @@ public final class ShelfFileSystem
     private final ShelfConfig config;
     private final TrinoFileSystem delegate;
     private final RangeFetcher fetcher;
-    private final CircuitBreaker breaker;
+    private final MembershipResolver resolver;
 
     public ShelfFileSystem(
             ShelfConfig config,
             TrinoFileSystem delegate,
             RangeFetcher fetcher,
-            CircuitBreaker breaker)
+            MembershipResolver resolver)
     {
         this.config = Objects.requireNonNull(config, "config");
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.fetcher = Objects.requireNonNull(fetcher, "fetcher");
-        this.breaker = Objects.requireNonNull(breaker, "breaker");
+        this.resolver = Objects.requireNonNull(resolver, "resolver");
     }
 
     public ShelfConfig config()
     {
         return config;
+    }
+
+    MembershipResolver resolver()
+    {
+        return resolver;
     }
 
     @Override
@@ -184,7 +189,7 @@ public final class ShelfFileSystem
         if (!config.isEnabled()) {
             return inner;
         }
-        return new ShelfInputFile(inner, fetcher, breaker, config.getEndpoint(), poolFor(location));
+        return new ShelfInputFile(inner, fetcher, resolver, poolFor(location));
     }
 
     static Pool poolFor(Location location)

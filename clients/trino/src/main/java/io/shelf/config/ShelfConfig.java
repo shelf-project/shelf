@@ -46,6 +46,8 @@ public final class ShelfConfig
     public static final String KEY_PREFETCH_ENABLED = "shelf.prefetch.enabled";
     public static final String KEY_GRANULARITY = "shelf.granularity";
     public static final String KEY_RPC_TIMEOUT_MS = "shelf.rpc.timeout-ms";
+    public static final String KEY_MEMBERSHIP_REFRESH_INTERVAL_MS = "shelf.membership.refresh-interval-ms";
+    public static final String KEY_MEMBERSHIP_STATS_TIMEOUT_MS = "shelf.membership.stats-timeout-ms";
 
     public static final boolean DEFAULT_ENABLED = false;
     public static final String DEFAULT_ENDPOINT = "shelf.shelf.svc.cluster.local:9090";
@@ -55,6 +57,13 @@ public final class ShelfConfig
     public static final String DEFAULT_GRANULARITY = "row-group,footer,manifest";
     /** Per-RPC deadline; aligns with the {@link io.shelf.client.ShelfHttpClient} budget. */
     public static final Duration DEFAULT_RPC_TIMEOUT = Duration.ofMillis(200);
+    /** How often the {@link io.shelf.client.MembershipResolver} re-resolves DNS + polls {@code /stats}. */
+    public static final Duration DEFAULT_MEMBERSHIP_REFRESH_INTERVAL = Duration.ofMillis(5000);
+    /** Per-pod {@code /stats} poll deadline (background thread; independent of hot-path 200 ms). */
+    public static final Duration DEFAULT_MEMBERSHIP_STATS_TIMEOUT = Duration.ofMillis(2000);
+
+    private static final long MAX_MEMBERSHIP_REFRESH_INTERVAL_MS = 300_000L;
+    private static final long MAX_MEMBERSHIP_STATS_TIMEOUT_MS = 60_000L;
 
     public static final Set<String> LEGAL_GRANULARITY = Set.of("row-group", "footer", "manifest");
 
@@ -65,7 +74,9 @@ public final class ShelfConfig
             KEY_FALLBACK_ON_ERROR,
             KEY_PREFETCH_ENABLED,
             KEY_GRANULARITY,
-            KEY_RPC_TIMEOUT_MS);
+            KEY_RPC_TIMEOUT_MS,
+            KEY_MEMBERSHIP_REFRESH_INTERVAL_MS,
+            KEY_MEMBERSHIP_STATS_TIMEOUT_MS);
 
     private final boolean enabled;
     private final String endpoint;
@@ -74,6 +85,8 @@ public final class ShelfConfig
     private final boolean prefetchEnabled;
     private final Set<String> granularity;
     private final Duration rpcTimeout;
+    private final Duration membershipRefreshInterval;
+    private final Duration membershipStatsTimeout;
 
     private ShelfConfig(
             boolean enabled,
@@ -82,7 +95,9 @@ public final class ShelfConfig
             String fallbackOnError,
             boolean prefetchEnabled,
             Set<String> granularity,
-            Duration rpcTimeout)
+            Duration rpcTimeout,
+            Duration membershipRefreshInterval,
+            Duration membershipStatsTimeout)
     {
         this.enabled = enabled;
         this.endpoint = Objects.requireNonNull(endpoint, "endpoint");
@@ -91,6 +106,8 @@ public final class ShelfConfig
         this.prefetchEnabled = prefetchEnabled;
         this.granularity = Set.copyOf(Objects.requireNonNull(granularity, "granularity"));
         this.rpcTimeout = Objects.requireNonNull(rpcTimeout, "rpcTimeout");
+        this.membershipRefreshInterval = Objects.requireNonNull(membershipRefreshInterval, "membershipRefreshInterval");
+        this.membershipStatsTimeout = Objects.requireNonNull(membershipStatsTimeout, "membershipStatsTimeout");
     }
 
     public static ShelfConfig fromMap(Map<String, String> props)
@@ -123,9 +140,27 @@ public final class ShelfConfig
         boolean prefetchEnabled = parseBool(props, KEY_PREFETCH_ENABLED, DEFAULT_PREFETCH_ENABLED);
         Set<String> granularity = parseGranularity(props.getOrDefault(KEY_GRANULARITY, DEFAULT_GRANULARITY));
         Duration rpcTimeout = parseRpcTimeout(props);
+        Duration refreshInterval = parsePositiveDurationMs(
+                props,
+                KEY_MEMBERSHIP_REFRESH_INTERVAL_MS,
+                DEFAULT_MEMBERSHIP_REFRESH_INTERVAL,
+                MAX_MEMBERSHIP_REFRESH_INTERVAL_MS);
+        Duration statsTimeout = parsePositiveDurationMs(
+                props,
+                KEY_MEMBERSHIP_STATS_TIMEOUT_MS,
+                DEFAULT_MEMBERSHIP_STATS_TIMEOUT,
+                MAX_MEMBERSHIP_STATS_TIMEOUT_MS);
 
         return new ShelfConfig(
-                enabled, endpoint, tenant, fallback, prefetchEnabled, granularity, rpcTimeout);
+                enabled,
+                endpoint,
+                tenant,
+                fallback,
+                prefetchEnabled,
+                granularity,
+                rpcTimeout,
+                refreshInterval,
+                statsTimeout);
     }
 
     public static ShelfConfig defaults()
@@ -137,7 +172,9 @@ public final class ShelfConfig
                 DEFAULT_FALLBACK_ON_ERROR,
                 DEFAULT_PREFETCH_ENABLED,
                 Set.of("row-group", "footer", "manifest"),
-                DEFAULT_RPC_TIMEOUT);
+                DEFAULT_RPC_TIMEOUT,
+                DEFAULT_MEMBERSHIP_REFRESH_INTERVAL,
+                DEFAULT_MEMBERSHIP_STATS_TIMEOUT);
     }
 
     private static boolean parseBool(Map<String, String> props, String key, boolean fallback)
@@ -229,6 +266,34 @@ public final class ShelfConfig
         return Duration.ofMillis(ms);
     }
 
+    private static Duration parsePositiveDurationMs(
+            Map<String, String> props,
+            String key,
+            Duration fallback,
+            long maxMs)
+    {
+        String raw = props.get(key);
+        if (raw == null) {
+            return fallback;
+        }
+        long ms;
+        try {
+            ms = Long.parseLong(raw.trim());
+        }
+        catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    key + "=" + raw + " must be a positive integer (milliseconds)", e);
+        }
+        if (ms <= 0) {
+            throw new IllegalArgumentException(key + "=" + ms + " must be > 0");
+        }
+        if (ms > maxMs) {
+            throw new IllegalArgumentException(
+                    key + "=" + ms + " exceeds the upper bound of " + maxMs + " ms");
+        }
+        return Duration.ofMillis(ms);
+    }
+
     public boolean isEnabled()
     {
         return enabled;
@@ -262,5 +327,15 @@ public final class ShelfConfig
     public Duration getRpcTimeout()
     {
         return rpcTimeout;
+    }
+
+    public Duration getMembershipRefreshInterval()
+    {
+        return membershipRefreshInterval;
+    }
+
+    public Duration getMembershipStatsTimeout()
+    {
+        return membershipStatsTimeout;
     }
 }

@@ -13,7 +13,7 @@
  */
 package io.shelf.filesystem;
 
-import io.shelf.client.CircuitBreaker;
+import io.shelf.client.MembershipResolver;
 import io.shelf.client.RangeFetcher;
 import io.shelf.config.ShelfConfig;
 import io.trino.filesystem.TrinoFileSystem;
@@ -27,13 +27,13 @@ import java.util.Objects;
  *
  * <p>Trino instantiates this factory once per catalog and invokes
  * {@link #create(ConnectorIdentity)} per query. The factory owns the long-lived
- * resources (HTTP client pool, circuit-breaker registry, hash-ring snapshot);
- * the per-identity {@link ShelfFileSystem} references them.
+ * resources (HTTP client pool, {@link MembershipResolver}); the per-identity
+ * {@link ShelfFileSystem} references them and the resolver owns the
+ * {@code Map<String, CircuitBreaker>} keyed by pod id.
  *
- * <p>In Phase-1 we wire a single {@link CircuitBreaker} for the whole
- * endpoint. Once SHELF-20 lands the per-pod membership resolver, the
- * factory will own a {@code Map<String, CircuitBreaker>} keyed by pod id
- * and select the right one via {@link io.shelf.client.HashRing#ownerFor}.
+ * <p>Endpoint / breaker selection for a given read goes through
+ * {@link MembershipResolver#ownerFor(byte[])} — see
+ * {@link ShelfInputFile#newStream()} for the per-stream binding.
  */
 public final class ShelfFileSystemFactory
         implements TrinoFileSystemFactory
@@ -41,18 +41,23 @@ public final class ShelfFileSystemFactory
     private final ShelfConfig config;
     private final TrinoFileSystemFactory delegateFactory;
     private final RangeFetcher fetcher;
-    private final CircuitBreaker breaker;
+    private final MembershipResolver resolver;
 
     public ShelfFileSystemFactory(
             ShelfConfig config,
             TrinoFileSystemFactory delegateFactory,
             RangeFetcher fetcher,
-            CircuitBreaker breaker)
+            MembershipResolver resolver)
     {
         this.config = Objects.requireNonNull(config, "config");
         this.delegateFactory = Objects.requireNonNull(delegateFactory, "delegateFactory");
         this.fetcher = Objects.requireNonNull(fetcher, "fetcher");
-        this.breaker = Objects.requireNonNull(breaker, "breaker");
+        this.resolver = Objects.requireNonNull(resolver, "resolver");
+    }
+
+    public MembershipResolver resolver()
+    {
+        return resolver;
     }
 
     @Override
@@ -60,6 +65,6 @@ public final class ShelfFileSystemFactory
     {
         Objects.requireNonNull(identity, "identity");
         TrinoFileSystem delegate = delegateFactory.create(identity);
-        return new ShelfFileSystem(config, delegate, fetcher, breaker);
+        return new ShelfFileSystem(config, delegate, fetcher, resolver);
     }
 }
