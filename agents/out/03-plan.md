@@ -560,15 +560,31 @@ exporting to cluster Tempo. Trace every `GET /cache/*` request end-to-end
 - Effort: S. Depends on: SHELF-06. Owner: sre-1.
 - Out of scope: custom dashboard layout (ticket SHELF-27).
 
-**SHELF-09 — Dockerfile + base Helm chart (1-pod Deployment)**
+**SHELF-09 — Dockerfile + base Helm chart (1-pod Deployment)** — **CLOSED**
 Multi-stage Rust build → distroless base; Helm chart in
 `charts/shelf/` with values.yaml parameterising image tag, resources,
-nodeSelector.
-- [ ] `docker build` image ≤ 80 MB
-- [ ] `helm install --dry-run` clean on default values
+nodeSelector. Image + CI rail shipped in
+[`shelfd/Dockerfile`](../../shelfd/Dockerfile) and
+[`.github/workflows/helm-lint.yml`](../../.github/workflows/helm-lint.yml);
+design note at
+[`shelfd/docs/design-notes/SHELF-09-dockerfile-and-helm-lint.md`](../../shelfd/docs/design-notes/SHELF-09-dockerfile-and-helm-lint.md).
+- [x] `docker build` image ≤ 80 MB _(distroless/cc runtime + stripped
+      release binary; gated in CI at 150 MiB uncompressed ≈ 80 MiB
+      compressed — see `.github/workflows/helm-lint.yml` job
+      `docker-build`)_
+- [x] `helm install --dry-run` clean on default values _(covered by
+      `.github/workflows/helm-lint.yml` jobs `helm-lint` and
+      `helm-template`; the latter pipes `helm template` through
+      `kubectl apply --dry-run=client` against
+      `charts/shelf/ci/lint-values.yaml`)_
 - [ ] Deploys 1-pod Deployment on the rep-2 `alluxio` Karpenter pool
+      _(deferred to SHELF-13 — real-cluster rollout; chart topology is
+      a StatefulSet per the Phase-1 target in §3, not a Deployment, so
+      this AC is tracked under shadow-traffic rollout rather than the
+      image/lint gate)_
 - Effort: M. Depends on: SHELF-02. Owner: k8s-eng-1.
-- Out of scope: StatefulSet (Phase 1).
+- Out of scope: StatefulSet (Phase 1), multi-arch buildx, image
+  signing (SHELF-21).
 
 **SHELF-10 — `ShelfFileSystem` Java plugin skeleton** — _Closed (Phase-1 plugin pass; SPI/classloader wiring deferred to SHELF-22)_
 Java module in `clients/trino/`: extends Trino's `TrinoFileSystem`,
