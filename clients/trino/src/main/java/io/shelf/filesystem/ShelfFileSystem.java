@@ -13,8 +13,11 @@
  */
 package io.shelf.filesystem;
 
+import io.shelf.client.FooterPrefetcher;
+import io.shelf.client.Key;
 import io.shelf.client.MembershipResolver;
 import io.shelf.client.Pool;
+import io.shelf.client.PrefetchMetrics;
 import io.shelf.client.RangeFetcher;
 import io.shelf.config.ShelfConfig;
 import io.trino.filesystem.FileIterator;
@@ -30,6 +33,8 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Shelf implementation of {@link TrinoFileSystem} that wraps a delegate
@@ -63,10 +68,15 @@ import java.util.Set;
 public final class ShelfFileSystem
         implements TrinoFileSystem
 {
+    private static final Logger log = Logger.getLogger(ShelfFileSystem.class.getName());
+    private static final PrefetchMetrics EMPTY_METRICS = new PrefetchMetrics();
+
     private final ShelfConfig config;
     private final TrinoFileSystem delegate;
     private final RangeFetcher fetcher;
     private final MembershipResolver resolver;
+    /** Nullable — when absent, footer prefetch is a no-op regardless of config. */
+    private final FooterPrefetcher footerPrefetcher;
 
     public ShelfFileSystem(
             ShelfConfig config,
@@ -74,10 +84,21 @@ public final class ShelfFileSystem
             RangeFetcher fetcher,
             MembershipResolver resolver)
     {
+        this(config, delegate, fetcher, resolver, null);
+    }
+
+    public ShelfFileSystem(
+            ShelfConfig config,
+            TrinoFileSystem delegate,
+            RangeFetcher fetcher,
+            MembershipResolver resolver,
+            FooterPrefetcher footerPrefetcher)
+    {
         this.config = Objects.requireNonNull(config, "config");
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.fetcher = Objects.requireNonNull(fetcher, "fetcher");
         this.resolver = Objects.requireNonNull(resolver, "resolver");
+        this.footerPrefetcher = footerPrefetcher;
     }
 
     public ShelfConfig config()
@@ -90,10 +111,23 @@ public final class ShelfFileSystem
         return resolver;
     }
 
+    /**
+     * @return the metrics sink for the installed {@link FooterPrefetcher},
+     *         or an empty sentinel if no prefetcher is wired. Never null —
+     *         callers can unconditionally read counters and observe zero
+     *         when prefetch is disabled.
+     */
+    public PrefetchMetrics prefetchMetrics()
+    {
+        return footerPrefetcher != null ? footerPrefetcher.metrics() : EMPTY_METRICS;
+    }
+
     @Override
     public TrinoInputFile newInputFile(Location location)
     {
-        return wrapInputFile(delegate.newInputFile(location), location);
+        TrinoInputFile inner = delegate.newInputFile(location);
+        maybePrefetchFooter(inner, location);
+        return wrapInputFile(inner, location);
     }
 
     @Override
@@ -199,5 +233,77 @@ public final class ShelfFileSystem
             return Pool.METADATA;
         }
         return Pool.ROWGROUP;
+    }
+
+    /**
+     * The Parquet <em>footer</em> (last {@code N} bytes of a
+     * {@code .parquet} file) is metadata payload per BLUEPRINT §6.1 and
+     * lives in the metadata pool — even though {@link #poolFor} routes
+     * the body of the same file to {@link Pool#ROWGROUP}. Kept as an
+     * explicit helper rather than a constant so the contract is easy
+     * to grep for and, if we later add page-index prefetch
+     * (out of scope for SHELF-15), there is a single call site to
+     * update.
+     */
+    static Pool poolForFooter()
+    {
+        return Pool.METADATA;
+    }
+
+    /**
+     * Best-effort trigger for SHELF-15 Parquet-footer prefetch. Fires
+     * when:
+     * <ul>
+     *   <li>the plugin is enabled,</li>
+     *   <li>prefetch is enabled in config,</li>
+     *   <li>a prefetcher is wired in,</li>
+     *   <li>the path ends with {@code .parquet} (case-insensitive), and</li>
+     *   <li>the {@link MembershipResolver} has a target for the file's key.</li>
+     * </ul>
+     *
+     * <p>Fail-open: any failure in lookup (including
+     * {@link IOException} from the delegate's {@code length()} /
+     * {@code lastModified()}) is swallowed at FINE level. Prefetch is
+     * optional; if we cannot trigger it, the foreground read path does
+     * exactly the work it would without Shelf prefetch.
+     */
+    private void maybePrefetchFooter(TrinoInputFile inner, Location location)
+    {
+        if (!config.isEnabled() || !config.isPrefetchEnabled() || footerPrefetcher == null) {
+            return;
+        }
+        String path = location.path();
+        if (!endsWithIgnoreCase(path, ".parquet")) {
+            return;
+        }
+        try {
+            long length = inner.length();
+            if (length <= 0L) {
+                return;
+            }
+            Key key = ShelfInputFile.deriveContentKey(length, inner.lastModified());
+            Optional<MembershipResolver.Target> target = resolver.ownerFor(key.asBytes());
+            if (target.isEmpty()) {
+                return;
+            }
+            int prefetchBytes = config.getFooterPrefetchKib() * 1024;
+            footerPrefetcher.prefetch(target.get(), key.toHex(), length, prefetchBytes);
+        }
+        catch (Throwable t) {
+            // BLUEPRINT §9.5: prefetch never surfaces to Trino. Swallow
+            // IOException from the delegate, RuntimeException from any
+            // bug in the prefetcher, anything.
+            log.log(Level.FINE, t, () -> "footer prefetch trigger failed for " + location);
+        }
+    }
+
+    private static boolean endsWithIgnoreCase(String path, String suffix)
+    {
+        int pl = path.length();
+        int sl = suffix.length();
+        if (pl < sl) {
+            return false;
+        }
+        return path.regionMatches(true, pl - sl, suffix, 0, sl);
     }
 }

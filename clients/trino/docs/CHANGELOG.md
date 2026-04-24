@@ -7,6 +7,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- **SHELF-15**: Parquet footer prefetch. `ShelfFileSystem.newInputFile(.parquet)`
+  now best-effort range-GETs the last `shelf.footer.prefetch.kib` KiB
+  (default 64, max 256) into the metadata pool via the new
+  `io.shelf.client.FooterPrefetcher`. Fail-open: every failure is
+  silently counted on the new `io.shelf.client.PrefetchMetrics` and
+  never surfaces to Trino. Triggers only when `shelf.enabled` and
+  `shelf.prefetch.enabled` are both true. Design note in
+  `docs/design-notes/SHELF-15-footer-prefetch.md`.
+- **Public API:** `FooterPrefetcher`, `PrefetchMetrics`,
+  `ShelfFileSystem.prefetchMetrics()`, `ShelfFileSystem.poolForFooter()`,
+  new config key `shelf.footer.prefetch.kib`. `ShelfFileSystemFactory`
+  now implements `AutoCloseable` to drain the prefetch executor on
+  plugin shutdown.
+
 ## [0.0.1] — 2026-04-23
 
 ### Added

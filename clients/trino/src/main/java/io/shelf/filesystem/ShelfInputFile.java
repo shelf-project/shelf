@@ -84,7 +84,7 @@ public final class ShelfInputFile
             throws IOException
     {
         long length = delegate.length();
-        Key key = deriveKey(length, delegate.lastModified());
+        Key key = deriveContentKey(length, delegate.lastModified());
         Optional<MembershipResolver.Target> target = resolver.ownerFor(key.asBytes());
         if (target.isEmpty()) {
             // Ring is empty — nothing to route to. Fail open: Trino
@@ -136,8 +136,14 @@ public final class ShelfInputFile
      * {@code (lastModified, length)} which changes whenever the underlying
      * S3 object is overwritten. SHELF-07's HEAD endpoint will let us swap in
      * the real ETag without changing any wire format.
+     *
+     * <p>Exposed package-private so {@link ShelfFileSystem} can compute
+     * the same key for the footer prefetch path (SHELF-15): the
+     * prefetcher must land bytes under the exact key the subsequent
+     * {@link ShelfInputStream} read will query, or the hit ratio
+     * collapses to zero.
      */
-    private Key deriveKey(long length, Instant lastModified)
+    static Key deriveContentKey(long length, Instant lastModified)
     {
         String versionIdentity = lastModified.toEpochMilli() + "-" + length;
         return Key.fromTuple(versionIdentity, 0L, length, 0);

@@ -48,6 +48,8 @@ public final class ShelfConfig
     public static final String KEY_RPC_TIMEOUT_MS = "shelf.rpc.timeout-ms";
     public static final String KEY_MEMBERSHIP_REFRESH_INTERVAL_MS = "shelf.membership.refresh-interval-ms";
     public static final String KEY_MEMBERSHIP_STATS_TIMEOUT_MS = "shelf.membership.stats-timeout-ms";
+    /** SHELF-15. Controls the Parquet-footer prefetch window (in KiB). */
+    public static final String KEY_FOOTER_PREFETCH_KIB = "shelf.footer.prefetch.kib";
 
     public static final boolean DEFAULT_ENABLED = false;
     public static final String DEFAULT_ENDPOINT = "shelf.shelf.svc.cluster.local:9090";
@@ -61,6 +63,16 @@ public final class ShelfConfig
     public static final Duration DEFAULT_MEMBERSHIP_REFRESH_INTERVAL = Duration.ofMillis(5000);
     /** Per-pod {@code /stats} poll deadline (background thread; independent of hot-path 200 ms). */
     public static final Duration DEFAULT_MEMBERSHIP_STATS_TIMEOUT = Duration.ofMillis(2000);
+    /** SHELF-15 default footer prefetch window: 64 KiB covers the vast majority of Iceberg Parquet footers. */
+    public static final int DEFAULT_FOOTER_PREFETCH_KIB = 64;
+    /** SHELF-15 lower bound. Zero would mean "no prefetch" which is already expressible via {@link #KEY_PREFETCH_ENABLED}. */
+    public static final int MIN_FOOTER_PREFETCH_KIB = 1;
+    /**
+     * SHELF-15 upper bound. 256 KiB matches BLUEPRINT §7.3: any file that
+     * keeps a genuinely larger footer is an outlier, and prefetching more
+     * starts competing with row-group bandwidth for no payoff.
+     */
+    public static final int MAX_FOOTER_PREFETCH_KIB = 256;
 
     private static final long MAX_MEMBERSHIP_REFRESH_INTERVAL_MS = 300_000L;
     private static final long MAX_MEMBERSHIP_STATS_TIMEOUT_MS = 60_000L;
@@ -76,7 +88,8 @@ public final class ShelfConfig
             KEY_GRANULARITY,
             KEY_RPC_TIMEOUT_MS,
             KEY_MEMBERSHIP_REFRESH_INTERVAL_MS,
-            KEY_MEMBERSHIP_STATS_TIMEOUT_MS);
+            KEY_MEMBERSHIP_STATS_TIMEOUT_MS,
+            KEY_FOOTER_PREFETCH_KIB);
 
     private final boolean enabled;
     private final String endpoint;
@@ -87,6 +100,7 @@ public final class ShelfConfig
     private final Duration rpcTimeout;
     private final Duration membershipRefreshInterval;
     private final Duration membershipStatsTimeout;
+    private final int footerPrefetchKib;
 
     private ShelfConfig(
             boolean enabled,
@@ -97,7 +111,8 @@ public final class ShelfConfig
             Set<String> granularity,
             Duration rpcTimeout,
             Duration membershipRefreshInterval,
-            Duration membershipStatsTimeout)
+            Duration membershipStatsTimeout,
+            int footerPrefetchKib)
     {
         this.enabled = enabled;
         this.endpoint = Objects.requireNonNull(endpoint, "endpoint");
@@ -108,6 +123,7 @@ public final class ShelfConfig
         this.rpcTimeout = Objects.requireNonNull(rpcTimeout, "rpcTimeout");
         this.membershipRefreshInterval = Objects.requireNonNull(membershipRefreshInterval, "membershipRefreshInterval");
         this.membershipStatsTimeout = Objects.requireNonNull(membershipStatsTimeout, "membershipStatsTimeout");
+        this.footerPrefetchKib = footerPrefetchKib;
     }
 
     public static ShelfConfig fromMap(Map<String, String> props)
@@ -150,6 +166,12 @@ public final class ShelfConfig
                 KEY_MEMBERSHIP_STATS_TIMEOUT_MS,
                 DEFAULT_MEMBERSHIP_STATS_TIMEOUT,
                 MAX_MEMBERSHIP_STATS_TIMEOUT_MS);
+        int footerPrefetchKib = parseBoundedInt(
+                props,
+                KEY_FOOTER_PREFETCH_KIB,
+                DEFAULT_FOOTER_PREFETCH_KIB,
+                MIN_FOOTER_PREFETCH_KIB,
+                MAX_FOOTER_PREFETCH_KIB);
 
         return new ShelfConfig(
                 enabled,
@@ -160,7 +182,8 @@ public final class ShelfConfig
                 granularity,
                 rpcTimeout,
                 refreshInterval,
-                statsTimeout);
+                statsTimeout,
+                footerPrefetchKib);
     }
 
     public static ShelfConfig defaults()
@@ -174,7 +197,8 @@ public final class ShelfConfig
                 Set.of("row-group", "footer", "manifest"),
                 DEFAULT_RPC_TIMEOUT,
                 DEFAULT_MEMBERSHIP_REFRESH_INTERVAL,
-                DEFAULT_MEMBERSHIP_STATS_TIMEOUT);
+                DEFAULT_MEMBERSHIP_STATS_TIMEOUT,
+                DEFAULT_FOOTER_PREFETCH_KIB);
     }
 
     private static boolean parseBool(Map<String, String> props, String key, boolean fallback)
@@ -266,6 +290,32 @@ public final class ShelfConfig
         return Duration.ofMillis(ms);
     }
 
+    private static int parseBoundedInt(
+            Map<String, String> props,
+            String key,
+            int fallback,
+            int min,
+            int max)
+    {
+        String raw = props.get(key);
+        if (raw == null) {
+            return fallback;
+        }
+        int value;
+        try {
+            value = Integer.parseInt(raw.trim());
+        }
+        catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    key + "=" + raw + " must be an integer in [" + min + ".." + max + "]", e);
+        }
+        if (value < min || value > max) {
+            throw new IllegalArgumentException(
+                    key + "=" + value + " must be in [" + min + ".." + max + "]");
+        }
+        return value;
+    }
+
     private static Duration parsePositiveDurationMs(
             Map<String, String> props,
             String key,
@@ -337,5 +387,17 @@ public final class ShelfConfig
     public Duration getMembershipStatsTimeout()
     {
         return membershipStatsTimeout;
+    }
+
+    /**
+     * Footer prefetch window in KiB. See
+     * {@link io.shelf.client.FooterPrefetcher} and BLUEPRINT §7.3. A
+     * value of {@value #DEFAULT_FOOTER_PREFETCH_KIB} KiB covers the
+     * Parquet footer (metadata length + magic, footer thrift payload)
+     * for essentially every Iceberg file in the penpencil fleet.
+     */
+    public int getFooterPrefetchKib()
+    {
+        return footerPrefetchKib;
     }
 }

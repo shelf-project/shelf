@@ -516,12 +516,31 @@ For the S3-shim path and for the plugin's pre-flight size check.
 - Effort: S. Depends on: SHELF-06. Owner: rust-engineer-2.
 - Out of scope: full S3 ListObjects.
 
-**SHELF-08 — Prometheus metrics + OTel traces**
+**SHELF-08 — Prometheus metrics + OTel traces** — **CLOSED**
 `prometheus` crate registry exposed at `:9091/metrics`; `tracing-opentelemetry`
 exporting to cluster Tempo. Trace every `GET /cache/*` request end-to-end
 (server + S3 client).
-- [ ] Grafana panel shows `rate(shelf_hits_total[1m])`
-- [ ] Tempo trace for a single request shows 2 spans (Axum + S3 client)
+- [x] Grafana panel shows `rate(shelf_hits_total[1m])`
+      (starter dashboard at `observability/dashboards/shelf-read-path.json`
+      — 3 panels: hit rate, miss rate, p95 `shelf_request_seconds`;
+      schemaVersion 39. Full layout stays in SHELF-27.)
+- [x] Tempo trace for a single request shows 2 spans (Axum + S3 client)
+      (`shelfd::tests::it_traces::*` asserts the parent→child shape with a
+      test subscriber: `http.get_cache` → `s3.get_object`, plus a
+      `shelfd.singleflight{role=leader|follower}` event. Works without a
+      live OTLP collector; exporter itself is config-gated via
+      `observability.otlp_endpoint` / `SHELFD_OTLP_ENDPOINT`.)
+- New module `shelfd::telemetry` with a `TelemetryGuard` whose `drop`
+  swallows exporter shutdown errors so SIGTERM is never blocked by a
+  flaky collector.
+- Metrics regression test (`metrics::tests::registry_exposes_documented_series`
+  and `metrics_scrape_contains_documented_series_after_touch`) guards
+  the stable series names from rename drift. `shelf_request_seconds`
+  is now exercised by every HTTP handler.
+- Deps: `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`,
+  `tracing-opentelemetry` (pinned to a compatible family). Init is
+  fail-open: OTLP connection failure logs a warning and proceeds.
+- Design notes at `shelfd/docs/design-notes/SHELF-08-observability.md`.
 - Effort: S. Depends on: SHELF-06. Owner: sre-1.
 - Out of scope: custom dashboard layout (ticket SHELF-27).
 
@@ -595,13 +614,36 @@ in `out/experiments/`.
 
 ### Phase 1 (v0.5)
 
-**SHELF-15 — Parquet footer prefetch in plugin**
+**SHELF-15 — Parquet footer prefetch in plugin** — **CLOSED (code path); end-to-end hit-ratio conformance deferred**
 Plugin detects `.parquet` path, issues a pre-emptive 64 KiB range-GET
 to Shelf for the footer *before* the Trino reader asks for it. Tunable
 via `shelf.footer.prefetch.kib` (default 64, max 256).
-- [ ] On second query of the same file, Grafana
-      `shelf_footer_hits_ratio` > 90 %
-- [ ] Smoke test validates: first query populates footer; second hits
+- [x] Prefetch trigger + config key
+      (`io.shelf.client.FooterPrefetcher`, a 2-thread
+      `ThreadPoolExecutor` with `CallerRunsPolicy` for backpressure.
+      Invoked from `ShelfFileSystem.newInputFile(Location)` when
+      `enabled && prefetch.enabled && path.endsWith(".parquet") (ci)
+      && resolver.ownerFor(key).isPresent()`. Small-file edge clamps
+      the window to `[0, length)`.)
+- [x] Config: `shelf.footer.prefetch.kib` (default 64, min 1, max 256)
+      with full validation + negative-path tests in `ShelfConfigTest`.
+- [x] Fail-open: prefetch failures swallowed to FINE log; `Throwable`
+      boundary at the executor task so even OOM cannot leak. Verified
+      via `FooterPrefetcherTest` (5 cases).
+- [ ] Grafana `shelf_footer_hits_ratio` > 90 % on second query
+      — deferred until SHELF-12 (docker-compose smoke harness)
+      lands; no live Trino + MinIO fixture wired yet.
+- [ ] Smoke test end-to-end first→second query hit validation
+      — same deferral as above (needs SHELF-12).
+- Pool routing: prefetch always targets `Pool.METADATA` via
+  `ShelfFileSystem.poolForFooter()`; body reads still route
+  `.parquet → rowgroup`. A single file therefore has bytes in both
+  pools, by design.
+- Metrics seam: `PrefetchMetrics` (plugin-side `AtomicLong` counters
+  `footerPrefetchScheduled/Completed/Failed`) exposed via
+  `ShelfFileSystem.prefetchMetrics()` for test observation. Trino's
+  metrics integration remains out of scope.
+- Design notes at `clients/trino/docs/design-notes/SHELF-15-footer-prefetch.md`.
 - Effort: M. Depends on: SHELF-10. Owner: trino-plugin-eng-1.
 - Out of scope: page index prefetch.
 

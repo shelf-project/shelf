@@ -15,6 +15,7 @@ verbatim.
 | `shelf.rpc.timeout-ms`                    | int (ms) | `200`     | `1` .. `60000`  | Per-request deadline for the hot-path `/cache/...` range-GET. Aligns with `ShelfHttpClient.DEFAULT_TIMEOUT`.                                          |
 | `shelf.membership.refresh-interval-ms`    | int (ms) | `5000`    | `1` .. `300000` | `MembershipResolver` DNS-resolve + `/stats` polling cadence (BLUEPRINT §6.3). Requires JVM DNS TTL ≤ this value (`-Dsun.net.inetaddr.ttl=0` is typical). |
 | `shelf.membership.stats-timeout-ms`       | int (ms) | `2000`    | `1` .. `60000`  | Per-pod `/stats` poll deadline. Runs on the resolver's background scheduler — deliberately larger than the hot-path deadline.                         |
+| `shelf.footer.prefetch.kib`               | int (KiB) | `64`    | `1` .. `256`   | SHELF-15. Parquet footer prefetch window. On `newInputFile(.parquet)` the last `N` KiB are best-effort range-GET'd from the metadata pool (see `docs/design-notes/SHELF-15-footer-prefetch.md`). |
 
 ## Example catalog properties
 
@@ -40,7 +41,6 @@ are in 03-plan.md §4:
 
 | Key                                      | Landing ticket | Notes                                                                     |
 |------------------------------------------|----------------|---------------------------------------------------------------------------|
-| `shelf.footer.prefetch.kib`              | SHELF-15       | default 64, max 256                                                       |
 | `shelf.admission.size_threshold_mib`     | SHELF-25       | default 1024; pinned-bypass defaults `true`                               |
 | `shelf.admission.pinned_bypass`          | SHELF-25       | boolean                                                                   |
 | `shelf.circuit.failure-threshold`        | SHELF-11       | default 5 (BLUEPRINT §9.5)                                                |

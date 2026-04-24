@@ -13,7 +13,9 @@
  */
 package io.shelf.filesystem;
 
+import io.shelf.client.FooterPrefetcher;
 import io.shelf.client.MembershipResolver;
+import io.shelf.client.PrefetchMetrics;
 import io.shelf.client.RangeFetcher;
 import io.shelf.config.ShelfConfig;
 import io.trino.filesystem.TrinoFileSystem;
@@ -36,12 +38,14 @@ import java.util.Objects;
  * {@link ShelfInputFile#newStream()} for the per-stream binding.
  */
 public final class ShelfFileSystemFactory
-        implements TrinoFileSystemFactory
+        implements TrinoFileSystemFactory, AutoCloseable
 {
     private final ShelfConfig config;
     private final TrinoFileSystemFactory delegateFactory;
     private final RangeFetcher fetcher;
     private final MembershipResolver resolver;
+    /** Non-null only when both {@code shelf.enabled} and {@code shelf.prefetch.enabled} are true. */
+    private final FooterPrefetcher footerPrefetcher;
 
     public ShelfFileSystemFactory(
             ShelfConfig config,
@@ -49,10 +53,35 @@ public final class ShelfFileSystemFactory
             RangeFetcher fetcher,
             MembershipResolver resolver)
     {
+        this(config, delegateFactory, fetcher, resolver, buildPrefetcherIfEnabled(config, fetcher));
+    }
+
+    /**
+     * Test seam: caller-supplied {@link FooterPrefetcher}. The factory
+     * owns the prefetcher's lifecycle <em>only</em> when it built it
+     * itself (via the public constructor). Prefetchers handed in here
+     * are the caller's responsibility.
+     */
+    ShelfFileSystemFactory(
+            ShelfConfig config,
+            TrinoFileSystemFactory delegateFactory,
+            RangeFetcher fetcher,
+            MembershipResolver resolver,
+            FooterPrefetcher footerPrefetcher)
+    {
         this.config = Objects.requireNonNull(config, "config");
         this.delegateFactory = Objects.requireNonNull(delegateFactory, "delegateFactory");
         this.fetcher = Objects.requireNonNull(fetcher, "fetcher");
         this.resolver = Objects.requireNonNull(resolver, "resolver");
+        this.footerPrefetcher = footerPrefetcher;
+    }
+
+    private static FooterPrefetcher buildPrefetcherIfEnabled(ShelfConfig config, RangeFetcher fetcher)
+    {
+        if (config.isEnabled() && config.isPrefetchEnabled()) {
+            return new FooterPrefetcher(fetcher, new PrefetchMetrics());
+        }
+        return null;
     }
 
     public MembershipResolver resolver()
@@ -65,6 +94,14 @@ public final class ShelfFileSystemFactory
     {
         Objects.requireNonNull(identity, "identity");
         TrinoFileSystem delegate = delegateFactory.create(identity);
-        return new ShelfFileSystem(config, delegate, fetcher, resolver);
+        return new ShelfFileSystem(config, delegate, fetcher, resolver, footerPrefetcher);
+    }
+
+    @Override
+    public void close()
+    {
+        if (footerPrefetcher != null) {
+            footerPrefetcher.close();
+        }
     }
 }

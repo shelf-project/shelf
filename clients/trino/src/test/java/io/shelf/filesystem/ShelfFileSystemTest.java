@@ -14,8 +14,10 @@
 package io.shelf.filesystem;
 
 import io.shelf.client.CircuitBreaker;
+import io.shelf.client.FooterPrefetcher;
 import io.shelf.client.MembershipResolver;
 import io.shelf.client.Pool;
+import io.shelf.client.PrefetchMetrics;
 import io.shelf.client.RangeFetcher;
 import io.shelf.client.ShelfHttpClient.ShelfUnavailableException;
 import io.shelf.config.ShelfConfig;
@@ -33,11 +35,17 @@ import java.net.URI;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -166,11 +174,180 @@ class ShelfFileSystemTest
         assertThat(delegate.createTempCalls).isEqualTo(1);
     }
 
+    @Test
+    void parquetPathTriggersFooterPrefetchWithMetadataPoolAndClampedRange()
+    {
+        int kib = 64;
+        long fileLength = 10L * 1024 * 1024;
+        byte[] payload = new byte[(int) fileLength];
+        Location parquet = Location.of("s3://bucket/table/data/part-0.PARQUET");
+
+        RecordingDelegate delegate = new RecordingDelegate();
+        delegate.inputFiles.put(parquet, new FakeInputFile(parquet, payload));
+
+        RecordingFetcher recording = new RecordingFetcher();
+        PrefetchMetrics metrics = new PrefetchMetrics();
+        FooterPrefetcher prefetcher = FooterPrefetcher.withExecutor(
+                recording, new DirectExecutorService(), metrics);
+
+        ShelfFileSystem fs = new ShelfFileSystem(
+                prefetchEnabledConfig(kib),
+                delegate,
+                alwaysSucceedFetcher(),
+                fixedResolver(),
+                prefetcher);
+
+        fs.newInputFile(parquet);
+
+        assertThat(recording.calls.get())
+                .as(".parquet (case-insensitive) must trigger one prefetch")
+                .isEqualTo(1);
+        assertThat(recording.lastPool.get())
+                .as("footer prefetch routes to the metadata pool, not the rowgroup pool used by body reads")
+                .isEqualTo(Pool.METADATA);
+        assertThat(recording.lastOffset.get()).isEqualTo(fileLength - kib * 1024L);
+        assertThat(recording.lastLength.get()).isEqualTo(kib * 1024L);
+        assertThat(metrics.footerPrefetchScheduled()).isEqualTo(1);
+        assertThat(metrics.footerPrefetchCompleted()).isEqualTo(1);
+        assertThat(fs.prefetchMetrics()).isSameAs(metrics);
+    }
+
+    @Test
+    void orcPathDoesNotTriggerFooterPrefetch()
+    {
+        Location orc = Location.of("s3://bucket/table/data/part-0.orc");
+        RecordingDelegate delegate = new RecordingDelegate();
+        delegate.inputFiles.put(orc, new FakeInputFile(orc, new byte[256]));
+
+        RecordingFetcher recording = new RecordingFetcher();
+        PrefetchMetrics metrics = new PrefetchMetrics();
+        FooterPrefetcher prefetcher = FooterPrefetcher.withExecutor(
+                recording, new DirectExecutorService(), metrics);
+
+        ShelfFileSystem fs = new ShelfFileSystem(
+                prefetchEnabledConfig(64),
+                delegate,
+                alwaysSucceedFetcher(),
+                fixedResolver(),
+                prefetcher);
+
+        fs.newInputFile(orc);
+
+        assertThat(recording.calls.get()).isZero();
+        assertThat(metrics.footerPrefetchScheduled()).isZero();
+    }
+
+    @Test
+    void emptyRingSkipsPrefetchAndLeavesMetricsZero()
+            throws IOException
+    {
+        byte[] payload = new byte[2048];
+        RecordingDelegate delegate = new RecordingDelegate();
+        delegate.inputFiles.put(DATA, new FakeInputFile(DATA, payload));
+
+        RecordingFetcher recording = new RecordingFetcher();
+        PrefetchMetrics metrics = new PrefetchMetrics();
+        FooterPrefetcher prefetcher = FooterPrefetcher.withExecutor(
+                recording, new DirectExecutorService(), metrics);
+
+        MembershipResolver empty = new MembershipResolver(
+                () -> List.of(),
+                java.net.http.HttpClient.newHttpClient(),
+                java.time.Duration.ofSeconds(1),
+                java.time.Duration.ofSeconds(1));
+
+        ShelfFileSystem fs = new ShelfFileSystem(
+                prefetchEnabledConfig(64),
+                delegate,
+                alwaysSucceedFetcher(),
+                empty,
+                prefetcher);
+
+        fs.newInputFile(DATA);
+
+        assertThat(recording.calls.get())
+                .as("empty ring has no endpoint to route a prefetch to")
+                .isZero();
+        assertThat(metrics.footerPrefetchScheduled()).isZero();
+        empty.close();
+    }
+
+    @Test
+    void prefetchTriggerPreservesTrinoInputFileDelegation()
+            throws IOException
+    {
+        Location parquet = Location.of("s3://bucket/table/data/part-0.parquet");
+        byte[] payload = new byte[]{1, 2, 3, 4, 5, 6, 7, 8, 9};
+        RecordingDelegate delegate = new RecordingDelegate();
+        delegate.inputFiles.put(parquet, new FakeInputFile(parquet, payload));
+
+        RecordingFetcher recording = new RecordingFetcher();
+        PrefetchMetrics metrics = new PrefetchMetrics();
+        FooterPrefetcher prefetcher = FooterPrefetcher.withExecutor(
+                recording, new DirectExecutorService(), metrics);
+
+        ShelfFileSystem fs = new ShelfFileSystem(
+                prefetchEnabledConfig(64),
+                delegate,
+                (ep, pool, k, off, len) -> Arrays.copyOfRange(payload, (int) off, (int) (off + len)),
+                fixedResolver(),
+                prefetcher);
+
+        TrinoInputFile wrapped = fs.newInputFile(parquet);
+
+        // Even though prefetch just fired, the file's length / lastModified
+        // / exists still delegate to the underlying file, and newStream()
+        // still returns functional bytes.
+        assertThat(wrapped.length()).isEqualTo(payload.length);
+        assertThat(wrapped.lastModified()).isEqualTo(Instant.EPOCH);
+        assertThat(wrapped.exists()).isTrue();
+        try (TrinoInputStream in = wrapped.newStream()) {
+            byte[] buf = new byte[payload.length];
+            int n = in.read(buf, 0, payload.length);
+            assertThat(n).isEqualTo(payload.length);
+            assertThat(buf).isEqualTo(payload);
+        }
+    }
+
+    @Test
+    void prefetchDisabledInConfigSkipsPrefetcher()
+    {
+        Location parquet = Location.of("s3://bucket/table/data/part-0.parquet");
+        RecordingDelegate delegate = new RecordingDelegate();
+        delegate.inputFiles.put(parquet, new FakeInputFile(parquet, new byte[8192]));
+
+        RecordingFetcher recording = new RecordingFetcher();
+        PrefetchMetrics metrics = new PrefetchMetrics();
+        FooterPrefetcher prefetcher = FooterPrefetcher.withExecutor(
+                recording, new DirectExecutorService(), metrics);
+
+        // Plugin enabled, but prefetch disabled.
+        ShelfConfig disabled = ShelfConfig.fromMap(Map.of(
+                ShelfConfig.KEY_ENABLED, "true",
+                ShelfConfig.KEY_ENDPOINT, "shelf.local:9090"));
+        ShelfFileSystem fs = new ShelfFileSystem(
+                disabled, delegate, alwaysSucceedFetcher(), fixedResolver(), prefetcher);
+
+        fs.newInputFile(parquet);
+
+        assertThat(recording.calls.get()).isZero();
+        assertThat(metrics.footerPrefetchScheduled()).isZero();
+    }
+
     private static ShelfConfig enabledConfig()
     {
         return ShelfConfig.fromMap(Map.of(
                 ShelfConfig.KEY_ENABLED, "true",
                 ShelfConfig.KEY_ENDPOINT, "shelf.local:9090"));
+    }
+
+    private static ShelfConfig prefetchEnabledConfig(int kib)
+    {
+        return ShelfConfig.fromMap(Map.of(
+                ShelfConfig.KEY_ENABLED, "true",
+                ShelfConfig.KEY_ENDPOINT, "shelf.local:9090",
+                ShelfConfig.KEY_PREFETCH_ENABLED, "true",
+                ShelfConfig.KEY_FOOTER_PREFETCH_KIB, Integer.toString(kib)));
     }
 
     private static RangeFetcher alwaysSucceedFetcher()
@@ -323,6 +500,74 @@ class ShelfFileSystemTest
         public Location location()
         {
             return location;
+        }
+    }
+
+    /** Records a single rangeGet; fills the response with zero-bytes of the right length. */
+    private static final class RecordingFetcher
+            implements RangeFetcher
+    {
+        final AtomicInteger calls = new AtomicInteger();
+        final AtomicReference<String> lastEndpoint = new AtomicReference<>();
+        final AtomicReference<Pool> lastPool = new AtomicReference<>();
+        final AtomicReference<String> lastContentKey = new AtomicReference<>();
+        final AtomicLong lastOffset = new AtomicLong();
+        final AtomicLong lastLength = new AtomicLong();
+
+        @Override
+        public byte[] rangeGet(String endpoint, Pool pool, String contentKey, long offset, long length)
+        {
+            calls.incrementAndGet();
+            lastEndpoint.set(endpoint);
+            lastPool.set(pool);
+            lastContentKey.set(contentKey);
+            lastOffset.set(offset);
+            lastLength.set(length);
+            return new byte[(int) length];
+        }
+    }
+
+    /** Runs each submitted task on the calling thread; ensures the prefetch completes before assertions. */
+    private static final class DirectExecutorService
+            extends AbstractExecutorService
+    {
+        private volatile boolean shutdown;
+
+        @Override
+        public void execute(Runnable command)
+        {
+            command.run();
+        }
+
+        @Override
+        public void shutdown()
+        {
+            shutdown = true;
+        }
+
+        @Override
+        public List<Runnable> shutdownNow()
+        {
+            shutdown = true;
+            return Collections.emptyList();
+        }
+
+        @Override
+        public boolean isShutdown()
+        {
+            return shutdown;
+        }
+
+        @Override
+        public boolean isTerminated()
+        {
+            return shutdown;
+        }
+
+        @Override
+        public boolean awaitTermination(long timeout, TimeUnit unit)
+        {
+            return true;
         }
     }
 

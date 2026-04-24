@@ -195,4 +195,55 @@ class ShelfConfigTest
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining(ShelfConfig.KEY_MEMBERSHIP_STATS_TIMEOUT_MS);
     }
+
+    @Test
+    void footerPrefetchKibDefaultsTo64()
+    {
+        ShelfConfig cfg = ShelfConfig.fromMap(Map.of());
+        assertThat(cfg.getFooterPrefetchKib()).isEqualTo(64);
+    }
+
+    @Test
+    void parsesFooterPrefetchKib()
+    {
+        ShelfConfig cfg = ShelfConfig.fromMap(Map.of(
+                ShelfConfig.KEY_FOOTER_PREFETCH_KIB, "128"));
+        assertThat(cfg.getFooterPrefetchKib()).isEqualTo(128);
+    }
+
+    @Test
+    void acceptsFooterPrefetchKibAtBounds()
+    {
+        assertThat(ShelfConfig.fromMap(Map.of(
+                ShelfConfig.KEY_FOOTER_PREFETCH_KIB, "1")).getFooterPrefetchKib()).isEqualTo(1);
+        assertThat(ShelfConfig.fromMap(Map.of(
+                ShelfConfig.KEY_FOOTER_PREFETCH_KIB, "256")).getFooterPrefetchKib()).isEqualTo(256);
+    }
+
+    @Test
+    void rejectsFooterPrefetchKibBelowMin()
+    {
+        assertThatThrownBy(() -> ShelfConfig.fromMap(Map.of(
+                ShelfConfig.KEY_FOOTER_PREFETCH_KIB, "0")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(ShelfConfig.KEY_FOOTER_PREFETCH_KIB);
+    }
+
+    @Test
+    void rejectsFooterPrefetchKibAboveMax()
+    {
+        assertThatThrownBy(() -> ShelfConfig.fromMap(Map.of(
+                ShelfConfig.KEY_FOOTER_PREFETCH_KIB, "257")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(ShelfConfig.KEY_FOOTER_PREFETCH_KIB);
+    }
+
+    @Test
+    void rejectsNonNumericFooterPrefetchKib()
+    {
+        assertThatThrownBy(() -> ShelfConfig.fromMap(Map.of(
+                ShelfConfig.KEY_FOOTER_PREFETCH_KIB, "big")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(ShelfConfig.KEY_FOOTER_PREFETCH_KIB);
+    }
 }
