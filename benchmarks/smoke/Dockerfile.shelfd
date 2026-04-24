@@ -1,0 +1,31 @@
+# Multi-stage image for the shelfd daemon used by the SHELF-12 smoke
+# harness. NOT a production image: builds debug-profile on every run,
+# pulls full toolchain, no distroless hardening. See
+# `shelf/benchmarks/smoke/docs/SHELF-12-design-notes.md` for scope.
+#
+# Lives under benchmarks/smoke/ on purpose: the production Dockerfile
+# for shelfd is out of scope for SHELF-12 (and not yet authored).
+
+# ---- builder ----
+FROM rust:1.83-slim-bookworm AS builder
+WORKDIR /build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      pkg-config libssl-dev protobuf-compiler ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Build context is the repo root so we can pick up the workspace as-is.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml deny.toml ./
+COPY shelfd ./shelfd
+COPY shelfctl ./shelfctl
+
+RUN cargo build -p shelfd --release
+
+# ---- runtime ----
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /build/target/release/shelfd /usr/local/bin/shelfd
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/shelfd"]

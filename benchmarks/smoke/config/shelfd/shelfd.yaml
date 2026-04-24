@@ -1,0 +1,45 @@
+# shelfd config for the SHELF-12 smoke harness.
+#
+# DRAM-only (NVMe path mounted at /tmp/shelf-nvme inside the container);
+# single-pod membership; pin_list points at the empty bucket so the
+# reload doesn't refuse to boot.
+
+node:
+  id: shelf-smoke-0
+
+http:
+  listen: 0.0.0.0:9090
+  request_timeout: 30s
+
+control:
+  listen: 0.0.0.0:9091
+
+origin:
+  bucket: iceberg-warehouse
+  endpoint_url: http://minio:9000
+  region: us-east-1
+  max_inflight: 64
+
+pools:
+  metadata:
+    dram_bytes: 268435456        # 256 MiB — plenty for a smoke run
+  rowgroup:
+    dram_bytes: 268435456        # 256 MiB DRAM
+    nvme_dir: /tmp/shelf-nvme
+    nvme_bytes: 536870912        # 512 MiB (foyer_pool feature gated off by default — ignored)
+
+admission:
+  size_threshold_bytes: 1073741824  # 1 GiB per ADR-0003
+  pinned_bypass: true
+
+membership:
+  headless_service: shelf-smoke-shelfd
+  dns_refresh: 5s
+
+pin_list:
+  source: s3://shelfd-pin-list/pin_list.json
+  reload_interval: 15m
+
+head_lru_entries: 4096
+
+observability: {}
