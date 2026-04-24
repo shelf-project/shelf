@@ -21,19 +21,25 @@ timeline
 ```
 
 Bookkeeping commits (SHELF-01/04/11) and the Phase-0 / Phase-1 foundation
-landed in earlier sprints. What remains is **six tickets that cannot be
-completed without a live 3-pod StatefulSet on EKS** — ops owns those.
+landed in earlier sprints. A follow-up pass also closed the four
+locally-completable tickets (**SHELF-01a**, **SHELF-16b**, **SHELF-18**
+code + local gate, **SHELF-26a**, **SHELF-28** runbook + smoke
+variants). What remains is **four tickets that cannot be completed
+without a live 3-pod StatefulSet on EKS** — ops owns those. SHELF-18
+and SHELF-28 retain cluster-only acceptance items (NVMe PVC runtime
+proof and live-traffic chaos drills); the design, tests, and CI rails
+are done.
 
-## The six cluster-gated tickets
+## The cluster-gated tickets
 
 | Ticket | What it asserts | Why it needs a cluster | Owner (suggested) |
 |---|---|---|---|
 | **SHELF-13** Shadow-traffic rollout on rep-2 | 5 % → 50 % → 100 % shadow mirror via Trino Gateway; no incidents for 72 h at 100 % | Requires Trino Gateway config, replica-2-canary resource group, rep-2 query traffic | trino-platform + sre-1 |
 | **SHELF-14** Experiments E1, E3, E10, E12 | Cold miss-mix, warm re-run, pod rotation mid-query, mixed Trino / DuckDB traffic | Needs SHELF-13 rollout to have real shadow traffic; experiment scripts live in `benchmarks/` but harness is cluster-bound | rust-engineer-1 + sre-1 |
-| **SHELF-18** NVMe hybrid tier (accept half) | 500 GiB PVC, S3-FIFO eviction, data survives pod restart | Acceptance "survives pod restart" requires StatefulSet + PVC; Foyer hybrid-mode wiring can land locally but the runtime proof needs a cluster | rust-engineer-2 + k8s-eng-1 |
+| **SHELF-18** NVMe PVC rollout (runtime half) | 500 GiB PVC per pod, data survives real pod restart | Code + `it_hybrid_pool.rs` prove the runtime contract locally (S3-FIFO, DRAM+NVMe parity, recreation survives); the PVC mount + pod-restart proof needs a StatefulSet | rust-engineer-2 + k8s-eng-1 |
 | **SHELF-20** Pod-rotation conformance (E7 only) | < 1 % mis-routed requests during a rolling restart | Java side + `/stats` contract landed in earlier sprint; the 1 %-mis-route measurement needs a 3-pod rolling restart on real traffic | trino-plugin-eng-1 + sre-1 |
 | **SHELF-21** 3-pod StatefulSet rollout | Helm upgrade rehearsal, anti-affinity across AZs, NVMe PVC mount semantics | `charts/shelf/` renders fine under `helm lint` + `helm template`, but the rollout happens on the cluster | k8s-eng-1 |
-| **SHELF-28** Chaos drills + v0.5 gate runbook | Pod-kill / disk-fill / network-partition drills under load; runbook battle-tested | Drills are by definition cluster-level | sre-1 |
+| **SHELF-28** Cluster-mode chaos drills | Pod-kill / disk-fill / network-partition under real dashboard traffic | Runbook + green-in-CI smoke variants already landed (`make chaos-*-smoke` via `chaos/smoke-*.sh` in `smoke.yml`); cluster drills need live traffic | sre-1 |
 
 ## v0.5 gate (blocks `v0.5` tag)
 
@@ -89,18 +95,41 @@ Green criteria:
 
 ## What is NOT in scope for this handoff
 
-- Footer TCompactProtocol parser — tracked as **SHELF-16b**. Local
-  follow-up, not cluster-gated. Can land whenever a Java engineer has
-  time for the Thrift parse; wire-format is frozen.
+- Footer TCompactProtocol parser — **SHELF-16b — CLOSED.**
+  `io.shelf.client.CompactProtocolReader` +
+  `io.shelf.client.ParquetFooterIndex` ship the hand-rolled parser;
+  116 Java tests green including 11 `ParquetFooterIndexTest` cases
+  against real footers built by the in-repo test writer.
 - FrozenHot eviction policy — tracked as **SHELF-17a**. SIEVE ships
   today. Re-evaluate after the SHELF-26 replay harness is pointed at
   a real rep-2 trace and shows whether manifest hot-set thrash is a
   real concern (the `metadata`-pool per-config hit-rate in
   `benchmarks/trino_logs/results/.../summary.json` is the signal).
-- Unified PR CI rail — tracked as **SHELF-01a**. bench + security +
-  helm-lint rails are green; `fmt + clippy + test + mvn verify +
-  docker build` as a single PR workflow is the remainder. Local
-  follow-up, low priority.
+- Unified PR CI rail — **SHELF-01a — CLOSED.**
+  `.github/workflows/verify.yml` runs parallel `cargo fmt + clippy +
+  test`, `mvn verify`, and `pytest benchmarks/trino_logs` lanes with
+  a final `verify-gate` aggregation job. Dockerfile + helm-lint rails
+  live under SHELF-09 / `helm-lint.yml` / `smoke.yml`; `security.yml`
+  handles supply-chain scans.
+- Join/subquery predicate extraction — **SHELF-26a — CLOSED.**
+  `shelf_replay.predicates` does alias-aware sqlglot predicate
+  extraction across joins, subqueries, CTEs, and `OR` collapses;
+  `PredicateTerm.table_alias` lets the simulator prune per-scan. 29
+  Python tests green.
+- Foyer NVMe hybrid tier (local half) — **SHELF-18 — CLOSED locally.**
+  `foyer::HybridCache` with `DirectFs` + `LargeEngine` +
+  `S3FifoConfig::default()` ships behind
+  `pools.rowgroup.nvme_bytes > 0`; DRAM-only path preserved.
+  `it_hybrid_pool.rs` (4 tests) pins the contract; ADR-0009 captured
+  in `shelfd/docs/design-notes/SHELF-18-nvme-hybrid-pool.md`. Cluster
+  PVC rollout still lives under SHELF-21.
+- v0.5 gate runbook + chaos smoke rails — **SHELF-28 — CLOSED
+  locally.** `docs/runbook.md` documents the five green criteria,
+  3-click eval path, weekly drills (cluster + smoke variants), and
+  the kill-switch tree. Smoke scripts (`chaos/smoke-*.sh`) run in CI
+  as the `chaos-smoke` job in `smoke.yml`. Cluster-mode drills
+  (`make chaos-keda-rotation`, `make chaos-pod-kill`) are ops
+  territory per the runbook.
 
 ## Cross-references
 

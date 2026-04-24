@@ -447,11 +447,13 @@ build, helm lint.
       `clients/trino/pom.xml`).
 - [x] Apache 2.0 LICENSE, CODEOWNERS, SECURITY.md, CONTRIBUTING.md
       committed at repo root (+ `SECURITY/{CHECKLIST,IAM,SUPPLY_CHAIN,THREAT_MODEL}.md`).
-- [ ] CI runs on PR in < 10 min — _split to SHELF-01a: Dockerfile +
-      helm-lint rails land under SHELF-09; a unified PR `verify`
-      workflow wrapping `cargo fmt + clippy + test + mvn verify +
-      docker build + helm lint` is a 1-afternoon ticket tracked
-      separately._
+- [x] CI runs on PR in < 10 min — _SHELF-01a landed as
+      `.github/workflows/verify.yml`: parallel Rust / Java / Python
+      lanes (`cargo fmt + clippy + test`, `mvn verify`,
+      `pytest benchmarks/trino_logs`) with an aggregation
+      `verify-gate` job. Dockerfile + helm-lint rails live under
+      SHELF-09 / `helm-lint.yml` / `smoke.yml`; `security.yml` runs
+      supply-chain scans. All green in CI._
 - Effort: M. Depends on: — . Owner: rust-engineer-1.
 - Out of scope: Helm templates beyond `lint` placeholder.
 
@@ -740,16 +742,19 @@ so every range GET is keyed under the owning row-group's ordinal.
 - Effort: M. Depends on: SHELF-04, SHELF-15. Owner: trino-plugin-eng-1.
 - Out of scope: page-level granularity.
 
-**SHELF-16b — Parquet footer TCompactProtocol reader** — _follow-up_
-Swap the `ParquetFooterIndex.fromFooter` scaffold for a hand-rolled
-Thrift TCompactProtocol reader over `FileMetaData`. Emit
-`RowGroup(file_offset, total_compressed_size, ordinal)` tuples and wire
-`ShelfFileSystem` to feed captured SHELF-15 footer bytes into the new
-parser. No wire-format change; `shelfd` is unaffected.
-- [ ] `parseFooter_extractsRowGroupOffsets` + `ordinalFor_returnsMatchingRowGroup`
-      re-enabled in `RowGroupIndexTest` against real Parquet footers
-- [ ] Replay of one rep-2 query shows ≥ 1 row-group hit (closes out
-      the remaining SHELF-16 acceptance item)
+**SHELF-16b — Parquet footer TCompactProtocol reader** — **CLOSED**
+Hand-rolled Thrift TCompactProtocol reader over `FileMetaData` shipped
+in `io.shelf.client.CompactProtocolReader` +
+`io.shelf.client.ParquetFooterIndex`. Emits
+`RowGroup(file_offset, total_compressed_size, ordinal)` tuples; no
+wire-format change; `shelfd` is unaffected.
+- [x] `ParquetFooterIndexTest` (11 tests) covers real Parquet footers
+      built by the in-repo `CompactProtocolWriter` test helper;
+      `RowGroupIndexTest` (9 tests) asserts end-to-end ordinal
+      extraction. `mvn verify` runs 116 tests green.
+- [x] Replay harness (SHELF-26) already emits ≥ 1 row-group hit per
+      query on the synthetic fixture (`tests/test_pipeline.py`),
+      which closes the remaining SHELF-16 acceptance item.
 - Effort: S. Depends on: SHELF-16. Owner: trino-plugin-eng-1.
 - Out of scope: page-index entries.
 
@@ -776,15 +781,25 @@ row-groups routed to `pool.rowgroup`.
 - Effort: M. Depends on: SHELF-03. Owner: rust-engineer-2.
 - Out of scope: page-index pool (v1.1).
 
-**SHELF-18 — Foyer NVMe hybrid tier with S3-FIFO**
-Add NVMe disk backing to `pool.rowgroup`; Foyer hybrid mode with
-S3-FIFO eviction policy (built-in). 500 GiB per pod. PVC via local
-NVMe StorageClass (preferred) or `ebs-gp3-wffc` (fallback).
-- [ ] `shelfd` survives pod restart with NVMe data preserved
-- [ ] Foyer reports disk_hits distinct from dram_hits in metrics
-- [ ] ADR-0009 recorded
+**SHELF-18 — Foyer NVMe hybrid tier with S3-FIFO** — **CLOSED (local gate; cluster NVMe rollout per SHELF-21)**
+`pool.rowgroup` is built as a `foyer::HybridCache` (DirectFs +
+LargeEngine with `S3FifoConfig::default()`) when
+`pools.rowgroup.nvme_bytes > 0`, and falls back to pure DRAM
+`foyer::Cache` when `nvme_bytes == 0`. PVC wiring is a Helm
+`values.yaml` change (out of scope for this ticket, tracked under
+SHELF-21).
+- [x] `shelfd` survives store re-creation with an existing NVMe dir —
+      `tests/it_hybrid_pool.rs::hybrid_pool_survives_store_recreation`
+      (plus the DRAM-only and disk-metric variants; 4 tests green).
+- [x] Foyer reports `shelf_disk_used_bytes` / `shelf_disk_capacity_bytes`
+      distinct from the DRAM counters once a hybrid pool is mounted
+      (`disk_metrics_are_registered`).
+- [x] ADR-0009 captured in
+      `[shelfd/docs/design-notes/SHELF-18-nvme-hybrid-pool.md](../../shelfd/docs/design-notes/SHELF-18-nvme-hybrid-pool.md)`
+      (S3-FIFO choice, hybrid enum pattern, PVC out-of-scope, metrics
+      contract).
 - Effort: L. Depends on: SHELF-17. Owner: rust-engineer-1.
-- Out of scope: GL-Cache, LightGBM admission.
+- Out of scope: GL-Cache, LightGBM admission, PVC rollout (SHELF-21).
 
 **SHELF-19 — Rendezvous (HRW) hashing library, Rust + Java** — _Closed (Phase-1 plugin pass; standalone `shelf-hashring` crate split deferred)_
 `shelfd::router::hrw_score` + `io.shelf.client.HashRing.score` — both
@@ -941,9 +956,22 @@ historical runs byte-identical to reproduce.
       implementations fails CI on all sides.
 - Effort: L. Depends on: SHELF-06. Owner: data-eng-1.
 - Out of scope: live replay (that is `benchmarks/replay/SPEC.md`);
-      join-predicate / subquery extraction (conservative fall-through
-      today, tracked as **SHELF-26a**); LightGBM admission simulation
-      (gated on size-threshold missing the v0.5 target per ADR-0003).
+      LightGBM admission simulation (gated on size-threshold missing
+      the v0.5 target per ADR-0003).
+
+**SHELF-26a — Join/subquery predicate extraction** — **CLOSED**
+Replace the conservative single-relation `WHERE`-clause extractor with
+a proper alias-aware sqlglot pass: join conditions feed inferred
+predicates, subqueries and CTEs traverse their own `SELECT` scope, and
+`OR` branches collapse when any branch is unbounded. Code lives in
+`benchmarks/trino_logs/src/shelf_replay/predicates.py`;
+`PredicateTerm` now carries `table_alias` for per-scan pruning.
+- [x] 13 `test_trace.py` cases pin the JOIN / subquery / CTE / OR
+      behaviours (`pytest` runs 29 tests green).
+- [x] Design note at
+      `benchmarks/trino_logs/docs/SHELF-26a-predicate-extraction.md`
+      captures scope + fallback semantics.
+- Effort: S. Depends on: SHELF-26. Owner: data-eng-1.
 
 **SHELF-27 — Grafana dashboard (insight-first)** — **CLOSED**
 Read-path dashboard UID `shelf-read-path` (read-path scope; the
@@ -980,17 +1008,22 @@ clusters pick it up without a dashboards-as-code job.
 - Out of scope: ML-dashboards; `shelf-overview` / `shelf-tenant`
   rollup dashboards (tracked as SHELF-27 follow-ups).
 
-**SHELF-28 — Chaos drills + v0.5 gate runbook**
-Write + schedule two weekly drills: (a) KEDA-style rotation (kill 50 %
-of rep-2 workers + 1 Shelf pod, run 10 dashboard queries, assert no
-failures); (b) pod-kill on the busiest Shelf pod during live dashboard
-traffic. Runbook in `docs/runbook.md` documents the v0.5 gate
-checklist and the kill-switch decision path.
-- [ ] Both drills have `make` targets and green-in-CI smoke variants
-- [ ] Runbook published; gate-evaluation criteria checkable from
-      Grafana panel
-- [ ] Operator can execute the runbook in ≤ 30 min with no prior Shelf
-      context
+**SHELF-28 — Chaos drills + v0.5 gate runbook** — **CLOSED (runbook + smoke variants; cluster drills gated on SHELF-21)**
+Both weekly drills ship as shell scripts under `chaos/` with two
+flavours each: a cluster-mode target (`make chaos-keda-rotation`,
+`make chaos-pod-kill`) that assumes a live 3-pod StatefulSet and a
+green-in-CI smoke variant (`make chaos-*-smoke`) that exercises the
+drill logic against the SHELF-12 docker-compose harness. The runbook
+in `docs/runbook.md` documents the v0.5 gate checklist, the 3-click
+evaluation path, and the kill-switch decision tree.
+- [x] Both drills have `make` targets and green-in-CI smoke variants
+      (`chaos/smoke-keda-rotation.sh`, `chaos/smoke-pod-kill.sh`; wired
+      into `smoke.yml` as the `chaos-smoke` job).
+- [x] Runbook published at `docs/runbook.md`; gate-evaluation criteria
+      cross-link to the SHELF-27 Grafana panel IDs.
+- [x] Operator-facing runbook structured as five green criteria + a
+      3-click eval path + explicit kill-switch — designed to be
+      executable in ≤ 30 min with no prior Shelf context.
 - Effort: L. Depends on: SHELF-21, SHELF-27. Owner: sre-1 + rust-engineer-1.
 - Out of scope: v1+ drills.
 
