@@ -37,8 +37,10 @@ membership:
   dns_refresh: 5s
 
 pin_list:
-  source: s3://shelfd-pin-list/pin_list.json
-  reload_interval: 15m
+  bucket: shelfd-pin-list
+  key: pin_list.json
+  refresh_period: 15m
+  enabled: false
 
 head_lru_entries: 4096
 
