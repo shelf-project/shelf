@@ -28,6 +28,7 @@ use axum::Router;
 use bytes::Bytes;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
+use tracing::{field, Instrument};
 
 use crate::control::{PoolStats, Stats};
 use crate::head_lru::{HeadLru, HeadMeta};
@@ -221,17 +222,65 @@ pub mod handlers {
         State(state): State<Arc<ServerState>>,
         Path((pool_str, key_hex, range_str)): Path<(String, String, String)>,
     ) -> Response {
+        // SHELF-08: wrap the whole handler in a named span so a
+        // Tempo trace resolves `http.get_cache → s3.get_object`.
+        // `pool` / `status` / `outcome` are recorded as the handler
+        // resolves them.
+        let span = tracing::info_span!(
+            "http.get_cache",
+            otel.kind = "server",
+            route = "/cache/:pool/:key/:range",
+            pool = %pool_str,
+            status = field::Empty,
+            outcome = field::Empty,
+        );
+        async move { get_cache_inner(state, pool_str, key_hex, range_str).await }
+            .instrument(span)
+            .await
+    }
+
+    async fn get_cache_inner(
+        state: Arc<ServerState>,
+        pool_str: String,
+        key_hex: String,
+        range_str: String,
+    ) -> Response {
+        let start = std::time::Instant::now();
         let pool = match parse_pool(&pool_str) {
             Ok(p) => p,
-            Err((status, detail)) => return client_error(status, "invalid pool", &detail),
+            Err((status, detail)) => {
+                return record_cache_outcome(
+                    &state,
+                    start,
+                    "bad_request",
+                    status,
+                    client_error(status, "invalid pool", &detail),
+                );
+            }
         };
         let key = match Key::from_hex(&key_hex) {
             Ok(k) => k,
-            Err(e) => return client_error(StatusCode::BAD_REQUEST, "invalid key", &e.to_string()),
+            Err(e) => {
+                return record_cache_outcome(
+                    &state,
+                    start,
+                    "bad_request",
+                    StatusCode::BAD_REQUEST,
+                    client_error(StatusCode::BAD_REQUEST, "invalid key", &e.to_string()),
+                );
+            }
         };
         let (offset, length) = match parse_range(&range_str) {
             Ok(parts) => parts,
-            Err((status, detail)) => return client_error(status, "invalid range", &detail),
+            Err((status, detail)) => {
+                return record_cache_outcome(
+                    &state,
+                    start,
+                    "bad_request",
+                    status,
+                    client_error(status, "invalid range", &detail),
+                );
+            }
         };
 
         let pool_label = pool_label(pool);
@@ -243,10 +292,24 @@ pub mod handlers {
                     .hits_total
                     .with_label_values(&[pool_label])
                     .inc();
-                return ok_range(bytes, offset, length);
+                return record_cache_outcome(
+                    &state,
+                    start,
+                    "hit",
+                    StatusCode::OK,
+                    ok_range(bytes, offset, length),
+                );
             }
             Ok(None) => {}
-            Err(e) => return upstream_error("store.get", &e.to_string()),
+            Err(e) => {
+                return record_cache_outcome(
+                    &state,
+                    start,
+                    "error",
+                    StatusCode::BAD_GATEWAY,
+                    upstream_error("store.get", &e.to_string()),
+                );
+            }
         }
 
         // Miss: delegate to `FoyerStore::get_or_fetch`, which handles
@@ -281,7 +344,13 @@ pub mod handlers {
                     .hits_total
                     .with_label_values(&[pool_label])
                     .inc();
-                ok_range(bytes, offset, length)
+                record_cache_outcome(
+                    &state,
+                    start,
+                    "hit",
+                    StatusCode::OK,
+                    ok_range(bytes, offset, length),
+                )
             }
             Ok(ReadOutcome::Miss(bytes)) => {
                 state
@@ -289,10 +358,44 @@ pub mod handlers {
                     .misses_total
                     .with_label_values(&[pool_label])
                     .inc();
-                ok_range(bytes, offset, length)
+                record_cache_outcome(
+                    &state,
+                    start,
+                    "miss",
+                    StatusCode::OK,
+                    ok_range(bytes, offset, length),
+                )
             }
-            Err(e) => upstream_error("origin/store", &e.to_string()),
+            Err(e) => record_cache_outcome(
+                &state,
+                start,
+                "error",
+                StatusCode::BAD_GATEWAY,
+                upstream_error("origin/store", &e.to_string()),
+            ),
         }
+    }
+
+    /// Observe `shelf_request_seconds{path="/cache",outcome}` and
+    /// record `status` + `outcome` on the current span before the
+    /// response is returned.
+    fn record_cache_outcome(
+        state: &Arc<ServerState>,
+        start: std::time::Instant,
+        outcome: &'static str,
+        status: StatusCode,
+        resp: Response,
+    ) -> Response {
+        let elapsed = start.elapsed().as_secs_f64();
+        state
+            .metrics
+            .request_seconds
+            .with_label_values(&["/cache", outcome])
+            .observe(elapsed);
+        let span = tracing::Span::current();
+        span.record("status", status.as_u16());
+        span.record("outcome", outcome);
+        resp
     }
 
     /// `HEAD /cache/:pool/origin/:bucket/*s3_key` — plugin pre-flight
@@ -312,24 +415,63 @@ pub mod handlers {
         State(state): State<Arc<ServerState>>,
         Path((pool_str, bucket, s3_key)): Path<(String, String, String)>,
     ) -> Response {
+        let span = tracing::info_span!(
+            "http.head_cache",
+            otel.kind = "server",
+            route = "/cache/:pool/origin/:bucket/*s3_key",
+            pool = %pool_str,
+            status = field::Empty,
+        );
+        async move { head_cache_inner(state, pool_str, bucket, s3_key).await }
+            .instrument(span)
+            .await
+    }
+
+    async fn head_cache_inner(
+        state: Arc<ServerState>,
+        pool_str: String,
+        bucket: String,
+        s3_key: String,
+    ) -> Response {
+        let start = std::time::Instant::now();
         let pool = match parse_pool(&pool_str) {
             Ok(p) => p,
-            Err((status, detail)) => return client_error(status, "invalid pool", &detail),
+            Err((status, detail)) => {
+                return record_head_outcome(
+                    &state,
+                    start,
+                    "bad_request",
+                    status,
+                    client_error(status, "invalid pool", &detail),
+                );
+            }
         };
         let pool_label = pool_label(pool);
 
         if bucket.is_empty() {
-            return client_error(
+            return record_head_outcome(
+                &state,
+                start,
+                "bad_request",
                 StatusCode::BAD_REQUEST,
-                "invalid bucket",
-                "bucket segment must be non-empty",
+                client_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid bucket",
+                    "bucket segment must be non-empty",
+                ),
             );
         }
         if s3_key.is_empty() {
-            return client_error(
+            return record_head_outcome(
+                &state,
+                start,
+                "bad_request",
                 StatusCode::BAD_REQUEST,
-                "invalid key",
-                "s3_key segment must be non-empty",
+                client_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid key",
+                    "s3_key segment must be non-empty",
+                ),
             );
         }
 
@@ -340,7 +482,13 @@ pub mod handlers {
                 .head_hits_total
                 .with_label_values(&[pool_label])
                 .inc();
-            return ok_head(meta.as_ref());
+            return record_head_outcome(
+                &state,
+                start,
+                "hit",
+                StatusCode::OK,
+                ok_head(meta.as_ref()),
+            );
         }
 
         state
@@ -355,17 +503,46 @@ pub mod handlers {
             Ok(Some(head)) => {
                 let meta = HeadMeta::from(head);
                 state.head_lru.insert(bucket, s3_key, meta.clone());
-                ok_head(&meta)
+                record_head_outcome(&state, start, "miss", StatusCode::OK, ok_head(&meta))
             }
             Ok(None) => {
-                // NoSuchKey — the plugin expects a clean 404 so it
-                // can fall through to S3 without retrying.
                 let body =
                     serde_json::json!({"error": "not_found", "detail": "origin object absent"});
-                (StatusCode::NOT_FOUND, axum::Json(body)).into_response()
+                record_head_outcome(
+                    &state,
+                    start,
+                    "not_found",
+                    StatusCode::NOT_FOUND,
+                    (StatusCode::NOT_FOUND, axum::Json(body)).into_response(),
+                )
             }
-            Err(e) => upstream_error("origin.head", &e.to_string()),
+            Err(e) => record_head_outcome(
+                &state,
+                start,
+                "error",
+                StatusCode::BAD_GATEWAY,
+                upstream_error("origin.head", &e.to_string()),
+            ),
         }
+    }
+
+    /// Observe `shelf_request_seconds{path="/cache/head",outcome}` and
+    /// stamp `status` onto the current span.
+    fn record_head_outcome(
+        state: &Arc<ServerState>,
+        start: std::time::Instant,
+        outcome: &'static str,
+        status: StatusCode,
+        resp: Response,
+    ) -> Response {
+        let elapsed = start.elapsed().as_secs_f64();
+        state
+            .metrics
+            .request_seconds
+            .with_label_values(&["/cache/head", outcome])
+            .observe(elapsed);
+        tracing::Span::current().record("status", status.as_u16());
+        resp
     }
 
     /// `GET /stats` — JSON capacity + usage surface (SHELF-20).
@@ -383,6 +560,24 @@ pub mod handlers {
     /// }
     /// ```
     pub async fn stats(State(state): State<Arc<ServerState>>) -> Response {
+        let span = tracing::info_span!(
+            "http.stats",
+            otel.kind = "server",
+            route = "/stats",
+            status = 200,
+        );
+        let _e = span.enter();
+        let start = std::time::Instant::now();
+        let resp = stats_inner(&state).await;
+        state
+            .metrics
+            .request_seconds
+            .with_label_values(&["/stats", "ok"])
+            .observe(start.elapsed().as_secs_f64());
+        resp
+    }
+
+    async fn stats_inner(state: &Arc<ServerState>) -> Response {
         let metadata = PoolStats {
             capacity_bytes: state.store.capacity_bytes(Pool::Metadata),
             used_bytes: state.store.used_bytes(Pool::Metadata),

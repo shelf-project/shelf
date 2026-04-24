@@ -212,11 +212,34 @@ impl FoyerStore {
 
         let cell = self.acquire_inflight_cell(pool, &key);
 
-        // `get_or_init` takes an FnOnce returning a future. Only the
-        // first concurrent caller's closure ever runs.
+        // SHELF-08: differentiate leader from follower for trace-level
+        // fan-in analysis. The leader is the caller whose closure
+        // `get_or_init` actually runs; followers observe the cell was
+        // already initialized before they called `get_or_init` (there
+        // is still a small race where `initialized()` lies, so we
+        // additionally record the leader role from inside the closure
+        // and compare).
+        let was_initialized = cell.initialized();
+        let role_seen_by_closure = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let role_flag = role_seen_by_closure.clone();
         let slot = cell
-            .get_or_init(|| async move { fetch.await.map_err(|e| e.to_string()) })
+            .get_or_init(|| async move {
+                role_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                tracing::debug!(
+                    target: "shelfd::singleflight",
+                    role = "leader",
+                    "shelfd.singleflight"
+                );
+                fetch.await.map_err(|e| e.to_string())
+            })
             .await;
+        if !role_seen_by_closure.load(std::sync::atomic::Ordering::Relaxed) || was_initialized {
+            tracing::debug!(
+                target: "shelfd::singleflight",
+                role = "follower",
+                "shelfd.singleflight"
+            );
+        }
 
         let bytes = match slot.clone() {
             Ok(b) => b,

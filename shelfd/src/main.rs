@@ -22,9 +22,9 @@ use shelfd::{
     origin::S3Origin,
     router::Router,
     store::FoyerStore,
+    telemetry::{self, TelemetryGuard},
 };
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::EnvFilter;
 
 /// Command-line arguments for `shelfd`. Kept intentionally small; all
 /// tunables live in `Config` (see `shelfd::config::Config` +
@@ -49,7 +49,6 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    init_tracing(&args.log)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -60,6 +59,18 @@ fn main() -> anyhow::Result<()> {
 async fn run(args: Args) -> anyhow::Result<()> {
     let config =
         Config::from_path(&args.config).map_err(|e| anyhow::anyhow!("config load failed: {e}"))?;
+
+    // SHELF-08: install the subscriber AFTER config is parsed so the
+    // OTLP endpoint + pod id can flow into the tracer resource. The
+    // guard flushes pending spans on drop at the end of `run`.
+    let _telemetry: TelemetryGuard =
+        telemetry::init(&args.log, &config.observability, &config.node.id)?;
+    if _telemetry.otlp_enabled() {
+        tracing::info!(
+            endpoint = ?config.observability.otlp_endpoint,
+            "otlp tracing exporter enabled",
+        );
+    }
     tracing::info!(node = %config.node.id, "shelfd starting");
 
     let metrics = Arc::new(metrics::Registry::init()?);
@@ -90,19 +101,6 @@ async fn run(args: Args) -> anyhow::Result<()> {
     tracing::info!(%listen, ?request_timeout, "binding data plane");
     http::serve(listen, state, request_timeout, shutdown).await?;
     tracing::info!("shelfd shutdown complete");
-    Ok(())
-}
-
-fn init_tracing(filter: &str) -> anyhow::Result<()> {
-    let env_filter =
-        EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info,shelfd=debug"));
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_target(true)
-        .json()
-        .flatten_event(true)
-        .try_init()
-        .map_err(|e| anyhow::anyhow!("tracing init failed: {e}"))?;
     Ok(())
 }
 

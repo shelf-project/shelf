@@ -108,3 +108,106 @@ impl Registry {
         })
     }
 }
+
+/// Stable list of metric series `shelfd` exposes on `/metrics` in the
+/// Phase-0 gate build. Kept as module-level data so `docs/metrics.md`
+/// and the tests can both reference a single source of truth; the
+/// integration dashboard relies on these names.
+pub const EXPOSED_SERIES: &[&str] = &[
+    "shelf_hits_total",
+    "shelf_misses_total",
+    "shelf_head_hits_total",
+    "shelf_head_misses_total",
+    "shelfd_error_total",
+    "shelf_bytes_used",
+    "shelf_request_seconds",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prometheus::core::Collector;
+    use std::collections::HashSet;
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
+
+    fn ensure_registered() -> &'static Registry {
+        // `Registry::init` panics on the second call because the
+        // underlying `prometheus::Registry` rejects duplicate
+        // registrations. Gate with `Once` so multiple tests in the
+        // same binary can share a single registration.
+        static HANDLE: once_cell::sync::OnceCell<Registry> = once_cell::sync::OnceCell::new();
+        INIT.call_once(|| {
+            let reg = Registry::init().expect("register metrics");
+            HANDLE.set(reg).expect("set handle");
+        });
+        HANDLE.get().expect("handle set")
+    }
+
+    /// Regression guard: every series listed in `EXPOSED_SERIES` must
+    /// be registered as a Collector on the global `REGISTRY`. We
+    /// inspect collector descriptors directly because
+    /// `Registry::gather()` prunes `*Vec` families with no observed
+    /// children — asserting on descriptors proves the series is
+    /// *registered* regardless of whether a label has been touched.
+    #[test]
+    fn registry_exposes_documented_series() {
+        let reg = ensure_registered();
+        let mut names: HashSet<String> = HashSet::new();
+        for collector in [
+            reg.hits_total.desc(),
+            reg.misses_total.desc(),
+            reg.head_hits_total.desc(),
+            reg.head_misses_total.desc(),
+            reg.errors_total.desc(),
+            reg.bytes_used.desc(),
+            reg.request_seconds.desc(),
+        ] {
+            for d in collector {
+                names.insert(d.fq_name.clone());
+            }
+        }
+        for want in EXPOSED_SERIES {
+            assert!(
+                names.contains(*want),
+                "registry missing {want:?}; registered: {names:?}",
+            );
+        }
+    }
+
+    /// Secondary regression guard: once every metric has at least one
+    /// observed child, the `/metrics` scrape must include the full
+    /// documented series set. This mirrors what a Prometheus scrape
+    /// actually sees in production once traffic begins flowing.
+    #[test]
+    fn metrics_scrape_contains_documented_series_after_touch() {
+        let reg = ensure_registered();
+        reg.hits_total.with_label_values(&["metadata"]).inc_by(0);
+        reg.misses_total.with_label_values(&["metadata"]).inc_by(0);
+        reg.head_hits_total
+            .with_label_values(&["metadata"])
+            .inc_by(0);
+        reg.head_misses_total
+            .with_label_values(&["metadata"])
+            .inc_by(0);
+        reg.errors_total
+            .with_label_values(&["test", "test"])
+            .inc_by(0);
+        reg.bytes_used
+            .with_label_values(&["metadata", "dram"])
+            .set(0);
+        reg.request_seconds
+            .with_label_values(&["/cache", "hit"])
+            .observe(0.0);
+
+        let families = REGISTRY.gather();
+        let names: HashSet<String> = families.iter().map(|f| f.get_name().to_owned()).collect();
+        for want in EXPOSED_SERIES {
+            assert!(
+                names.contains(*want),
+                "`/metrics` missing {want:?}; scraped: {names:?}",
+            );
+        }
+    }
+}

@@ -24,6 +24,7 @@ use aws_sdk_s3::primitives::DateTimeFormat;
 use aws_sdk_s3::Client as S3Client;
 use bytes::Bytes;
 use std::fmt::Debug;
+use tracing::{field, Instrument};
 
 /// Origin for remote byte-range reads. Today: S3. Tomorrow (when we
 /// add Spark / DuckDB): possibly an abstraction over multiple
@@ -137,6 +138,17 @@ impl Origin for S3Origin {
         }
         // HTTP Range header uses INCLUSIVE end.
         let range = format!("bytes={}-{}", offset, offset + length - 1);
+        // SHELF-08: name the span so a Tempo trace resolves the
+        // `http.get_cache → s3.get_object` parent/child pair cleanly.
+        // `aws.request_id` is recorded on completion (Empty at open).
+        let span = tracing::info_span!(
+            "s3.get_object",
+            otel.kind = "client",
+            bucket = %bucket,
+            key = %key,
+            range = %range,
+            aws.request_id = field::Empty,
+        );
         let fut = async {
             let resp = self
                 .client
@@ -149,6 +161,7 @@ impl Origin for S3Origin {
                 .map_err(|e| crate::Error::Origin(format!("GetObject {bucket}/{key}: {e}")))?;
 
             if let Some(rid) = resp.request_id() {
+                tracing::Span::current().record("aws.request_id", rid);
                 tracing::debug!(request_id = rid, "s3 request-id");
             }
 
@@ -158,7 +171,8 @@ impl Origin for S3Origin {
                 .await
                 .map_err(|e| crate::Error::Origin(format!("collect body: {e}")))?;
             Ok::<_, crate::Error>(collected.into_bytes())
-        };
+        }
+        .instrument(span);
 
         tokio::time::timeout(self.request_timeout, fut)
             .await
@@ -171,6 +185,13 @@ impl Origin for S3Origin {
     }
 
     async fn head(&self, bucket: &str, key: &str) -> crate::Result<Option<ObjectHead>> {
+        let span = tracing::info_span!(
+            "s3.head_object",
+            otel.kind = "client",
+            bucket = %bucket,
+            key = %key,
+            aws.request_id = field::Empty,
+        );
         let fut = async {
             let resp = match self
                 .client
@@ -201,6 +222,7 @@ impl Origin for S3Origin {
             };
 
             if let Some(rid) = resp.request_id() {
+                tracing::Span::current().record("aws.request_id", rid);
                 tracing::debug!(request_id = rid, "s3 request-id");
             }
 
@@ -217,7 +239,8 @@ impl Origin for S3Origin {
                 etag,
                 last_modified,
             }))
-        };
+        }
+        .instrument(span);
         tokio::time::timeout(self.request_timeout, fut)
             .await
             .map_err(|_| {

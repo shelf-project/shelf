@@ -35,6 +35,7 @@ pub mod metrics;
 pub mod origin;
 pub mod router;
 pub mod store;
+pub mod telemetry;
 
 /// Re-export of the top-level error type so callers can `use shelfd::Error`.
 pub use error::Error;

@@ -52,6 +52,12 @@ pub struct Config {
     /// Cap on the HEAD-response LRU (SHELF-07).
     #[serde(default = "default_head_lru_entries")]
     pub head_lru_entries: u64,
+
+    /// Observability toggles (SHELF-08). Defaults to "no OTLP export";
+    /// `observability.otlp_endpoint` (or the `SHELFD_OTLP_ENDPOINT`
+    /// env override) enables the `tracing-opentelemetry` exporter.
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
 }
 
 fn default_head_lru_entries() -> u64 {
@@ -177,6 +183,23 @@ fn default_pin_reload() -> Duration {
     Duration::from_secs(15 * 60)
 }
 
+/// Observability subsystem config (SHELF-08).
+///
+/// The OTLP exporter is optional — when `otlp_endpoint` is `None`,
+/// `shelfd` runs without a background exporter and never requires a
+/// collector. A misconfigured endpoint must not take the daemon down:
+/// [`crate::telemetry::init`] is expected to log a warning and
+/// continue.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservabilityConfig {
+    /// `grpc://tempo-distributor:4317` or similar. Overridable via
+    /// `SHELFD_OTLP_ENDPOINT` so operators can point a pod at a
+    /// sidecar collector without editing the mounted YAML.
+    #[serde(default)]
+    pub otlp_endpoint: Option<String>,
+}
+
 impl Config {
     /// Load and validate a config from disk.
     ///
@@ -227,6 +250,11 @@ impl Config {
         }
         if let Ok(v) = std::env::var("SHELFD_ORIGIN_REGION") {
             self.origin.region = Some(v);
+        }
+        if let Ok(v) = std::env::var("SHELFD_OTLP_ENDPOINT") {
+            if !v.is_empty() {
+                self.observability.otlp_endpoint = Some(v);
+            }
         }
     }
 
