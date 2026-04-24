@@ -281,13 +281,25 @@ public final class ShelfFileSystem
             if (length <= 0L) {
                 return;
             }
-            Key key = ShelfInputFile.deriveContentKey(length, inner.lastModified());
-            Optional<MembershipResolver.Target> target = resolver.ownerFor(key.asBytes());
+            byte[] etag = ShelfInputFile.deriveEtagBytes(length, inner.lastModified());
+            // Route on a stable file-level identity — see ShelfInputFile
+            // for the rationale (per-range routing would fragment the
+            // working set across pods).
+            Key routingKey = Key.fromTuple(etag, 0L, length, 0);
+            Optional<MembershipResolver.Target> target = resolver.ownerFor(routingKey.asBytes());
             if (target.isEmpty()) {
                 return;
             }
             int prefetchBytes = config.getFooterPrefetchKib() * 1024;
-            footerPrefetcher.prefetch(target.get(), key.toHex(), length, prefetchBytes);
+            // SHELF-16: prefetch must land bytes under the exact key
+            // the foreground footer read will query, so we derive the
+            // key from the actual footer byte range
+            // [length - window, length). The window-clamp mirrors the
+            // prefetcher's internal math (see FooterPrefetcher.prefetch).
+            long window = Math.min((long) prefetchBytes, length);
+            long footerOffset = length - window;
+            Key footerKey = Key.fromTuple(etag, footerOffset, window, 0);
+            footerPrefetcher.prefetch(target.get(), footerKey.toHex(), length, prefetchBytes);
         }
         catch (Throwable t) {
             // BLUEPRINT §9.5: prefetch never surfaces to Trino. Swallow

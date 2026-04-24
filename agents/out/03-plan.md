@@ -702,15 +702,45 @@ via `shelf.footer.prefetch.kib` (default 64, max 256).
 - Effort: M. Depends on: SHELF-10. Owner: trino-plugin-eng-1.
 - Out of scope: page index prefetch.
 
-**SHELF-16 — Row-group byte-range key extension**
-Extend content-addressed key to include `rg_ordinal`. Plugin parses
-cached footer's row-group metadata to derive `(offset, length, ordinal)`
-per range-GET. `shelfd` treats row-group keys exactly like any other
-(admission-wise).
-- [ ] Unit test: (file X, rg 2) and (file X, rg 3) produce distinct keys
+**SHELF-16 — Row-group byte-range key extension** — _CLOSED (key extension + plumbing); full Parquet footer parser deferred to SHELF-16b_
+Extend content-addressed key to include `rg_ordinal`. Plugin threads a
+`RowGroupIndex` abstraction through `ShelfInputFile`/`ShelfInputStream`
+so every range GET is keyed under the owning row-group's ordinal.
+`shelfd` treats row-group keys exactly like any other (admission-wise).
+- [x] Unit test: (file X, rg 2) and (file X, rg 3) produce distinct keys
+      — `io.shelf.client.KeyTest#keysDifferByRowGroupOrdinal` +
+      `ShelfInputStreamTest#contentKeyDiffersBetweenRowGroupOrdinals`
+      (on-wire contentKey changes between rg#0 and rg#1 reads). The
+      shared golden fixture at
+      `shelfd/tests/fixtures/shelf04_golden_vectors.txt` grew to 17
+      entries spanning rg-ordinal variants; Rust
+      (`shelfd::store::key_tests::golden_vectors_match_fixture`) and
+      Java (`KeyTest#goldenVectorsMatchSharedFixture`) both diff the
+      same file so any algorithm drift breaks both builds
+      simultaneously.
 - [ ] Integration: replay of one rep-2 query shows ≥ 1 row-group hit
+      — deferred to **SHELF-16b** (requires the hand-rolled Parquet
+      TCompactProtocol footer reader so
+      `ParquetFooterIndex.fromFooter` returns non-empty; the scaffold
+      in SHELF-16a always returns `Optional.empty()` and the plugin
+      falls back to `RowGroupIndex.constantZero()`).
+- Design note:
+  `clients/trino/docs/design-notes/SHELF-16-row-group-key-extension.md`.
 - Effort: M. Depends on: SHELF-04, SHELF-15. Owner: trino-plugin-eng-1.
 - Out of scope: page-level granularity.
+
+**SHELF-16b — Parquet footer TCompactProtocol reader** — _follow-up_
+Swap the `ParquetFooterIndex.fromFooter` scaffold for a hand-rolled
+Thrift TCompactProtocol reader over `FileMetaData`. Emit
+`RowGroup(file_offset, total_compressed_size, ordinal)` tuples and wire
+`ShelfFileSystem` to feed captured SHELF-15 footer bytes into the new
+parser. No wire-format change; `shelfd` is unaffected.
+- [ ] `parseFooter_extractsRowGroupOffsets` + `ordinalFor_returnsMatchingRowGroup`
+      re-enabled in `RowGroupIndexTest` against real Parquet footers
+- [ ] Replay of one rep-2 query shows ≥ 1 row-group hit (closes out
+      the remaining SHELF-16 acceptance item)
+- Effort: S. Depends on: SHELF-16. Owner: trino-plugin-eng-1.
+- Out of scope: page-index entries.
 
 **SHELF-17 — Iceberg manifest caching (pool.metadata, DRAM FrozenHot)**
 Separate Foyer pool: `pool.metadata`, DRAM-only, 5 GiB, FrozenHot

@@ -14,13 +14,17 @@
 package io.shelf.filesystem;
 
 import io.shelf.client.CircuitBreaker;
+import io.shelf.client.Key;
+import io.shelf.client.ParquetFooterIndex;
 import io.shelf.client.Pool;
 import io.shelf.client.RangeFetcher;
+import io.shelf.client.RowGroupIndex;
 import io.shelf.client.ShelfHttpClient.ShelfUnavailableException;
 import io.trino.filesystem.TrinoInputStream;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -31,11 +35,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Property tests for the fail-open invariant (BLUEPRINT §9.5). Trino must
  * never observe a Shelf-specific exception.
+ *
+ * <p>Also pins the SHELF-16 per-range keying invariant: two reads
+ * against different row-group ordinals must produce distinct
+ * {@code contentKey} strings on the wire.
  */
 class ShelfInputStreamTest
 {
     private static final String ENDPOINT = "shelf.shelf.svc.cluster.local:9090";
-    private static final String KEY = "abcd";
+    private static final byte[] ETAG = "test-etag".getBytes(StandardCharsets.UTF_8);
+    private static final RowGroupIndex ZERO = RowGroupIndex.constantZero();
 
     @Test
     void hitReturnsFromShelfWithoutTouchingDelegate()
@@ -51,7 +60,7 @@ class ShelfInputStreamTest
         CircuitBreaker breaker = new CircuitBreaker("shelf-0");
 
         try (ShelfInputStream in = new ShelfInputStream(
-                delegate, fetcher, breaker, ENDPOINT, Pool.ROWGROUP, KEY, payload.length)) {
+                delegate, fetcher, breaker, ENDPOINT, Pool.ROWGROUP, ETAG, ZERO, payload.length)) {
             byte[] buf = new byte[64];
             int n = in.read(buf, 0, 64);
             assertThat(n).isEqualTo(64);
@@ -74,7 +83,7 @@ class ShelfInputStreamTest
         CircuitBreaker breaker = new CircuitBreaker("shelf-0");
 
         try (ShelfInputStream in = new ShelfInputStream(
-                delegate, failing, breaker, ENDPOINT, Pool.ROWGROUP, KEY, payload.length)) {
+                delegate, failing, breaker, ENDPOINT, Pool.ROWGROUP, ETAG, ZERO, payload.length)) {
             byte[] buf = new byte[64];
             int n = in.read(buf, 0, 64);
             assertThat(n).isEqualTo(64);
@@ -97,7 +106,7 @@ class ShelfInputStreamTest
         CircuitBreaker breaker = new CircuitBreaker("shelf-0");
 
         try (ShelfInputStream in = new ShelfInputStream(
-                delegate, halfBroken, breaker, ENDPOINT, Pool.ROWGROUP, KEY, payload.length)) {
+                delegate, halfBroken, breaker, ENDPOINT, Pool.ROWGROUP, ETAG, ZERO, payload.length)) {
             byte[] buf = new byte[32];
             in.read(buf, 0, 32);
             in.read(buf, 0, 32);
@@ -127,7 +136,7 @@ class ShelfInputStreamTest
         assertThat(breaker.isOpen()).isTrue();
 
         try (ShelfInputStream in = new ShelfInputStream(
-                delegate, fetcher, breaker, ENDPOINT, Pool.ROWGROUP, KEY, payload.length)) {
+                delegate, fetcher, breaker, ENDPOINT, Pool.ROWGROUP, ETAG, ZERO, payload.length)) {
             byte[] buf = new byte[32];
             in.read(buf, 0, 32);
         }
@@ -149,7 +158,7 @@ class ShelfInputStreamTest
         CircuitBreaker breaker = new CircuitBreaker("shelf-0");
 
         try (ShelfInputStream in = new ShelfInputStream(
-                delegate, fetcher, breaker, ENDPOINT, Pool.ROWGROUP, KEY, payload.length)) {
+                delegate, fetcher, breaker, ENDPOINT, Pool.ROWGROUP, ETAG, ZERO, payload.length)) {
             in.seek(64);
             byte[] buf = new byte[16];
             in.read(buf, 0, 16);
@@ -168,7 +177,7 @@ class ShelfInputStreamTest
         RangeFetcher fetcher = (ep, pool, k, off, len) -> Arrays.copyOfRange(payload, (int) off, (int) (off + len));
         CircuitBreaker breaker = new CircuitBreaker("shelf-0");
         try (ShelfInputStream in = new ShelfInputStream(
-                new DelegateStream(payload), fetcher, breaker, ENDPOINT, Pool.ROWGROUP, KEY, payload.length)) {
+                new DelegateStream(payload), fetcher, breaker, ENDPOINT, Pool.ROWGROUP, ETAG, ZERO, payload.length)) {
             in.seek(payload.length);
             int n = in.read(new byte[4], 0, 4);
             assertThat(n).isEqualTo(-1);
@@ -187,13 +196,68 @@ class ShelfInputStreamTest
                 new CircuitBreaker("shelf-0"),
                 ENDPOINT,
                 Pool.ROWGROUP,
-                KEY,
+                ETAG,
+                ZERO,
                 payload.length)) {
             assertThat(in.read()).isEqualTo(0);
             assertThat(in.read()).isEqualTo(1);
             assertThat(in.read()).isEqualTo(2);
             assertThat(in.getPosition()).isEqualTo(3);
         }
+    }
+
+    /**
+     * SHELF-16: two reads whose byte ranges live in different row
+     * groups must go on the wire with distinct content keys, because
+     * the {@link RowGroupIndex} resolves to distinct ordinals and the
+     * key hash consumes the ordinal.
+     */
+    @Test
+    void contentKeyDiffersBetweenRowGroupOrdinals()
+            throws IOException
+    {
+        // Two row groups back-to-back in the file:
+        //   rg#0: [0,   64)    → ordinal 0
+        //   rg#1: [64, 128)    → ordinal 1
+        ParquetFooterIndex index = ParquetFooterIndex.of(List.of(
+                new ParquetFooterIndex.RowGroup(0L, 64L, 0),
+                new ParquetFooterIndex.RowGroup(64L, 64L, 1)));
+
+        byte[] payload = bytes(0, 128);
+        List<String> keys = new ArrayList<>();
+        RangeFetcher recording = (ep, pool, k, off, len) -> {
+            keys.add(k);
+            return Arrays.copyOfRange(payload, (int) off, (int) (off + len));
+        };
+
+        try (ShelfInputStream in = new ShelfInputStream(
+                new DelegateStream(payload),
+                recording,
+                new CircuitBreaker("shelf-0"),
+                ENDPOINT,
+                Pool.ROWGROUP,
+                ETAG,
+                index,
+                payload.length)) {
+            // First read sits entirely inside rg#0.
+            byte[] buf1 = new byte[32];
+            in.read(buf1, 0, 32);
+            // Seek to the start of rg#1 and issue the same-shape read.
+            in.seek(64);
+            byte[] buf2 = new byte[32];
+            in.read(buf2, 0, 32);
+        }
+
+        assertThat(keys).hasSize(2);
+        assertThat(keys.get(0))
+                .as("rg#0 read must hash under ordinal 0")
+                .isEqualTo(Key.fromTuple(ETAG, 0L, 32L, 0).toHex());
+        assertThat(keys.get(1))
+                .as("rg#1 read must hash under ordinal 1")
+                .isEqualTo(Key.fromTuple(ETAG, 64L, 32L, 1).toHex());
+        assertThat(keys.get(0))
+                .as("SHELF-16: (file X, rg 0) and (file X, rg 1) must produce distinct keys")
+                .isNotEqualTo(keys.get(1));
     }
 
     /** Minimal in-memory delegate stream that records how often it's invoked. */

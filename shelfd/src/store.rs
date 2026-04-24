@@ -376,6 +376,7 @@ mod key_tests {
     /// must write an ADR. Regeneration: `cargo run -p shelfctl --
     /// debug-golden`. See ADR-0011 for the formal invariant.
     const GOLDEN_INPUTS: &[(&str, u64, u64, u32)] = &[
+        // -- SHELF-04 baseline --
         // Representative Iceberg manifest read (offset 0, ordinal 0).
         ("\"9f8e6e48a1f7e2c3b5d41234567890ab\"", 0, 8_192, 0),
         // Parquet footer slice (non-zero offset, ordinal 0).
@@ -395,6 +396,31 @@ mod key_tests {
         ),
         // Multipart ETag (has `-N` suffix); treated as opaque bytes.
         ("\"d41d8cd98f00b204e9800998ecf8427e-7\"", 1, 1, 42),
+        // -- SHELF-16: row-group ordinal variants --
+        // Same (etag, offset, length), three distinct rg ordinals.
+        // If the key function ever drops the ordinal input, these three
+        // rows collapse to one hash and the fixture parity test fails
+        // on both sides simultaneously.
+        ("\"rg-ordinal-sweep\"", 4_096, 131_072, 0),
+        ("\"rg-ordinal-sweep\"", 4_096, 131_072, 1),
+        ("\"rg-ordinal-sweep\"", 4_096, 131_072, 7),
+        // Offset = u64::MAX / 2 — exercises the upper half of the LE
+        // u64 encoding; ordinal 0 vs 255 also flips a full u32 byte.
+        ("\"big-offset\"", u64::MAX / 2, 16, 0),
+        ("\"big-offset\"", u64::MAX / 2, 16, 255),
+        // Length = 1 byte; ordinal = u16 ceiling.
+        ("\"single-byte\"", 0, 1, 65_535),
+        // Length = 16 MiB; ordinal = 4_096 (row-group count scale).
+        ("\"row-group-xl\"", 0, 16 * 1024 * 1024, 4_096),
+        // Multipart ETag form with ordinals 0 and 2.
+        ("\"\"-multipart\"", 0, 4_096, 0),
+        ("\"\"-multipart\"", 0, 4_096, 2),
+        // ASCII-only 8-byte ETag (no surrounding quotes — 8 bytes),
+        // every ordinal in 0..=3 to pin the hot-path ordinals.
+        ("shelf16b", 2_048, 8_192, 0),
+        ("shelf16b", 2_048, 8_192, 1),
+        ("shelf16b", 2_048, 8_192, 2),
+        ("shelf16b", 2_048, 8_192, 3),
     ];
 
     #[test]
