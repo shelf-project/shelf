@@ -35,10 +35,69 @@ Two upstream escape hatches exist:
    cache plugin SPI", opened 2026-04-21 by @wendigo (Mateusz Gajewski,
    Trino committer), actively in development. Introduces
    `io.trino.spi.cache` with `BlobCache`, `BlobSource`,
-   `BlobCacheManager`, `BlobCacheManagerFactory`, `ConnectorCacheFactory`
-   plus a hook in `io.trino.spi.Plugin` and two reference plugins
+   `BlobCacheManager`, `BlobCacheManagerFactory`, `CacheTier`,
+   `CacheManagerContext`, `CacheKey`, plus a new hook in
+   `io.trino.spi.Plugin` and two reference plugins
    (`trino-blob-cache-alluxio`, `trino-blob-cache-memory`). This is the
    exact SPI hole Shelf was built for.
+
+   Verified SPI shape (read from the PR's branch
+   `user/serafin/unified-caching-v2` on 2026-04-23):
+
+   ```java
+   // io.trino.spi.Plugin — one new default method
+   default Iterable<BlobCacheManagerFactory> getBlobCacheManagerFactories() {
+       return emptyList();
+   }
+
+   // Factory: one per plugin, returns a manager scoped to a CacheTier.
+   interface BlobCacheManagerFactory {
+       String getName();
+       CacheTier cacheTier();                                    // enum { MEMORY, DISK }
+       BlobCacheManager create(Map<String,String> config, CacheManagerContext context);
+   }
+
+   // Manager: one per catalog lifecycle.
+   interface BlobCacheManager {
+       BlobCache createBlobCache(CatalogName catalog);
+       void drop(CatalogName catalog);
+       void shutdown();
+   }
+
+   // Cache: filesystem-agnostic, one per catalog.
+   interface BlobCache {
+       Blob get(CacheKey key, BlobSource source) throws IOException;
+       void invalidate(CacheKey key);
+       void invalidate(Collection<CacheKey> keys);
+   }
+
+   // Context provides OTel tracer — plugs straight into Trino's trace stack.
+   interface CacheManagerContext {
+       OpenTelemetry getOpenTelemetry();
+       Tracer getTracer();
+   }
+   ```
+
+   Reference entry-point (`MemoryBlobCachePlugin`):
+
+   ```java
+   public class MemoryBlobCachePlugin implements Plugin {
+       @Override
+       public Iterable<BlobCacheManagerFactory> getBlobCacheManagerFactories() {
+           return List.of(new MemoryBlobCacheManagerFactory());
+       }
+   }
+   ```
+
+   One design friction worth calling out: **`CacheTier` only has
+   `MEMORY` and `DISK`**, no `REMOTE` tier. Shelf is structurally a
+   remote HTTP cache (calls go to `shelfd` over h2), but the shelfd
+   pod itself is a DRAM+NVMe hybrid. Shelf would register as
+   `CacheTier.DISK` — honest, because the origin-of-truth for the
+   cache is shelfd's NVMe — and the fact that the transport is HTTP
+   is an implementation detail the SPI doesn't care about. If a
+   `REMOTE` tier is added later (plausible — Alluxio remote-cache
+   work in PR #24737 points this direction), Shelf can migrate.
 
 In the meantime, the read path has to work _today_ for the v0.5 gate.
 

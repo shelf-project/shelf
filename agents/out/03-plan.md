@@ -1348,5 +1348,7 @@ need human decisions on the following:
 - `adr/0008-two-pools-in-v1.md` — metadata + bulk; defer 4-pool layout.
 - `adr/0009-foyer-s3-fifo-over-gl-cache-custom.md` — use Foyer built-in; defer GL-Cache.
 - `adr/0010-v05-gate-beat-alluxio-on-rep2.md` — kill-switch; 7 consecutive days.
+- `adr/0011-shelf04-key-is-sha256-etag-offset-length-ordinal.md` — content-addressed key function, pinned + golden-vector tested across Rust / Java / Python.
+- `adr/0012-trino-read-path-endpoint-swap-then-blob-cache-spi.md` — Trino integration strategy: S3-endpoint swap today, `BlobCacheManagerFactory` plugin when trinodb/trino#29184 merges, `FileSystemModule` fork as last resort.
 
 *End of plan.*
