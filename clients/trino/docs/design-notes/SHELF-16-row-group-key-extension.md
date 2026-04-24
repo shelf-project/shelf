@@ -3,6 +3,8 @@
 - Status: **landed** (key extension + plumbing, SHELF-16a)
 - Delivery level for this ticket: **SCAFFOLDED**
 - Follow-up: **SHELF-16b — Parquet footer TCompactProtocol parser**
+  (landed; see
+  [`SHELF-16b-parquet-footer-parser.md`](./SHELF-16b-parquet-footer-parser.md))
 
 ## Problem
 

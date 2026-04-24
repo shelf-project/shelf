@@ -23,10 +23,11 @@ import org.junit.jupiter.api.Test;
 
 /**
  * SHELF-16 unit tests for {@link RowGroupIndex} and its two
- * implementations. The full Parquet TCompactProtocol footer parser is
- * deferred to SHELF-16b, so the {@code fromFooter} contract only
- * verifies the scaffold: it must never throw and must always return
- * {@link Optional#empty()} for every input.
+ * implementations. The Parquet TCompactProtocol footer parser itself
+ * has its own exhaustive suite in {@link ParquetFooterIndexTest} (see
+ * SHELF-16b); the {@code fromFooter_*} cases here are kept as a
+ * regression fence for the fail-open contract — garbage in must
+ * always yield {@link Optional#empty()} with no throw.
  */
 class RowGroupIndexTest
 {
@@ -124,21 +125,20 @@ class RowGroupIndexTest
     }
 
     /**
-     * SHELF-16 scaffold contract: {@code fromFooter} must never throw
-     * and must always return {@link Optional#empty()} until the
-     * SHELF-16b parser lands. Swap this test to
-     * {@code parseFooter_extractsRowGroupOffsets} when the parser
-     * ships.
+     * SHELF-16b fail-open regression fence: {@code fromFooter} must
+     * never throw, even on obviously invalid input. Valid-footer
+     * coverage lives in {@link ParquetFooterIndexTest}; this test
+     * pins the no-throw contract that the plugin's error budget
+     * depends on.
      */
     @Test
-    void fromFooter_scaffoldReturnsEmpty()
+    void fromFooter_returnsEmpty_onInvalidInput()
     {
         // Empty footer.
         assertThat(ParquetFooterIndex.fromFooter(new byte[0], 0L)).isEmpty();
-        // Plausible-looking tail bytes with the PAR1 magic — still
-        // scaffold behaviour, no actual parse happens yet.
+        // Plausible-looking tail bytes with the PAR1 magic but
+        // footer_length = 0 — the parser rejects that as malformed.
         byte[] tail = new byte[] {
-                // footer_length = 0 (dummy), then PAR1
                 0, 0, 0, 0,
                 'P', 'A', 'R', '1'
         };

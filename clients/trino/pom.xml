@@ -58,6 +58,16 @@
         <dep.mockito.version>5.14.2</dep.mockito.version>
         <dep.testcontainers.version>1.20.4</dep.testcontainers.version>
         <dep.assertj.version>3.26.3</dep.assertj.version>
+        <!--
+            Parquet + Hadoop are test-scope ONLY. They back a single
+            ParquetFooterIndexTest case that writes a real multi-
+            row-group Parquet file and round-trips it through the
+            hand-rolled TCompactProtocol reader. The runtime plugin
+            must never pull these in — the reader is dependency-free
+            by design.
+        -->
+        <dep.parquet.version>1.14.1</dep.parquet.version>
+        <dep.hadoop.version>3.4.0</dep.hadoop.version>
 
         <plugin.compiler.version>3.13.0</plugin.compiler.version>
         <plugin.surefire.version>3.5.2</plugin.surefire.version>
@@ -125,6 +135,110 @@
             <artifactId>junit-jupiter</artifactId>
             <version>${dep.testcontainers.version}</version>
             <scope>test</scope>
+        </dependency>
+        <!--
+            parquet-hadoop + hadoop-common give ParquetFooterIndexTest
+            a real multi-row-group Parquet file to parse. We exclude
+            the kitchen-sink Hadoop transitives (HDFS, YARN, Kerberos,
+            jersey, etc.) because nothing in these tests needs them;
+            we only use Configuration / Path. This keeps the test
+            classpath small and fast to download.
+        -->
+        <dependency>
+            <groupId>org.apache.parquet</groupId>
+            <artifactId>parquet-hadoop</artifactId>
+            <version>${dep.parquet.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.parquet</groupId>
+            <artifactId>parquet-common</artifactId>
+            <version>${dep.parquet.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-mapreduce-client-core</artifactId>
+            <version>${dep.hadoop.version}</version>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.hadoop</groupId>
+                    <artifactId>hadoop-yarn-common</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.hadoop</groupId>
+                    <artifactId>hadoop-yarn-client</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.hadoop</groupId>
+                    <artifactId>hadoop-hdfs-client</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-reload4j</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>ch.qos.reload4j</groupId>
+                    <artifactId>reload4j</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-common</artifactId>
+            <version>${dep.hadoop.version}</version>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.hadoop.thirdparty</groupId>
+                    <artifactId>hadoop-shaded-protobuf_3_25</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.zookeeper</groupId>
+                    <artifactId>zookeeper</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.curator</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.kerby</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.eclipse.jetty</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.sun.jersey</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>javax.servlet</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.bouncycastle</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <!--
+                    Hadoop ships slf4j-reload4j which clashes with
+                    parquet-hadoop's log4j-over-slf4j bridge at
+                    class-init time (StaticLoggerBinder throws
+                    IllegalStateException). Keeping the parquet
+                    bridge wins: tests only need logging output
+                    routed through SLF4J, not a backend.
+                -->
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-reload4j</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>ch.qos.reload4j</groupId>
+                    <artifactId>reload4j</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
     </dependencies>
 
