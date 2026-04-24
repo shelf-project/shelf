@@ -1,0 +1,16 @@
+[
+  {
+    "path": "daily_revenue__part0.parquet",
+    "file_size_in_bytes": 1717,
+    "partition": {},
+    "record_count": 100,
+    "etag": "c57ba0c31b74e1ed83f300b70eaf5c36"
+  },
+  {
+    "path": "daily_revenue__part1.parquet",
+    "file_size_in_bytes": 1715,
+    "partition": {},
+    "record_count": 100,
+    "etag": "40d6344e6bd2b73b28c4d6d994b744af"
+  }
+]

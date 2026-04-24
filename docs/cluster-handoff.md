@@ -73,7 +73,11 @@ Green criteria:
   and reload semantics documented in
   `shelfd/docs/design-notes/SHELF-23-24-admin-surface-and-pinlist.md`.
   Initial list can be empty (`{"version":1,"entries":[]}`); fill it
-  after SHELF-26 replay data identifies the hot keys.
+  after running the **SHELF-26** replay harness (`make replay-rep2-7d`
+  in `shelf/benchmarks/trino_logs/`) against a real 7-day rep-2 trace
+  — the `sim-<config>.csv` output identifies the keys a size-only
+  admission would have missed that a pinned workingset would have
+  caught.
 - **S3-compat shim** — port `:9092` on every pod. boto3/DuckDB/Polars
   access path in `shelfd/docs/design-notes/SHELF-22-s3-compat-shim.md`.
   No auth today; expose behind the same network policy as `:8080`.
@@ -89,8 +93,10 @@ Green criteria:
   follow-up, not cluster-gated. Can land whenever a Java engineer has
   time for the Thrift parse; wire-format is frozen.
 - FrozenHot eviction policy — tracked as **SHELF-17a**. SIEVE ships
-  today. Re-evaluate after SHELF-26 replay data shows whether
-  manifest hot-set thrash is a real concern.
+  today. Re-evaluate after the SHELF-26 replay harness is pointed at
+  a real rep-2 trace and shows whether manifest hot-set thrash is a
+  real concern (the `metadata`-pool per-config hit-rate in
+  `benchmarks/trino_logs/results/.../summary.json` is the signal).
 - Unified PR CI rail — tracked as **SHELF-01a**. bench + security +
   helm-lint rails are green; `fmt + clippy + test + mvn verify +
   docker build` as a single PR workflow is the remainder. Local

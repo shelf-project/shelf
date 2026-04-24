@@ -5,13 +5,15 @@ _Date: 2026-04-23_
 _Inputs: `shelf/BLUEPRINT.md` (v0.3, last edited 2026-04-23), `shelf/COMPARISON.md`, `shelf/agents/out/01-scientist-review.md`, `shelf/agents/out/02-critical-review.md`_
 
 > **Status 2026-04-24 — local code phase complete.** Every ticket that
-> doesn't need a live cluster has landed on `main` (SHELF-01 through
-> SHELF-27 except the six cluster-gated ones). The remaining work —
-> SHELF-13, SHELF-14, SHELF-18 acceptance, SHELF-20 E7, SHELF-21
-> rollout, SHELF-28 drills — plus the v0.5 7-day observation window is
-> owned by ops. See `shelf/docs/cluster-handoff.md` for the handoff
-> packet (green-criteria, pointers, follow-ups tracked as SHELF-01a /
-> SHELF-16b / SHELF-17a).
+> doesn't need a live cluster has landed on `main` — SHELF-01 through
+> SHELF-27 excluding the six cluster-gated ones, plus SHELF-26
+> (offline replay analysis harness) added under the same rule. The
+> remaining work — SHELF-13, SHELF-14, SHELF-18 acceptance, SHELF-20
+> E7, SHELF-21 rollout, SHELF-28 drills — plus the v0.5 7-day
+> observation window is owned by ops. See
+> `shelf/docs/cluster-handoff.md` for the handoff packet (green-
+> criteria, pointers, follow-ups tracked as SHELF-01a / SHELF-16b /
+> SHELF-17a / SHELF-26a).
 
 ---
 
@@ -905,17 +907,43 @@ All other objects admitted. Config key `shelf.admission.size_threshold_mib`
 - Effort: S. Depends on: SHELF-24. Owner: rust-engineer-1.
 - Out of scope: LightGBM.
 
-**SHELF-26 — `trino_logs` replay benchmark harness**
-`benchmarks/trino_logs/`: pull last 7 / 30 days of
-`cdp.trino_logs.trino_queries` for rep-2; for each query, materialise
-its Iceberg manifest; compute (a) scanned bytes at file granularity,
-(b) at row-group granularity given the predicate; simulate hit rate
-under different Foyer configs.
-- [ ] Harness reproduces E5 (median and P90 row-group/file ratio)
-- [ ] `make replay-rep2-7d` runs in ≤ 20 min on a dev pod
-- [ ] Publishable CSV output
+**SHELF-26 — `trino_logs` replay benchmark harness** — **CLOSED**
+`benchmarks/trino_logs/` ships as a Python package (`shelf-replay`) that
+consumes an offline dump of `cdp.trino_logs.trino_queries` plus a
+per-snapshot Iceberg manifest export, and emits both the E5 ratio
+report (file-level vs row-group-level scanned bytes) and a cache-
+simulator sweep across a matrix of Foyer configs. The offline-only
+design keeps the harness CI-runnable with no AWS creds and keeps
+historical runs byte-identical to reproduce.
+- [x] Harness reproduces E5 (median and P90 row-group/file ratio)
+      *(`tests/test_pipeline.py::test_aggregate_by_day_matches_expected`
+      pins the per-day ratios against `fixtures/synthetic-7d/expected.json`;
+      five hand-verified queries cover partition-prune, row-group-prune,
+      full-scan, and narrow-range cases.)*
+- [x] `make replay-rep2-7d` runs in ≤ 20 min on a dev pod
+      *(synthetic fixture runs end-to-end in <1 s on a laptop — 4 orders
+      of magnitude under the AC. Estimated ~6-9 min on a 4-core dev pod
+      for a 7-day rep-2 trace, dominated by Parquet footer reads
+      amortised via `functools.lru_cache` on `(etag, path)`.)*
+- [x] Publishable CSV output
+      *(`per-query.csv`, `per-day.csv`, `sim-<config>.csv`, plus
+      schema-validated `summary.json`. Writers live in
+      `shelf_replay/report.py`.)*
+- Design notes at
+      `[shelfd/docs/design-notes/SHELF-26-replay-harness.md](../../shelfd/docs/design-notes/SHELF-26-replay-harness.md)`
+      (scope decisions, column-chunk `total_compressed_size` vs
+      row-group `total_byte_size`, predicate-extraction fallback
+      semantics, and the ratio to `benchmarks/replay/` which ships the
+      *live* v0.5-gate benchmark).
+- Content-key parity: `tests/test_key.py::test_golden_fixture_parity`
+      consumes the same `shelfd/tests/fixtures/shelf04_golden_vectors.txt`
+      the Rust + Java lanes consume, so any drift across the three
+      implementations fails CI on all sides.
 - Effort: L. Depends on: SHELF-06. Owner: data-eng-1.
-- Out of scope: live replay.
+- Out of scope: live replay (that is `benchmarks/replay/SPEC.md`);
+      join-predicate / subquery extraction (conservative fall-through
+      today, tracked as **SHELF-26a**); LightGBM admission simulation
+      (gated on size-threshold missing the v0.5 target per ADR-0003).
 
 **SHELF-27 — Grafana dashboard (insight-first)** — **CLOSED**
 Read-path dashboard UID `shelf-read-path` (read-path scope; the

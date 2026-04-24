@@ -1,0 +1,36 @@
+{
+  "_comment": "Hand-verified E5 golden numbers for the synthetic 7-day fixture. Regenerated when the fixture or scanning semantics change; each ratio is independently derivable from fixtures/synthetic-7d/generate.py + tests/test_pipeline.py::test_hand_derivable_ratios.",
+  "tolerance": 1e-4,
+  "per_day": [
+    {
+      "day": "2026-04-16",
+      "median_ratio": 0.1068,
+      "p90_ratio": 0.1068,
+      "overall_ratio": 0.1068
+    },
+    {
+      "day": "2026-04-17",
+      "median_ratio": 0.2716,
+      "p90_ratio": 0.2716,
+      "overall_ratio": 0.2716
+    },
+    {
+      "day": "2026-04-18",
+      "median_ratio": 0.1666,
+      "p90_ratio": 0.1666,
+      "overall_ratio": 0.1666
+    },
+    {
+      "day": "2026-04-20",
+      "median_ratio": 0.6391,
+      "p90_ratio": 0.6391,
+      "overall_ratio": 0.6391
+    },
+    {
+      "day": "2026-04-22",
+      "median_ratio": 0.2721,
+      "p90_ratio": 0.2721,
+      "overall_ratio": 0.2721
+    }
+  ]
+}
