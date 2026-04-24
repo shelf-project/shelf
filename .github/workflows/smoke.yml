@@ -74,3 +74,35 @@ jobs:
         if: always()
         working-directory: benchmarks/smoke
         run: docker compose down -v
+
+  chaos-smoke:
+    name: chaos drills (green-in-CI variants)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # SHELF-28 — these smoke variants prove the drill scripts still
+    # parse, the expected metrics still exist, and the assertion math
+    # is still correct against the compose harness. They do NOT prove
+    # the cluster-side invariant — that's ops territory
+    # (see docs/runbook.md §2).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up Java (for plugin build)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      - name: Build shelf-trino-plugin JAR
+        run: mvn -B -DskipTests -f clients/trino/pom.xml package
+
+      - name: chaos-keda-rotation-smoke
+        run: make chaos-keda-rotation-smoke
+
+      - name: chaos-pod-kill-smoke
+        run: make chaos-pod-kill-smoke
