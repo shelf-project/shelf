@@ -29,6 +29,8 @@ pub static REGISTRY: Lazy<prometheus::Registry> = Lazy::new(prometheus::Registry
 pub struct Registry {
     pub hits_total: IntCounterVec,
     pub misses_total: IntCounterVec,
+    pub head_hits_total: IntCounterVec,
+    pub head_misses_total: IntCounterVec,
     pub errors_total: IntCounterVec,
     pub bytes_used: IntGaugeVec,
     pub request_seconds: HistogramVec,
@@ -52,6 +54,22 @@ impl Registry {
             REGISTRY
         )
         .map_err(|e| crate::Error::Internal(anyhow::anyhow!("register misses: {e}")))?;
+
+        let head_hits_total = register_int_counter_vec_with_registry!(
+            "shelf_head_hits_total",
+            "HEAD /cache/... responses served from the HEAD-LRU (SHELF-07).",
+            &["pool"],
+            REGISTRY
+        )
+        .map_err(|e| crate::Error::Internal(anyhow::anyhow!("register head_hits: {e}")))?;
+
+        let head_misses_total = register_int_counter_vec_with_registry!(
+            "shelf_head_misses_total",
+            "HEAD /cache/... responses that required a live HeadObject.",
+            &["pool"],
+            REGISTRY
+        )
+        .map_err(|e| crate::Error::Internal(anyhow::anyhow!("register head_misses: {e}")))?;
 
         let errors_total = register_int_counter_vec_with_registry!(
             "shelfd_error_total",
@@ -82,6 +100,8 @@ impl Registry {
         Ok(Self {
             hits_total,
             misses_total,
+            head_hits_total,
+            head_misses_total,
             errors_total,
             bytes_used,
             request_seconds,

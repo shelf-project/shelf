@@ -16,6 +16,7 @@ use clap::Parser;
 use shelfd::{
     admission::SizeThresholdPolicy,
     config::Config,
+    head_lru::HeadLru,
     http::{self, ServerState},
     metrics,
     origin::S3Origin,
@@ -66,13 +67,16 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let store = Arc::new(FoyerStore::open(&config.pools).await?);
     let router = Arc::new(Router::new());
     let admission = Arc::new(SizeThresholdPolicy::from_config(&config.admission));
+    let head_lru = Arc::new(HeadLru::new(config.head_lru_entries));
 
-    let state = Arc::new(ServerState::new(
+    let state = Arc::new(ServerState::with_head_lru_and_pod_id(
         store.clone(),
         origin.clone(),
         router,
         admission,
         metrics,
+        head_lru,
+        config.node.id.clone(),
     ));
     // Phase-0: mark ready as soon as Foyer + S3 client built. The
     // origin head-bucket probe would go here once SHELF-07 lands.

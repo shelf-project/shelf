@@ -16,6 +16,8 @@ low-cardinality label set").
 |--------------------------|------------------------|--------------------------------------------------------------------|----------|
 | `shelf_hits_total`       | `{pool}`               | Cache hits per Foyer pool (`metadata`, `rowgroup`).                | SHELF-06 |
 | `shelf_misses_total`     | `{pool}`               | Cache misses that fell through to S3 origin.                       | SHELF-06 |
+| `shelf_head_hits_total`  | `{pool}`               | `HEAD /cache/...` responses served from the HEAD-LRU.              | SHELF-07 |
+| `shelf_head_misses_total`| `{pool}`               | `HEAD /cache/...` responses that required a live `HeadObject`.     | SHELF-07 |
 | `shelf_admit_total`      | `{pool,decision}`      | Admission decisions (`admit`, `reject`).                           | SHELF-25 |
 | `shelf_origin_requests_total` | `{verb,status}`   | Calls to S3 (`get`, `head` × `2xx/4xx/5xx`).                       | SHELF-05 |
 | `shelf_origin_retries_total`  | `{verb,reason}`   | Retried origin requests (`slowdown`, `timeout`, `5xx`).            | SHELF-05 |

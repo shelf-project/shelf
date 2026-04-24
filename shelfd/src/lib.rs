@@ -28,6 +28,7 @@ pub mod admission;
 pub mod config;
 pub mod control;
 pub mod error;
+pub mod head_lru;
 pub mod http;
 pub mod membership;
 pub mod metrics;

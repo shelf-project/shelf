@@ -29,6 +29,8 @@ use bytes::Bytes;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
+use crate::control::{PoolStats, Stats};
+use crate::head_lru::{HeadLru, HeadMeta};
 use crate::store::{Key, Pool, ReadOutcome, Store};
 
 /// Shared state the router hands to every handler.
@@ -39,12 +41,25 @@ pub struct ServerState {
     pub router: Arc<crate::router::Router>,
     pub admission: Arc<crate::admission::SizeThresholdPolicy>,
     pub metrics: Arc<crate::metrics::Registry>,
+    /// LRU of `HeadObject` responses keyed on `(bucket, s3_key)`
+    /// (SHELF-07). Wired in via [`ServerState::with_head_lru_and_pod_id`];
+    /// [`ServerState::new`] builds a 10 000-entry default.
+    pub head_lru: Arc<HeadLru>,
+    /// Pod identity surfaced on `GET /stats` so the plugin can weight
+    /// the HRW ring (SHELF-20). Defaults to `SHELFD_POD_ID` →
+    /// `HOSTNAME` → `"shelfd-unknown"`.
+    pub pod_id: Arc<str>,
     /// Set to `true` by `main` after startup probes finish. A future
     /// membership loop may flip it back to false on degradation.
     pub ready: AtomicBool,
 }
 
 impl ServerState {
+    /// Construct state with default HEAD-LRU (10 000 entries) and a
+    /// `pod_id` derived from env. Suitable for integration tests and
+    /// backwards-compatible callers; `main` prefers
+    /// [`ServerState::with_head_lru_and_pod_id`] to thread the
+    /// operator-supplied values through.
     pub fn new(
         store: Arc<crate::store::FoyerStore>,
         origin: Arc<crate::origin::S3Origin>,
@@ -52,12 +67,36 @@ impl ServerState {
         admission: Arc<crate::admission::SizeThresholdPolicy>,
         metrics: Arc<crate::metrics::Registry>,
     ) -> Self {
+        Self::with_head_lru_and_pod_id(
+            store,
+            origin,
+            router,
+            admission,
+            metrics,
+            Arc::new(HeadLru::new(10_000)),
+            default_pod_id(),
+        )
+    }
+
+    /// Explicit-argument constructor used by `main` once config +
+    /// env have been parsed.
+    pub fn with_head_lru_and_pod_id(
+        store: Arc<crate::store::FoyerStore>,
+        origin: Arc<crate::origin::S3Origin>,
+        router: Arc<crate::router::Router>,
+        admission: Arc<crate::admission::SizeThresholdPolicy>,
+        metrics: Arc<crate::metrics::Registry>,
+        head_lru: Arc<HeadLru>,
+        pod_id: impl Into<Arc<str>>,
+    ) -> Self {
         Self {
             store,
             origin,
             router,
             admission,
             metrics,
+            head_lru,
+            pod_id: pod_id.into(),
             ready: AtomicBool::new(false),
         }
     }
@@ -71,14 +110,46 @@ impl ServerState {
     }
 }
 
+/// Resolve the effective `pod_id` when none was supplied explicitly:
+/// `SHELFD_POD_ID` > `HOSTNAME` > `"shelfd-unknown"`.
+fn default_pod_id() -> Arc<str> {
+    if let Ok(v) = std::env::var("SHELFD_POD_ID") {
+        if !v.is_empty() {
+            return Arc::from(v);
+        }
+    }
+    if let Ok(v) = std::env::var("HOSTNAME") {
+        if !v.is_empty() {
+            return Arc::from(v);
+        }
+    }
+    Arc::from("shelfd-unknown")
+}
+
 /// Build the Axum router. Pure function — no side effects, no I/O.
+///
+/// ### Route shapes (SHELF-02, SHELF-06, SHELF-07, SHELF-20)
+///
+/// - `GET  /healthz` — liveness
+/// - `GET  /readyz` — readiness
+/// - `GET  /metrics` — Prometheus scrape
+/// - `GET  /stats` — JSON for Agent 5's HRW weighting (SHELF-20)
+/// - `GET  /cache/:pool/:key/:range` — content-addressed read-through
+/// - `HEAD /cache/:pool/origin/:bucket/*s3_key` — HEAD-LRU pre-flight
+///   (SHELF-07). The `origin/` separator distinguishes this from a
+///   future `HEAD /cache/:pool/:key` by content-addressed hash, which
+///   the plugin cannot issue until it has already learned the size.
 pub fn build_router(state: Arc<ServerState>) -> Router {
     Router::new()
         .route("/healthz", get(handlers::healthz))
         .route("/readyz", get(handlers::readyz))
         .route("/metrics", get(handlers::metrics))
+        .route("/stats", get(handlers::stats))
         .route("/cache/:pool/:key/:range", get(handlers::get_cache))
-        .route("/cache/:pool/:key", head(handlers::head_cache))
+        .route(
+            "/cache/:pool/origin/:bucket/*s3_key",
+            head(handlers::head_cache),
+        )
         .with_state(state)
 }
 
@@ -224,12 +295,120 @@ pub mod handlers {
         }
     }
 
-    /// `HEAD /cache/:pool/:key` — pre-flight. SHELF-07 landing ticket.
+    /// `HEAD /cache/:pool/origin/:bucket/*s3_key` — plugin pre-flight
+    /// (SHELF-07).
+    ///
+    /// Contract:
+    /// - 200 with `Content-Length` (+ optional `X-Shelf-ETag`,
+    ///   `X-Shelf-LastModified`) on HEAD-LRU hit **or** successful
+    ///   `HeadObject`.
+    /// - 404 when S3 returns `NoSuchKey` (mapped via
+    ///   [`crate::origin::S3Origin::head`] returning `Ok(None)`).
+    /// - 502 for any other origin failure.
+    ///
+    /// The handler **never** issues a `GetObject`: the worst case is
+    /// a single `HeadObject` + LRU populate.
     pub async fn head_cache(
-        State(_state): State<Arc<ServerState>>,
-        Path((_pool, _key_hex)): Path<(String, String)>,
+        State(state): State<Arc<ServerState>>,
+        Path((pool_str, bucket, s3_key)): Path<(String, String, String)>,
     ) -> Response {
-        (StatusCode::NOT_IMPLEMENTED, "SHELF-07 pending").into_response()
+        let pool = match parse_pool(&pool_str) {
+            Ok(p) => p,
+            Err((status, detail)) => return client_error(status, "invalid pool", &detail),
+        };
+        let pool_label = pool_label(pool);
+
+        if bucket.is_empty() {
+            return client_error(
+                StatusCode::BAD_REQUEST,
+                "invalid bucket",
+                "bucket segment must be non-empty",
+            );
+        }
+        if s3_key.is_empty() {
+            return client_error(
+                StatusCode::BAD_REQUEST,
+                "invalid key",
+                "s3_key segment must be non-empty",
+            );
+        }
+
+        // Fast path: HEAD-LRU.
+        if let Some(meta) = state.head_lru.get(&bucket, &s3_key) {
+            state
+                .metrics
+                .head_hits_total
+                .with_label_values(&[pool_label])
+                .inc();
+            return ok_head(meta.as_ref());
+        }
+
+        state
+            .metrics
+            .head_misses_total
+            .with_label_values(&[pool_label])
+            .inc();
+
+        use crate::origin::Origin;
+        let origin = state.origin.clone();
+        match origin.as_ref().head(&bucket, &s3_key).await {
+            Ok(Some(head)) => {
+                let meta = HeadMeta::from(head);
+                state.head_lru.insert(bucket, s3_key, meta.clone());
+                ok_head(&meta)
+            }
+            Ok(None) => {
+                // NoSuchKey — the plugin expects a clean 404 so it
+                // can fall through to S3 without retrying.
+                let body =
+                    serde_json::json!({"error": "not_found", "detail": "origin object absent"});
+                (StatusCode::NOT_FOUND, axum::Json(body)).into_response()
+            }
+            Err(e) => upstream_error("origin.head", &e.to_string()),
+        }
+    }
+
+    /// `GET /stats` — JSON capacity + usage surface (SHELF-20).
+    ///
+    /// Consumed by the plugin's HRW weighting loop. The key set here
+    /// is the contract Agent 5 depends on:
+    ///
+    /// ```json
+    /// {
+    ///   "pod_id": "shelf-2",
+    ///   "capacity_bytes": 12884901888,
+    ///   "used_bytes":      3221225472,
+    ///   "metadata_pool": {"capacity_bytes": ..., "used_bytes": ...},
+    ///   "rowgroup_pool": {"capacity_bytes": ..., "used_bytes": ...}
+    /// }
+    /// ```
+    pub async fn stats(State(state): State<Arc<ServerState>>) -> Response {
+        let metadata = PoolStats {
+            capacity_bytes: state.store.capacity_bytes(Pool::Metadata),
+            used_bytes: state.store.used_bytes(Pool::Metadata),
+        };
+        let rowgroup = PoolStats {
+            capacity_bytes: state.store.capacity_bytes(Pool::RowGroup),
+            used_bytes: state.store.used_bytes(Pool::RowGroup),
+        };
+        let stats = Stats {
+            pod_id: state.pod_id.as_ref().to_owned(),
+            capacity_bytes: metadata
+                .capacity_bytes
+                .saturating_add(rowgroup.capacity_bytes),
+            used_bytes: metadata.used_bytes.saturating_add(rowgroup.used_bytes),
+            metadata_pool: metadata,
+            rowgroup_pool: rowgroup,
+        };
+        (
+            StatusCode::OK,
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            )],
+            axum::Json(stats),
+        )
+            .into_response()
     }
 
     // ---- helpers ----
@@ -277,6 +456,31 @@ pub mod handlers {
             Pool::Metadata => "metadata",
             Pool::RowGroup => "rowgroup",
         }
+    }
+
+    /// Build a 200 HEAD response from `meta`, decorating headers with
+    /// `Content-Length`, `X-Shelf-ETag`, and `X-Shelf-LastModified`
+    /// when present.
+    fn ok_head(meta: &HeadMeta) -> Response {
+        let mut headers = HeaderMap::new();
+        if let Ok(v) = HeaderValue::from_str(&meta.content_length.to_string()) {
+            headers.insert(header::CONTENT_LENGTH, v);
+        }
+        if let Some(etag) = meta.etag.as_deref() {
+            if let Ok(v) = HeaderValue::from_str(etag) {
+                headers.insert(HeaderName::from_static("x-shelf-etag"), v);
+            }
+        }
+        if let Some(lm) = meta.last_modified.as_deref() {
+            if let Ok(v) = HeaderValue::from_str(lm) {
+                headers.insert(HeaderName::from_static("x-shelf-lastmodified"), v);
+            }
+        }
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        (StatusCode::OK, headers).into_response()
     }
 
     fn ok_range(bytes: Bytes, offset: u64, length: u64) -> Response {
@@ -334,5 +538,49 @@ mod tests {
         assert_eq!(handlers::parse_pool("metadata").unwrap(), Pool::Metadata);
         assert_eq!(handlers::parse_pool("rowgroup").unwrap(), Pool::RowGroup);
         assert!(handlers::parse_pool("bogus").is_err());
+    }
+
+    /// The `/stats` JSON shape is the wire contract Agent 5 (SHELF-20)
+    /// consumes to weight the HRW ring. Changing any top-level key
+    /// here breaks the plugin — the golden-keys assertion is the
+    /// load-bearing part of this test.
+    #[test]
+    fn stats_payload_has_contract_keys() {
+        let stats = Stats {
+            pod_id: "shelf-7".into(),
+            capacity_bytes: 2048,
+            used_bytes: 512,
+            metadata_pool: PoolStats {
+                capacity_bytes: 1024,
+                used_bytes: 128,
+            },
+            rowgroup_pool: PoolStats {
+                capacity_bytes: 1024,
+                used_bytes: 384,
+            },
+        };
+        let v = serde_json::to_value(&stats).expect("serialize");
+        let obj = v.as_object().expect("object");
+        for key in [
+            "pod_id",
+            "capacity_bytes",
+            "used_bytes",
+            "metadata_pool",
+            "rowgroup_pool",
+        ] {
+            assert!(
+                obj.contains_key(key),
+                "/stats must carry `{key}` — Agent 5 contract"
+            );
+        }
+        assert_eq!(obj["pod_id"], serde_json::json!("shelf-7"));
+        let md = obj["metadata_pool"].as_object().expect("metadata_pool");
+        for key in ["capacity_bytes", "used_bytes"] {
+            assert!(md.contains_key(key), "metadata_pool.{key} missing");
+        }
+        let rg = obj["rowgroup_pool"].as_object().expect("rowgroup_pool");
+        for key in ["capacity_bytes", "used_bytes"] {
+            assert!(rg.contains_key(key), "rowgroup_pool.{key} missing");
+        }
     }
 }

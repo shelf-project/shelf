@@ -17,7 +17,10 @@ use std::time::Duration;
 
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Credentials, Region};
+use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation::head_object::HeadObjectError;
 use aws_sdk_s3::operation::RequestId;
+use aws_sdk_s3::primitives::DateTimeFormat;
 use aws_sdk_s3::Client as S3Client;
 use bytes::Bytes;
 use std::fmt::Debug;
@@ -34,11 +37,14 @@ pub trait Origin: Send + Sync + Debug + 'static {
         length: u64,
     ) -> impl std::future::Future<Output = crate::Result<Bytes>> + Send;
 
+    /// `HEAD` the origin object. `Ok(None)` is the canonical signal
+    /// for "object does not exist" (S3 404 / `NoSuchKey`); all other
+    /// failures surface as `Err`.
     fn head(
         &self,
         bucket: &str,
         key: &str,
-    ) -> impl std::future::Future<Output = crate::Result<ObjectHead>> + Send;
+    ) -> impl std::future::Future<Output = crate::Result<Option<ObjectHead>>> + Send;
 }
 
 /// Result of a `HEAD` request (SHELF-07).
@@ -50,6 +56,10 @@ pub struct ObjectHead {
     /// its content-addressed property from SHA-256 over the full
     /// tuple, not from this field.
     pub etag: Vec<u8>,
+    /// RFC-3339-formatted `Last-Modified` timestamp as reported by S3,
+    /// when present. Used only to decorate the HEAD response headers —
+    /// the SHELF-04 key derivation does not depend on it.
+    pub last_modified: Option<String>,
 }
 
 /// AWS SDK–backed `Origin`.
@@ -160,25 +170,53 @@ impl Origin for S3Origin {
             })?
     }
 
-    async fn head(&self, bucket: &str, key: &str) -> crate::Result<ObjectHead> {
+    async fn head(&self, bucket: &str, key: &str) -> crate::Result<Option<ObjectHead>> {
         let fut = async {
-            let resp = self
+            let resp = match self
                 .client
                 .head_object()
                 .bucket(bucket)
                 .key(key)
                 .send()
                 .await
-                .map_err(|e| crate::Error::Origin(format!("HeadObject {bucket}/{key}: {e}")))?;
+            {
+                Ok(resp) => resp,
+                Err(err) => {
+                    // Classify 404 / NoSuchKey into `Ok(None)` without
+                    // touching the SDK's internal response type, via
+                    // the typed discriminator and the raw HTTP status
+                    // as independent fallbacks.
+                    if let SdkError::ServiceError(svc) = &err {
+                        if matches!(svc.err(), HeadObjectError::NotFound(_)) {
+                            return Ok(None);
+                        }
+                    }
+                    if err.raw_response().map(|r| r.status().as_u16()) == Some(404) {
+                        return Ok(None);
+                    }
+                    return Err(crate::Error::Origin(format!(
+                        "HeadObject {bucket}/{key}: {err}"
+                    )));
+                }
+            };
+
+            if let Some(rid) = resp.request_id() {
+                tracing::debug!(request_id = rid, "s3 request-id");
+            }
+
             let content_length = resp.content_length().unwrap_or_default().max(0) as u64;
             let etag = resp
                 .e_tag()
                 .map(|s| s.as_bytes().to_vec())
                 .unwrap_or_default();
-            Ok::<_, crate::Error>(ObjectHead {
+            let last_modified = resp
+                .last_modified()
+                .and_then(|dt| dt.fmt(DateTimeFormat::DateTime).ok());
+            Ok::<_, crate::Error>(Some(ObjectHead {
                 content_length,
                 etag,
-            })
+                last_modified,
+            }))
         };
         tokio::time::timeout(self.request_timeout, fut)
             .await

@@ -48,6 +48,14 @@ pub struct Config {
 
     /// Pin list source + reload cadence (SHELF-24).
     pub pin_list: PinListConfig,
+
+    /// Cap on the HEAD-response LRU (SHELF-07).
+    #[serde(default = "default_head_lru_entries")]
+    pub head_lru_entries: u64,
+}
+
+fn default_head_lru_entries() -> u64 {
+    10_000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,7 +210,13 @@ impl Config {
     /// API, bucket for cross-env reuse). Everything else stays in YAML
     /// so misconfigurations are reviewable.
     fn apply_env_overrides(&mut self) {
+        // `SHELFD_POD_ID` is the preferred alias Agent 5's SHELF-20
+        // membership loader reads; it wins over `SHELFD_NODE_ID` when
+        // both are set so operators can flip pods without editing YAML.
         if let Ok(v) = std::env::var("SHELFD_NODE_ID") {
+            self.node.id = v;
+        }
+        if let Ok(v) = std::env::var("SHELFD_POD_ID") {
             self.node.id = v;
         }
         if let Ok(v) = std::env::var("SHELFD_ORIGIN_ENDPOINT") {
@@ -246,6 +260,9 @@ impl Config {
             return Err(crate::Error::Config(
                 "membership.headless_service must be non-empty".into(),
             ));
+        }
+        if self.head_lru_entries == 0 {
+            return Err(crate::Error::Config("head_lru_entries must be > 0".into()));
         }
         Ok(())
     }

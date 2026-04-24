@@ -102,7 +102,7 @@ chaos drills.
 | SHELF-04      | `src/store.rs`                       | `store::key_from_tuple`                                                |
 | SHELF-05      | `src/origin.rs`                      | `S3Origin::new`, `S3Origin::get_range`                                 |
 | SHELF-06      | `src/http.rs`, `src/store.rs`        | `http::handlers::get_cache`, `FoyerStore::{get,insert}`                |
-| SHELF-07      | `src/origin.rs`, `src/http.rs`       | `S3Origin::head`, `http::handlers::head_cache`                         |
+| SHELF-07      | `src/origin.rs`, `src/http.rs`, `src/head_lru.rs` | `S3Origin::head` (wired), `http::handlers::head_cache` (wired), `HeadLru` |
 | SHELF-08      | `src/metrics.rs`                     | (skeleton populated; counters ready)                                   |
 | SHELF-12      | `tests/smoke.rs`                     | `smoke_read_through_against_minio`                                     |
 | SHELF-17      | `src/store.rs`                       | `FoyerStore::open` (shared)                                             |

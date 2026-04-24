@@ -35,13 +35,27 @@ impl PinListReloadHandle {
 }
 
 /// Stats payload returned by `GET /stats`. The plugin polls this when
-/// building HRW weights (SHELF-20).
+/// building HRW weights (SHELF-20); the key set is the contract
+/// Agent 5 consumes, so changes here must be coordinated.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Stats {
-    pub pod: String,
+    /// Pod identity (StatefulSet name, e.g. `shelf-2`).
+    pub pod_id: String,
+    /// Sum of both pools' capacity.
+    pub capacity_bytes: u64,
+    /// Sum of both pools' current usage.
+    pub used_bytes: u64,
+    /// DRAM-only metadata pool (Iceberg manifests + Parquet footers).
+    pub metadata_pool: PoolStats,
+    /// Hybrid DRAM + NVMe row-group pool.
+    pub rowgroup_pool: PoolStats,
+}
+
+/// Per-pool capacity / usage section of [`Stats`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PoolStats {
     pub capacity_bytes: u64,
     pub used_bytes: u64,
-    pub pinned_bytes: u64,
 }
 
 /// Serve the control plane (HTTP + gRPC stub).
