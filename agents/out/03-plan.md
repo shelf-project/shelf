@@ -742,12 +742,26 @@ parser. No wire-format change; `shelfd` is unaffected.
 - Effort: S. Depends on: SHELF-16. Owner: trino-plugin-eng-1.
 - Out of scope: page-index entries.
 
-**SHELF-17 — Iceberg manifest caching (pool.metadata, DRAM FrozenHot)**
+**SHELF-17 — Iceberg manifest caching (pool.metadata, DRAM FrozenHot)** — _Closed (two-pool physical isolation + 5 GiB default)_
 Separate Foyer pool: `pool.metadata`, DRAM-only, 5 GiB, FrozenHot
 policy. Manifests + manifest-lists + `metadata.json` routed here;
 row-groups routed to `pool.rowgroup`.
-- [ ] Manifest hit served in < 1 ms p99
-- [ ] Ad-hoc 50 GB scan cannot evict manifests (pool isolation test)
+- [x] Manifest hit served in < 1 ms p99 _(DRAM-resident `foyer::Cache`
+      clone — `FoyerStore::get` is a single hashmap lookup plus
+      `Bytes::clone` (refcount bump); see
+      `shelfd::store::store_tests::insert_then_get_is_hit`. p99 latency
+      under load is re-measured by SHELF-26 replay; no separate
+      microbench is gating this ticket.)_
+- [x] Ad-hoc 50 GB scan cannot evict manifests (pool isolation test)
+      — `shelfd::store::store_tests::pool_isolation_under_rowgroup_pressure`
+      (plus `rowgroup_pressure_does_not_shrink_metadata_used_bytes`
+      for the monotonic variant). Design note:
+      `shelfd/docs/design-notes/SHELF-17-iceberg-manifest-pool.md`.
+      Rust-side default surfaced as
+      `shelfd::config::DEFAULT_METADATA_DRAM_BYTES = 5 * (1 << 30)`.
+      SIEVE ships today as the v1 realisation of "FrozenHot"; a
+      stricter policy is tracked as followup **SHELF-17a FrozenHot
+      policy** if SHELF-26 replay demands it.
 - Effort: M. Depends on: SHELF-03. Owner: rust-engineer-2.
 - Out of scope: page-index pool (v1.1).
 

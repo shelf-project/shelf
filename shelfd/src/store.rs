@@ -679,4 +679,134 @@ mod store_tests {
         assert!(store.used_bytes(Pool::RowGroup) >= 1024);
         assert_eq!(store.capacity_bytes(Pool::RowGroup), 1 << 20);
     }
+
+    /// SHELF-17 pool-isolation guarantee (ADR-0008).
+    ///
+    /// Two Foyer instances are constructed by [`FoyerStore::open`]
+    /// (one per pool); eviction is therefore physically scoped to a
+    /// single `foyer::Cache`. No amount of pressure on
+    /// [`Pool::RowGroup`] can touch a byte in [`Pool::Metadata`]. In
+    /// production the same invariant scales: a 50 GB ad-hoc scan
+    /// fills the rowgroup pool's NVMe/DRAM capacity, not the 5 GiB
+    /// metadata budget sitting in a separate cache instance.
+    ///
+    /// The test sizes look generous (8 MiB metadata, 1 MiB rowgroup)
+    /// because `foyer::CacheBuilder` defaults to 8 shards and the
+    /// capacity budget is divided across them. To keep the test
+    /// focused on *cross-pool* isolation (not intra-pool per-shard
+    /// eviction), we size the metadata pool so that even if every
+    /// seeded entry hashes to a single shard the entry still fits.
+    /// Rowgroup is then blasted with > 16x its capacity.
+    #[tokio::test]
+    async fn pool_isolation_under_rowgroup_pressure() {
+        // Metadata pool: 8 MiB total → 1 MiB per shard (8 shards, Foyer
+        // default), which comfortably holds the 16 * 8 KiB = 128 KiB
+        // of seeded manifest-shaped entries even in the pathological
+        // "all hash to one shard" case.
+        //
+        // Rowgroup pool: 1 MiB total. We will insert 2048 * 8 KiB =
+        // 16 MiB worth of entries into it — 16x its capacity — to
+        // establish the "50 GB ad-hoc scan" analogue at unit-test
+        // scale. After the scan, every metadata entry must still be
+        // retrievable byte-identical; rowgroup entries may or may not
+        // remain (we don't assert on eviction of that pool).
+        let pools = PoolsConfig {
+            metadata: MetadataPoolConfig {
+                dram_bytes: 8 * 1024 * 1024,
+            },
+            rowgroup: RowGroupPoolConfig {
+                dram_bytes: 1024 * 1024,
+                nvme_dir: std::path::PathBuf::from("/tmp/unused"),
+                nvme_bytes: 0,
+            },
+        };
+        let store = FoyerStore::open(&pools).await.expect("open");
+
+        // Seed the metadata pool with 16 * 8 KiB = 128 KiB of distinct
+        // manifest-shaped entries.
+        let mut md_keys = Vec::new();
+        for seed in 0..16u8 {
+            let key = key_from_tuple(&[seed; 4], 0, 8192, 0).unwrap();
+            let payload = Bytes::from(vec![seed; 8192]);
+            store
+                .insert(Pool::Metadata, key.clone(), payload)
+                .await
+                .unwrap();
+            md_keys.push((key, seed));
+        }
+
+        // Blast the rowgroup pool with far more than its capacity
+        // (2048 * 8 KiB = 16 MiB > 16x of 1 MiB).
+        for seed in 0..2048u16 {
+            let key = key_from_tuple(&[(seed >> 8) as u8, seed as u8, 0, 0], 0, 8192, 1).unwrap();
+            let payload = Bytes::from(vec![(seed & 0xff) as u8; 8192]);
+            store.insert(Pool::RowGroup, key, payload).await.unwrap();
+        }
+
+        // The metadata pool is physically independent, so every seeded
+        // entry survives, byte-identical.
+        for (key, seed) in &md_keys {
+            let got = store.get(Pool::Metadata, key).await.unwrap();
+            assert!(
+                got.is_some(),
+                "metadata entry for seed {seed} was evicted by rowgroup pressure"
+            );
+            let bytes = got.unwrap();
+            assert_eq!(bytes.len(), 8192);
+            assert!(
+                bytes.iter().all(|b| *b == *seed),
+                "metadata payload tampered for seed {seed}"
+            );
+        }
+    }
+
+    /// Smaller variant of [`pool_isolation_under_rowgroup_pressure`]:
+    /// observe `used_bytes` on the metadata pool before and after
+    /// blasting rowgroup. The number must never go down — that would
+    /// imply a cross-pool eviction, which is forbidden by ADR-0008.
+    #[tokio::test]
+    async fn rowgroup_pressure_does_not_shrink_metadata_used_bytes() {
+        // Same sharding caveat as the isolation test: metadata is
+        // sized so that intra-pool shard eviction does not confound
+        // the cross-pool invariant we want to observe.
+        let pools = PoolsConfig {
+            metadata: MetadataPoolConfig {
+                dram_bytes: 4 * 1024 * 1024,
+            },
+            rowgroup: RowGroupPoolConfig {
+                dram_bytes: 512 * 1024,
+                nvme_dir: std::path::PathBuf::from("/tmp/unused"),
+                nvme_bytes: 0,
+            },
+        };
+        let store = FoyerStore::open(&pools).await.expect("open");
+
+        // Seed metadata with 8 * 8 KiB = 64 KiB so there is headroom
+        // but also a measurable `used_bytes` value to anchor on.
+        for seed in 0..8u8 {
+            let key = key_from_tuple(&[seed; 4], 0, 8192, 0).unwrap();
+            let payload = Bytes::from(vec![seed; 8192]);
+            store.insert(Pool::Metadata, key, payload).await.unwrap();
+        }
+
+        let before = store.used_bytes(Pool::Metadata);
+        assert!(
+            before > 0,
+            "metadata used_bytes should be > 0 after seeding, got {before}"
+        );
+
+        // Overrun rowgroup capacity by > 16x (1024 * 8 KiB = 8 MiB
+        // into a 512 KiB pool).
+        for seed in 0..1024u16 {
+            let key = key_from_tuple(&[(seed >> 8) as u8, seed as u8, 0, 0], 0, 8192, 1).unwrap();
+            let payload = Bytes::from(vec![(seed & 0xff) as u8; 8192]);
+            store.insert(Pool::RowGroup, key, payload).await.unwrap();
+        }
+
+        let after = store.used_bytes(Pool::Metadata);
+        assert!(
+            after >= before,
+            "metadata used_bytes shrank under rowgroup pressure: before={before}, after={after}"
+        );
+    }
 }

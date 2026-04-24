@@ -122,10 +122,22 @@ pub struct PoolsConfig {
     pub rowgroup: RowGroupPoolConfig,
 }
 
+/// Absolute default for `pool.metadata`'s DRAM budget, in bytes.
+///
+/// 5 GiB per ADR-0008 and SHELF-17. The Rust side has no
+/// `Default` impl today — config comes from `charts/shelf/values.yaml`
+/// (`cache.pools.metadata.sizeBytes`) — so this constant is the
+/// single source of truth for anyone constructing a `PoolsConfig`
+/// in-process (benchmarks, integration tests, future `Default`
+/// impls). Keep it in sync with the Helm value and with ADR-0008
+/// §Decision.
+pub const DEFAULT_METADATA_DRAM_BYTES: u64 = 5 * (1 << 30);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataPoolConfig {
-    /// DRAM quota in bytes. 5 GiB absolute per ADR-0008.
+    /// DRAM quota in bytes. 5 GiB absolute per ADR-0008 — see
+    /// [`DEFAULT_METADATA_DRAM_BYTES`] and SHELF-17.
     pub dram_bytes: u64,
 }
 
