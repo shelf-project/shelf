@@ -4,6 +4,15 @@ _Author: agent-3-planner_
 _Date: 2026-04-23_
 _Inputs: `shelf/BLUEPRINT.md` (v0.3, last edited 2026-04-23), `shelf/COMPARISON.md`, `shelf/agents/out/01-scientist-review.md`, `shelf/agents/out/02-critical-review.md`_
 
+> **Status 2026-04-24 — local code phase complete.** Every ticket that
+> doesn't need a live cluster has landed on `main` (SHELF-01 through
+> SHELF-27 except the six cluster-gated ones). The remaining work —
+> SHELF-13, SHELF-14, SHELF-18 acceptance, SHELF-20 E7, SHELF-21
+> rollout, SHELF-28 drills — plus the v0.5 7-day observation window is
+> owned by ops. See `shelf/docs/cluster-handoff.md` for the handoff
+> packet (green-criteria, pointers, follow-ups tracked as SHELF-01a /
+> SHELF-16b / SHELF-17a).
+
 ---
 
 ## 0. TL;DR
