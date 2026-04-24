@@ -254,6 +254,32 @@ def _write_trace() -> list[dict]:
             ],
             "wall_time_millis": 380,
         },
+        # q-06 exercises SHELF-26a: a JOIN-shaped WHERE where the
+        # fact-side terms (``s.event_region`` and ``s.user_id``) must
+        # row-group-prune silver_events_2026 exactly as q-01 does,
+        # while the dim-side ``r.revenue > 1000`` is ignored at scan
+        # time because the trace only binds silver_events_2026.
+        {
+            "query_id": "q-06",
+            "query_date": "2026-04-24T10:00:00Z",
+            "query": (
+                "SELECT s.user_id FROM cdp.icesheet.silver_events_2026 s "
+                "JOIN cdp.gold.daily_revenue r ON s.user_id = r.revenue "
+                "WHERE s.event_region = 'MP+CG' AND s.user_id = 42 "
+                "AND r.revenue > 1000"
+            ),
+            "catalog": "cdp",
+            "schema": "icesheet",
+            "tables": [
+                {
+                    "catalog": "cdp",
+                    "schema": "icesheet",
+                    "table": "silver_events_2026",
+                    "snapshot_id": 1001,
+                }
+            ],
+            "wall_time_millis": 900,
+        },
     ]
     with (FIXTURE / "trace.jsonl").open("w", encoding="utf-8") as fh:
         for row in trace:

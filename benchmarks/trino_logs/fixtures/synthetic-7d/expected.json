@@ -31,6 +31,13 @@
       "median_ratio": 0.2721,
       "p90_ratio": 0.2721,
       "overall_ratio": 0.2721
+    },
+    {
+      "day": "2026-04-24",
+      "_shape": "SHELF-26a join: silver_events JOIN daily_revenue, WHERE terms on both sides; alias-qualified fact-side terms prune identically to q-01, dim-side r.revenue term is correctly dropped at scan time.",
+      "median_ratio": 0.1068,
+      "p90_ratio": 0.1068,
+      "overall_ratio": 0.1068
     }
   ]
 }

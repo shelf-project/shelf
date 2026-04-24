@@ -47,16 +47,25 @@ def scan_query(
     rg_unsupported = 0
     rg_entries: list[tuple[str, int, int, int, str]] = []
 
+    alias_map = dict(entry.table_aliases)
     for table_ref in entry.tables:
         snapshot = manifest_index.get(table_ref)
         if snapshot is None:
             continue
 
+        # SHELF-26a: for multi-table queries the extracted predicate
+        # carries a ``table_alias`` on each term. Filter down to the
+        # terms that bind to *this* table before any file / row-group
+        # reasoning; terms belonging to other tables in the JOIN are
+        # simply dropped for this scan (they'll apply when those
+        # tables are scanned separately — if ever).
+        applicable_pred = _terms_for_table(entry.predicate, table_ref, alias_map)
+
         for data_file in snapshot.data_files:
             files_scanned += 1
             scanned_bytes_file_level += data_file.file_size_in_bytes
 
-            if not _partition_keep(data_file, snapshot, entry.predicate):
+            if not _partition_keep(data_file, snapshot, applicable_pred):
                 continue
             files_after_partition_prune += 1
 
@@ -69,7 +78,7 @@ def scan_query(
             current_offset = 0
             for rg in row_groups:
                 rg_count += 1
-                keep, unsupported = _rg_keep(rg, entry.predicate, snapshot)
+                keep, unsupported = _rg_keep(rg, applicable_pred, snapshot)
                 if unsupported:
                     rg_unsupported += unsupported
                 if keep:
@@ -96,6 +105,36 @@ def scan_query(
         rg_pruning_unsupported_columns=rg_unsupported,
         rg_entries=tuple(rg_entries),
     )
+
+
+def _terms_for_table(
+    predicate: tuple[PredicateTerm, ...] | None,
+    table_ref: TableRef,
+    alias_map: dict[str, str],
+) -> tuple[PredicateTerm, ...] | None:
+    """Return the subset of ``predicate`` that binds to ``table_ref``.
+
+    - ``predicate is None`` stays ``None`` (full-scan fallback).
+    - A term with ``table_alias is None`` applies everywhere —
+      matches pre-SHELF-26a single-table behaviour.
+    - A term with ``table_alias == alias`` applies iff the alias
+      resolves (via ``alias_map`` or as a bare table name) to
+      ``table_ref.table`` (lower-cased).
+    """
+
+    if predicate is None:
+        return None
+    ref_name = table_ref.table.lower()
+    kept: list[PredicateTerm] = []
+    for term in predicate:
+        alias = term.table_alias
+        if alias is None:
+            kept.append(term)
+            continue
+        resolved = alias_map.get(alias, alias)
+        if resolved == ref_name:
+            kept.append(term)
+    return tuple(kept)
 
 
 def _partition_keep(

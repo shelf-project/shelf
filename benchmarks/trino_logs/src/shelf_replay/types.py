@@ -11,14 +11,19 @@ from typing import Any
 class PredicateTerm:
     """A single conjunct of a query's WHERE clause.
 
-    We keep this deliberately tiny: (column, op, literal). Joins and
-    disjunctions are represented as ``None`` at the :class:`TraceEntry`
-    level and fall through to file-level granularity only.
+    We keep this deliberately tiny: (column, op, literal, table_alias).
+    ``table_alias`` is ``None`` for bare single-table predicates (back-compat
+    with pre-SHELF-26a extraction); for multi-table queries it is the
+    lower-cased alias used in the SQL column prefix (e.g. ``f`` for
+    ``f.region``). The scanner uses :attr:`TraceEntry.table_aliases` to
+    resolve the alias back to a base table name at scan time — see
+    ``docs/SHELF-26a-predicate-extraction.md``.
     """
 
     column: str
     op: str
     value: Any
+    table_alias: str | None = None
 
     def __post_init__(self) -> None:
         if self.op not in _ALLOWED_OPS:
@@ -53,6 +58,10 @@ class TraceEntry:
     predicate: tuple[PredicateTerm, ...] | None
     wall_time_millis: int | None = None
     physical_input_bytes: int | None = None
+    # Lowered (alias, base-table-name) pairs harvested from FROM + JOINs.
+    # Empty for single-table queries where alias == table. The scanner
+    # uses this to decide which PredicateTerms apply to each TableRef.
+    table_aliases: tuple[tuple[str, str], ...] = ()
 
     @property
     def day(self) -> str:

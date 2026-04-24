@@ -68,6 +68,38 @@ def test_narrow_predicates_reduce_scanned_bytes(fixture_dir):
     assert by_id["q-05"].rg_over_file_ratio < by_id["q-04"].rg_over_file_ratio
 
 
+def test_join_shape_prunes_like_single_table_fact_query(fixture_dir):
+    """SHELF-26a: q-06 (JOIN-shaped WHERE) must prune silver_events the
+    same way q-01 (single-table WHERE) does.
+
+    The fact-side terms ``s.event_region = 'MP+CG'`` and ``s.user_id = 42``
+    are alias-bound; the dim-side ``r.revenue > 1000`` term belongs to
+    ``daily_revenue`` and must be filtered out at scan time because the
+    trace only binds ``silver_events_2026``. Any regression here would
+    either (a) poison the whole predicate (pre-SHELF-26a behaviour) or
+    (b) mis-apply the ``revenue`` term against ``silver_events`` (which
+    has no such column) and noisily fall through via the
+    ``unsupported_columns`` counter.
+    """
+
+    trace, _, scans = _run(fixture_dir)
+    q6_idx = next(i for i, e in enumerate(trace) if e.query_id == "q-06")
+    q6 = scans[q6_idx]
+    q1 = next(s for s in scans if s.query_id == "q-01")
+    # Extraction should yield three terms on q-06 (two for 's', one for 'r').
+    q6_entry = trace[q6_idx]
+    assert q6_entry.predicate is not None
+    assert len(q6_entry.predicate) == 3
+    assert {t.table_alias for t in q6_entry.predicate} == {"s", "r"}
+    # End-to-end: pruning outcome for silver_events must match q-01.
+    assert q6.files_after_partition_prune == q1.files_after_partition_prune
+    assert q6.rg_count == q1.rg_count
+    assert q6.scanned_bytes_rg_level == q1.scanned_bytes_rg_level
+    # The dim-side revenue column must NOT be counted as an unsupported
+    # column on silver_events (it's filtered out before we reach stats).
+    assert q6.rg_pruning_unsupported_columns == q1.rg_pruning_unsupported_columns
+
+
 def test_aggregate_by_day_matches_expected(fixture_dir):
     """The E5 golden numbers committed in expected.json must reproduce."""
 
