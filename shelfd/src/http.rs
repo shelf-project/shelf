@@ -16,7 +16,7 @@
 //! request is self-contained and greppable in access logs.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,6 +53,13 @@ pub struct ServerState {
     /// Set to `true` by `main` after startup probes finish. A future
     /// membership loop may flip it back to false on degradation.
     pub ready: AtomicBool,
+    /// SHELF-22 cap on unbounded `GetObject` — any `GET /:bucket/*key`
+    /// without a `Range:` header whose object size exceeds this value
+    /// responds `501 NotImplemented` with an S3 XML envelope. Kept as
+    /// `AtomicU64` so integration tests can dial it down without
+    /// rebuilding `ServerState`. Defaults to 256 MiB; `main` seeds it
+    /// from `config.s3_shim.max_full_object_bytes` at startup.
+    pub s3_shim_max_full_object_bytes: AtomicU64,
 }
 
 impl ServerState {
@@ -99,6 +106,9 @@ impl ServerState {
             head_lru,
             pod_id: pod_id.into(),
             ready: AtomicBool::new(false),
+            // SHELF-22 default cap: 256 MiB. `main` overwrites
+            // this from config before any traffic arrives.
+            s3_shim_max_full_object_bytes: AtomicU64::new(256 * 1024 * 1024),
         }
     }
 
@@ -175,6 +185,42 @@ pub async fn serve(
         .with_graceful_shutdown(async move { shutdown.cancelled().await })
         .await
         .map_err(|e| crate::Error::Io(std::io::Error::other(format!("http serve: {e}"))))
+}
+
+/// Build the S3-compat shim router (SHELF-22). Intentionally NOT
+/// merged into [`build_router`] — the shim listens on a dedicated
+/// port (`:9092` by default) so operators can firewall it
+/// independently of the native `/cache/...` data plane, and so a
+/// misbehaving S3 client cannot starve plugin reads.
+pub fn build_s3_shim_router(state: Arc<ServerState>) -> axum::Router {
+    crate::s3_shim::router(state)
+}
+
+/// Serve the S3-compat shim until `shutdown` fires. Mirrors
+/// [`serve`] one-to-one so both listeners share graceful-shutdown
+/// semantics and per-request timeout enforcement.
+pub async fn serve_s3_shim(
+    addr: SocketAddr,
+    state: Arc<ServerState>,
+    request_timeout: Duration,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> crate::Result<()> {
+    let app = build_s3_shim_router(state)
+        .layer(TraceLayer::new_for_http())
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::GATEWAY_TIMEOUT,
+            request_timeout,
+        ));
+
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| crate::Error::Config(format!("s3_shim: bind {addr}: {e}")))?;
+    tracing::info!(%addr, "shelfd s3-shim listener bound");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move { shutdown.cancelled().await })
+        .await
+        .map_err(|e| crate::Error::Io(std::io::Error::other(format!("s3_shim serve: {e}"))))
 }
 
 /// HTTP handlers. Public because the integration tests reach into

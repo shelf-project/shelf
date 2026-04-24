@@ -99,7 +99,33 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let listen = config.http.listen;
     let request_timeout = config.http.request_timeout;
     tracing::info!(%listen, ?request_timeout, "binding data plane");
-    http::serve(listen, state, request_timeout, shutdown).await?;
+
+    if config.s3_shim.enabled {
+        // SHELF-22: dedicated port keeps generic-S3 clients off
+        // the native read path so a hot boto3 loop cannot starve
+        // Trino splits sharing this daemon's event loop.
+        let shim_addr: std::net::SocketAddr = config.s3_shim.bind_address.parse().map_err(|e| {
+            anyhow::anyhow!(
+                "s3_shim.bind_address='{}' is not a valid SocketAddr: {e}",
+                config.s3_shim.bind_address,
+            )
+        })?;
+        state.s3_shim_max_full_object_bytes.store(
+            config.s3_shim.max_full_object_bytes,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        tracing::info!(%shim_addr, "binding s3-compat shim");
+        let data_fut = http::serve(listen, state.clone(), request_timeout, shutdown.clone());
+        let shim_fut =
+            http::serve_s3_shim(shim_addr, state.clone(), request_timeout, shutdown.clone());
+        tokio::select! {
+            r = data_fut => r?,
+            r = shim_fut => r?,
+        }
+    } else {
+        http::serve(listen, state, request_timeout, shutdown).await?;
+    }
+
     tracing::info!("shelfd shutdown complete");
     Ok(())
 }

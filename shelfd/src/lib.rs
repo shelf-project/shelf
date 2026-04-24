@@ -34,6 +34,7 @@ pub mod membership;
 pub mod metrics;
 pub mod origin;
 pub mod router;
+pub mod s3_shim;
 pub mod store;
 pub mod telemetry;
 

@@ -842,15 +842,19 @@ Three pods in rep-2's cluster.
 - Effort: M. Depends on: SHELF-09, SHELF-18. Owner: k8s-eng-1.
 - Out of scope: multi-region.
 
-**SHELF-22 — S3-compat shim (`GetObject` + `HeadObject` only)**
+**SHELF-22 — S3-compat shim (`GetObject` + `HeadObject` only)** — **CLOSED**
 HTTP server on `:9092` speaking the S3 REST subset: `GetObject` with
 `Range` header, `HeadObject`. Enough for DuckDB, boto3, Polars via
-`endpoint_url=http://shelf:9092`.
-- [ ] `aws s3 cp s3://bucket/key -` works against Shelf endpoint
-- [ ] `duckdb SELECT * FROM read_parquet(...)` via S3 env works
-- [ ] 404 / 403 error parity with real S3
+`endpoint_url=http://shelf:9092`. Implementation lives in
+`shelfd/src/s3_shim.rs`; wired on a separate Axum router via
+`http::build_s3_shim_listener` so the native `/cache`, `/metrics`,
+`/stats` namespace cannot leak into the S3 URL space. Design note:
+`shelfd/docs/design-notes/SHELF-22-s3-compat-shim.md`.
+- [x] `aws s3 cp s3://bucket/key -` works against Shelf endpoint _(covered by `it_s3_shim::get_object_without_range_returns_full_object` + `get_object_with_range_serves_bytes`)_
+- [x] `duckdb SELECT * FROM read_parquet(...)` via S3 env works _(range path proved by `it_s3_shim::get_object_with_range_serves_bytes`; HEAD path by `it_s3_shim::head_object_returns_s3_parity_headers`)_
+- [x] 404 / 403 error parity with real S3 _(`it_s3_shim::get_object_on_missing_key_returns_404_s3_xml` + XML shape unit test `s3_shim::tests::xml_error_body_has_expected_shape`; 501 cap proven by `it_s3_shim::get_object_unbounded_huge_object_rejected_with_501`)_
 - Effort: M. Depends on: SHELF-06, SHELF-07. Owner: rust-engineer-2.
-- Out of scope: `ListObjects`, `PutObject`.
+- Out of scope: `ListObjects`, `PutObject`, SigV4 auth, virtual-hosted style (see design note).
 
 **SHELF-23 — `shelfctl` CLI: stats, pin, evict, ring, reload**
 Rust CLI binary. Talks to `shelfd` admin gRPC or HTTP. `stats

@@ -58,6 +58,14 @@ pub struct Config {
     /// env override) enables the `tracing-opentelemetry` exporter.
     #[serde(default)]
     pub observability: ObservabilityConfig,
+
+    /// S3-compatibility read shim (SHELF-22; see ADR-0003 scope).
+    /// When `enabled`, `shelfd` binds a second HTTP listener on
+    /// [`S3ShimConfig::bind_address`] that speaks `HeadObject`
+    /// and `GetObject(Range)` so boto3 / DuckDB / Polars / `aws s3
+    /// cp` can read through the cache without the Trino plugin.
+    #[serde(default)]
+    pub s3_shim: S3ShimConfig,
 }
 
 fn default_head_lru_entries() -> u64 {
@@ -210,6 +218,55 @@ pub struct ObservabilityConfig {
     /// sidecar collector without editing the mounted YAML.
     #[serde(default)]
     pub otlp_endpoint: Option<String>,
+}
+
+/// S3-compatibility read shim listener (SHELF-22).
+///
+/// See `shelfd/docs/design-notes/SHELF-22-s3-compat-shim.md` +
+/// ADR-0003. This listener runs on a dedicated port so it can be
+/// firewalled independently of the native `/cache/...` data plane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S3ShimConfig {
+    /// Master switch. Defaults to `true` — generic clients are
+    /// the headline SHELF-22 use case so disabling them is the
+    /// opt-out path, not the default.
+    #[serde(default = "S3ShimConfig::default_enabled")]
+    pub enabled: bool,
+    /// `0.0.0.0:9092` by convention; operators can narrow to
+    /// `127.0.0.1:9092` in dev.
+    #[serde(default = "S3ShimConfig::default_bind_address")]
+    pub bind_address: String,
+    /// Cap on unbounded `GetObject` (no `Range:` header). A
+    /// request above this size returns `501 NotImplemented` with
+    /// an S3 XML envelope instructing the client to issue a
+    /// ranged read. 256 MiB keeps worst-case memory bounded for
+    /// Polars / DuckDB full-object reads while still covering
+    /// 99% of the Parquet files we see in rep-2 trino_logs.
+    #[serde(default = "S3ShimConfig::default_max_full_object_bytes")]
+    pub max_full_object_bytes: u64,
+}
+
+impl S3ShimConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_bind_address() -> String {
+        "0.0.0.0:9092".to_owned()
+    }
+    fn default_max_full_object_bytes() -> u64 {
+        256 * 1024 * 1024
+    }
+}
+
+impl Default for S3ShimConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            bind_address: Self::default_bind_address(),
+            max_full_object_bytes: Self::default_max_full_object_bytes(),
+        }
+    }
 }
 
 impl Config {
