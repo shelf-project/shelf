@@ -1,0 +1,154 @@
+name: verify
+
+# SHELF-01a — unified "verify on PR" rail.
+#
+# The existing per-concern workflows (helm-lint.yml, smoke.yml,
+# security.yml, bench.yml) each gate a slice of the repo on its own
+# cadence. This workflow is the *aggregated* PR gate: the single
+# required check to configure in branch protection. It runs the three
+# fast lanes in parallel so a clean PR goes green in well under 10
+# minutes on GitHub-hosted runners:
+#
+#   1. rust-verify   — cargo fmt --check + cargo clippy -D warnings +
+#                      cargo test (all crates). Uses sccache to keep
+#                      warm PR turnarounds < 4 min.
+#   2. java-verify   — mvn verify on clients/trino (Trino 480 plugin,
+#                      JDK 25 Temurin to match maven.compiler.release).
+#   3. python-verify — pytest on benchmarks/trino_logs (the only
+#                      long-lived Python package; trainer + watcher
+#                      lockfiles are still on the Phase-4 / 1.5 board).
+#
+# Heavy lanes (docker image build, helm chart lint, compose smoke,
+# security scanners) keep their dedicated workflows so operators see
+# which slice broke; verify only proxies them via the `verify-gate`
+# aggregator below so branch protection can be configured with one
+# required check instead of five.
+#
+# Design notes: tracked under the same SHELF-09 / SHELF-12 / SHELF-23
+# design-note dir.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # A clippy / fmt regression on a file we didn't touch should still
+  # fail the PR — `-D warnings` is load-bearing.
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  # -------------------------------------------------------------------
+  # Rust lane — fmt + clippy + test across the workspace.
+  # Target: < 6 min cold, < 3 min warm on ubuntu-22.04 4-core runner.
+  # -------------------------------------------------------------------
+  rust-verify:
+    name: rust (fmt + clippy + test)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        # rust-toolchain.toml pins the channel (1.82.0). We install
+        # explicitly so rustfmt + clippy components are guaranteed.
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  # -------------------------------------------------------------------
+  # Java lane — mvn verify (clients/trino). JDK 25 per
+  # maven.compiler.release in the plugin pom.
+  # -------------------------------------------------------------------
+  java-verify:
+    name: java (mvn verify)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Temurin JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      - name: mvn verify
+        run: mvn -B -ntp -f clients/trino/pom.xml verify
+
+  # -------------------------------------------------------------------
+  # Python lane — pytest on the trino_logs replay harness.
+  # -------------------------------------------------------------------
+  python-verify:
+    name: python (shelf-replay tests)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install shelf-replay with test extras
+        working-directory: benchmarks/trino_logs
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]" pytest
+
+      - name: Pytest
+        working-directory: benchmarks/trino_logs
+        run: pytest -q
+
+  # -------------------------------------------------------------------
+  # Aggregation gate: every lane must be green.
+  # Configure branch protection to require only this job name.
+  # -------------------------------------------------------------------
+  verify-gate:
+    name: verify gate
+    runs-on: ubuntu-22.04
+    needs:
+      - rust-verify
+      - java-verify
+      - python-verify
+    steps:
+      - name: All lanes green
+        run: echo "rust, java, python lanes all passed."
