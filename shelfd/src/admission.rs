@@ -146,4 +146,68 @@ mod tests {
             AdmissionDecision::Reject
         );
     }
+
+    /// SHELF-24 regression: when the key is in the store's pin-set,
+    /// `FoyerStore::get_or_fetch` must populate `ctx.pinned = true`
+    /// so the size-threshold policy admits a payload that would
+    /// otherwise be rejected. The admission module never talks to
+    /// `FoyerStore` directly; the flag flows via `AdmissionContext`.
+    /// This test pins that wiring end-to-end so a future refactor
+    /// that forgets to plumb `is_pinned` fails here rather than
+    /// silently caching nothing.
+    #[tokio::test]
+    async fn pinned_keys_bypass_size_threshold() {
+        use crate::config::{MetadataPoolConfig, PoolsConfig, RowGroupPoolConfig};
+        use crate::store::{key_from_tuple, FoyerStore, Pool, ReadOutcome, Store};
+        use bytes::Bytes;
+        use std::path::PathBuf;
+
+        let pools = PoolsConfig {
+            metadata: MetadataPoolConfig {
+                dram_bytes: 4 * 1024 * 1024,
+            },
+            rowgroup: RowGroupPoolConfig {
+                dram_bytes: 4 * 1024 * 1024,
+                nvme_dir: PathBuf::from("/tmp/unused"),
+                nvme_bytes: 0,
+            },
+        };
+        let store = FoyerStore::open(&pools).await.expect("open");
+
+        let key = key_from_tuple(b"pin-etag", 0, 1, 0).expect("key");
+
+        // Seed + pin the key so the next get_or_fetch sees `is_pinned`.
+        store
+            .insert(Pool::RowGroup, key.clone(), Bytes::from_static(&[0u8; 8]))
+            .await
+            .expect("seed");
+        assert!(store.pin(Pool::RowGroup, &key));
+
+        // Evict the cached bytes so the fetch path is exercised.
+        assert!(store.evict(Pool::RowGroup, &key));
+
+        // Size-threshold policy that rejects everything > 16 bytes
+        // unless pinned.
+        let policy = SizeThresholdPolicy {
+            size_threshold_bytes: 16,
+            pinned_bypass: true,
+        };
+
+        // Payload is 32 bytes — over the threshold. Without the pin
+        // bypass this would be served but not cached.
+        let big = Bytes::from(vec![0xAB; 32]);
+        let outcome = store
+            .get_or_fetch(Pool::RowGroup, key.clone(), &policy, async move { Ok(big) })
+            .await
+            .expect("fetch");
+        assert!(matches!(outcome, ReadOutcome::Miss(_)));
+
+        // Pinned bypass means the bytes got admitted after all.
+        let hit = store.get(Pool::RowGroup, &key).await.unwrap();
+        assert!(
+            hit.is_some(),
+            "pinned key must be cached even above size threshold"
+        );
+        assert_eq!(hit.unwrap().len(), 32);
+    }
 }

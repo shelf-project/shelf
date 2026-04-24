@@ -33,6 +33,7 @@ pub mod http;
 pub mod membership;
 pub mod metrics;
 pub mod origin;
+pub mod pinlist;
 pub mod router;
 pub mod s3_shim;
 pub mod store;

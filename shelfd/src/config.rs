@@ -46,8 +46,12 @@ pub struct Config {
     /// Membership resolver (SHELF-20).
     pub membership: MembershipConfig,
 
-    /// Pin list source + reload cadence (SHELF-24).
-    pub pin_list: PinListConfig,
+    /// Pin list source + reload cadence (SHELF-24). Optional
+    /// because dev clusters and the unit-test harness boot without a
+    /// config-bucket; `None` means the pin-list loader is never
+    /// spawned and the in-memory pin-set stays empty.
+    #[serde(default)]
+    pub pin_list: Option<PinListConfig>,
 
     /// Cap on the HEAD-response LRU (SHELF-07).
     #[serde(default = "default_head_lru_entries")]
@@ -189,14 +193,36 @@ fn default_dns_refresh() -> Duration {
     Duration::from_secs(5)
 }
 
+/// SHELF-24 pin-list config.
+///
+/// The loader reads `s3://{bucket}/{key}` on boot and then refreshes
+/// on both a timer and `SIGHUP`. We split bucket + key rather than
+/// accepting a single `s3://…` URI because:
+///
+/// 1. The `aws-sdk-s3` client already owns the region + endpoint
+///    resolution — a URI would duplicate that logic.
+/// 2. Helm charts already template bucket + key as separate values
+///    (`configBucket`, `pinListKey`); matching the chart shape saves
+///    an adapter layer in the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinListConfig {
-    /// S3 bucket + key, e.g. `s3://config-bucket/shelf/pin_list.json`.
-    pub source: String,
+    /// S3 bucket name (no `s3://` prefix).
+    pub bucket: String,
+    /// Object key, e.g. `shelf/pin_list.json`.
+    #[serde(default = "default_pin_key")]
+    pub key: String,
     /// SIGHUP + periodic reload cadence. 15 min per SHELF-24.
     #[serde(with = "humantime_serde", default = "default_pin_reload")]
-    pub reload_interval: Duration,
+    pub refresh_period: Duration,
+    /// Allow operators to keep the config stanza but silence the
+    /// loader (e.g. during incident response).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_pin_key() -> String {
+    "shelf/pin_list.json".to_owned()
 }
 
 fn default_pin_reload() -> Duration {
@@ -393,7 +419,9 @@ admission:
 membership:
   headless_service: shelf.shelf.svc.cluster.local
 pin_list:
-  source: "s3://cfg/pin_list.json"
+  bucket: "cfg"
+  key: "shelf/pin_list.json"
+  refresh_period: "15m"
 "#;
 
     #[test]

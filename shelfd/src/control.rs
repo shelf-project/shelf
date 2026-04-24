@@ -49,6 +49,14 @@ pub struct Stats {
     pub metadata_pool: PoolStats,
     /// Hybrid DRAM + NVMe row-group pool.
     pub rowgroup_pool: PoolStats,
+    /// SHELF-24: sum of resident byte length of every pinned key
+    /// across both pools. Unresident pinned keys contribute zero.
+    #[serde(default)]
+    pub pinned_bytes: u64,
+    /// SHELF-24: number of distinct pinned keys, regardless of
+    /// residency.
+    #[serde(default)]
+    pub pinned_count: usize,
 }
 
 /// Per-pool capacity / usage section of [`Stats`].

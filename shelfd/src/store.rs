@@ -22,7 +22,7 @@ use std::future::Future;
 use std::sync::{Arc, Weak};
 
 use bytes::Bytes;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use sha2::{Digest, Sha256};
 use tokio::sync::OnceCell;
 
@@ -104,12 +104,38 @@ pub trait Store: Send + Sync + Debug + 'static {
         bytes: Bytes,
     ) -> impl std::future::Future<Output = crate::Result<()>> + Send;
 
-    /// Explicit eviction (e.g. from `shelfctl evict`).
-    fn evict(
-        &self,
-        pool: Pool,
-        key: &Key,
-    ) -> impl std::future::Future<Output = crate::Result<()>> + Send;
+    /// Explicit eviction (e.g. from `shelfctl evict` or the admin
+    /// HTTP surface). Returns `true` iff the key was resident in
+    /// `pool` before the call. Synchronous: Foyer's `remove` and the
+    /// pin-set `RwLock` are both in-memory and lock-based; avoiding
+    /// `async` here keeps the admin handlers and tests from having
+    /// to `await` trivially-resolvable calls.
+    fn evict(&self, pool: Pool, key: &Key) -> bool;
+
+    // SHELF-23 + SHELF-24 pin-set surface. The pin-set is held
+    // separately from the two Foyer caches so that evicting the
+    // cached bytes does not silently drop the pin.
+    //
+    // All of these are synchronous for the same reason as `evict`.
+
+    /// Pin a key in `pool`. Returns `true` iff the entry was resident
+    /// (or already pinned — idempotent).
+    fn pin(&self, pool: Pool, key: &Key) -> bool;
+
+    /// Remove a key from the pin-set. Returns `true` iff it was pinned.
+    fn unpin(&self, key: &Key) -> bool;
+
+    /// Membership test.
+    fn is_pinned(&self, key: &Key) -> bool;
+
+    /// Snapshot of all pinned keys — used by the pin-list loader.
+    fn pinned_keys(&self) -> Vec<Key>;
+
+    /// Sum of recorded byte lengths for pinned keys.
+    fn pinned_bytes(&self) -> u64;
+
+    /// Count of pinned keys.
+    fn pinned_count(&self) -> usize;
 
     /// Bytes used per pool, for `/stats` + HRW capacity weighting.
     fn used_bytes(&self, pool: Pool) -> u64;
@@ -137,6 +163,11 @@ pub struct FoyerStore {
     metadata_capacity: u64,
     rowgroup_capacity: u64,
     inflight: InflightMap,
+    /// SHELF-24 allowlist. Held separately from the two Foyer caches
+    /// so that (1) eviction of the bytes does not also unpin the key
+    /// and (2) the admin surface can refuse pins for keys that are
+    /// not yet resident.
+    pin_set: RwLock<HashMap<Key, u64>>,
 }
 
 impl FoyerStore {
@@ -173,6 +204,7 @@ impl FoyerStore {
             metadata_capacity,
             rowgroup_capacity,
             inflight: Mutex::new(HashMap::new()),
+            pin_set: RwLock::new(HashMap::new()),
         })
     }
 
@@ -250,7 +282,9 @@ impl FoyerStore {
             pool,
             key: &key,
             size_bytes: bytes.len() as u64,
-            pinned: false,
+            // SHELF-24: pin-set is the single source of truth for
+            // the admission bypass flag.
+            pinned: self.is_pinned(&key),
         };
         if admission.decide(&ctx) == crate::admission::AdmissionDecision::Admit {
             self.insert(pool, key, bytes.clone()).await?;
@@ -268,6 +302,74 @@ impl FoyerStore {
         let a: Arc<OnceCell<Result<Bytes, String>>> = Arc::new(OnceCell::new());
         guard.insert((pool, key.clone()), Arc::downgrade(&a));
         a
+    }
+
+    // SHELF-23 + SHELF-24 pin-set surface. See design note
+    // `shelfd/docs/design-notes/SHELF-23-24-admin-surface-and-pinlist.md`.
+    //
+    // The pin-set is a `HashMap<Key, u64>` where the value is the
+    // resident byte length recorded at `pin()` time. Storing the
+    // length inline makes [`FoyerStore::pinned_bytes`] a simple sum
+    // over the map values — no extra cache lookups on `/stats` or
+    // `POST /admin/reload`.
+
+    /// Pin a key against a specific pool. Returns `true` iff the key
+    /// is resident in `pool` (or was already pinned — idempotent).
+    /// `false` signals 404 to the admin handler so operators see
+    /// typos rather than silent no-ops.
+    pub fn pin(&self, pool: Pool, key: &Key) -> bool {
+        // Idempotent: pinning an already-pinned key returns true
+        // without re-reading the cache. The existing byte count is
+        // trusted — re-inserting the same key with a potentially
+        // different payload would be an ADR-0003 violation anyway.
+        if self.pin_set.read().contains_key(key) {
+            return true;
+        }
+        let len = match self.cache_for(pool).get(key) {
+            Some(entry) => entry.value().len() as u64,
+            None => return false,
+        };
+        self.pin_set.write().insert(key.clone(), len);
+        true
+    }
+
+    /// Remove a key from the pin-set. Never touches the caches.
+    /// Returns `true` iff the key was pinned.
+    pub fn unpin(&self, key: &Key) -> bool {
+        self.pin_set.write().remove(key).is_some()
+    }
+
+    /// Hot-path membership test used on every read-miss admission.
+    pub fn is_pinned(&self, key: &Key) -> bool {
+        self.pin_set.read().contains_key(key)
+    }
+
+    /// Snapshot used by the pin-list loader when diffing.
+    pub fn pinned_keys(&self) -> Vec<Key> {
+        self.pin_set.read().keys().cloned().collect()
+    }
+
+    /// Distinct pinned key count regardless of residency.
+    pub fn pinned_count(&self) -> usize {
+        self.pin_set.read().len()
+    }
+
+    /// Sum of the byte lengths recorded when each pinned key was
+    /// installed. O(N) over the pin-set; no cache lookups.
+    pub fn pinned_bytes(&self) -> u64 {
+        self.pin_set.read().values().copied().sum()
+    }
+
+    /// Evict a key from `pool`. Preserves the pin-set so a subsequent
+    /// re-fetch still goes through admission with `ctx.pinned = true`.
+    /// Returns `true` iff the key was resident in `pool`.
+    pub fn evict_in_pool(&self, pool: Pool, key: &Key) -> bool {
+        let cache = self.cache_for(pool);
+        let had = cache.get(key).is_some();
+        if had {
+            cache.remove(key);
+        }
+        had
     }
 }
 
@@ -303,10 +405,34 @@ impl Store for FoyerStore {
         Ok(())
     }
 
-    async fn evict(&self, pool: Pool, key: &Key) -> crate::Result<()> {
-        let cache = self.cache_for(pool);
-        cache.remove(key);
-        Ok(())
+    fn evict(&self, pool: Pool, key: &Key) -> bool {
+        // Forwards to the inherent method so the pool-targeting logic
+        // lives in one place.
+        FoyerStore::evict_in_pool(self, pool, key)
+    }
+
+    fn pin(&self, pool: Pool, key: &Key) -> bool {
+        FoyerStore::pin(self, pool, key)
+    }
+
+    fn unpin(&self, key: &Key) -> bool {
+        FoyerStore::unpin(self, key)
+    }
+
+    fn is_pinned(&self, key: &Key) -> bool {
+        FoyerStore::is_pinned(self, key)
+    }
+
+    fn pinned_keys(&self) -> Vec<Key> {
+        FoyerStore::pinned_keys(self)
+    }
+
+    fn pinned_bytes(&self) -> u64 {
+        FoyerStore::pinned_bytes(self)
+    }
+
+    fn pinned_count(&self) -> usize {
+        FoyerStore::pinned_count(self)
     }
 
     fn used_bytes(&self, pool: Pool) -> u64 {
@@ -580,7 +706,7 @@ mod store_tests {
             .insert(Pool::Metadata, key.clone(), Bytes::from_static(b"x"))
             .await
             .unwrap();
-        store.evict(Pool::Metadata, &key).await.unwrap();
+        assert!(store.evict(Pool::Metadata, &key));
         assert!(store.get(Pool::Metadata, &key).await.unwrap().is_none());
     }
 
@@ -808,5 +934,87 @@ mod store_tests {
             after >= before,
             "metadata used_bytes shrank under rowgroup pressure: before={before}, after={after}"
         );
+    }
+
+    #[tokio::test]
+    async fn pin_missing_entry_returns_false() {
+        let store = new_store().await;
+        let key = k(40);
+        assert!(!store.pin(Pool::RowGroup, &key));
+        assert!(!store.pin(Pool::Metadata, &key));
+        assert!(!store.is_pinned(&key));
+    }
+
+    #[tokio::test]
+    async fn pin_then_unpin_roundtrip() {
+        let store = new_store().await;
+        let key = k(41);
+        store
+            .insert(Pool::RowGroup, key.clone(), Bytes::from_static(b"abcd"))
+            .await
+            .unwrap();
+        assert!(store.pin(Pool::RowGroup, &key));
+        assert!(store.is_pinned(&key));
+        assert_eq!(store.pinned_count(), 1);
+        assert_eq!(store.pinned_bytes(), 4);
+        // Idempotent: pinning again still returns true without growing
+        // the set.
+        assert!(store.pin(Pool::RowGroup, &key));
+        assert_eq!(store.pinned_count(), 1);
+        assert!(store.unpin(&key));
+        assert!(!store.is_pinned(&key));
+        assert_eq!(store.pinned_count(), 0);
+        assert_eq!(store.pinned_bytes(), 0);
+        // Unpinning a key that is not pinned returns false.
+        assert!(!store.unpin(&key));
+    }
+
+    #[tokio::test]
+    async fn evict_preserves_pin_set() {
+        let store = new_store().await;
+        let key = k(42);
+        store
+            .insert(Pool::RowGroup, key.clone(), Bytes::from_static(&[0u8; 64]))
+            .await
+            .unwrap();
+        assert!(store.pin(Pool::RowGroup, &key));
+        assert!(store.evict(Pool::RowGroup, &key));
+        assert!(store.is_pinned(&key), "pin-set must outlive eviction");
+        assert_eq!(store.pinned_count(), 1);
+        // The recorded byte length at pin-time is unchanged by the
+        // subsequent eviction — the pin-set is the SOURCE of truth
+        // for `pinned_bytes`, not the live cache.
+        assert_eq!(store.pinned_bytes(), 64);
+    }
+
+    #[tokio::test]
+    async fn pinned_bytes_and_count_reflect_pins() {
+        let store = new_store().await;
+        let k_meta = k(43);
+        let k_rg = k(44);
+        store
+            .insert(
+                Pool::Metadata,
+                k_meta.clone(),
+                Bytes::from_static(&[0u8; 10]),
+            )
+            .await
+            .unwrap();
+        store
+            .insert(Pool::RowGroup, k_rg.clone(), Bytes::from_static(&[0u8; 32]))
+            .await
+            .unwrap();
+        assert!(store.pin(Pool::Metadata, &k_meta));
+        assert!(store.pin(Pool::RowGroup, &k_rg));
+        assert_eq!(store.pinned_count(), 2);
+        assert_eq!(store.pinned_bytes(), 42);
+    }
+
+    #[tokio::test]
+    async fn evict_missing_returns_false() {
+        let store = new_store().await;
+        let key = k(45);
+        assert!(!store.evict(Pool::RowGroup, &key));
+        assert!(!store.evict(Pool::Metadata, &key));
     }
 }

@@ -80,7 +80,51 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let admission = Arc::new(SizeThresholdPolicy::from_config(&config.admission));
     let head_lru = Arc::new(HeadLru::new(config.head_lru_entries));
 
-    let state = Arc::new(ServerState::with_head_lru_and_pod_id(
+    let shutdown = CancellationToken::new();
+    spawn_signal_handler(shutdown.clone());
+
+    // SHELF-24: construct the pin-list loader BEFORE building
+    // `ServerState` so the resulting `ReloadHandle` can be threaded
+    // through `with_reload_handle`. The loader runs regardless of
+    // whether the admin surface is reachable — the handle just lets
+    // `POST /admin/reload` short-circuit the timer.
+    let reload_handle = match config.pin_list.as_ref() {
+        Some(cfg) if cfg.enabled => {
+            use shelfd::pinlist::PinListLoader;
+            let loader = PinListLoader::new(
+                origin.client().clone(),
+                cfg.bucket.clone(),
+                cfg.key.clone(),
+                cfg.refresh_period,
+                store.clone(),
+            );
+            match loader.boot_and_spawn(shutdown.clone()).await {
+                Ok((handle, _join)) => {
+                    tracing::info!(
+                        bucket = %cfg.bucket,
+                        key = %cfg.key,
+                        refresh_period = ?cfg.refresh_period,
+                        "pin-list loader online",
+                    );
+                    Some(handle)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "pin-list loader failed to start; continuing without");
+                    None
+                }
+            }
+        }
+        Some(_) => {
+            tracing::info!("pin-list loader disabled by config (pin_list.enabled=false)");
+            None
+        }
+        None => {
+            tracing::debug!("no pin_list stanza; pin-list loader not spawned");
+            None
+        }
+    };
+
+    let mut state = ServerState::with_head_lru_and_pod_id(
         store.clone(),
         origin.clone(),
         router,
@@ -88,13 +132,14 @@ async fn run(args: Args) -> anyhow::Result<()> {
         metrics,
         head_lru,
         config.node.id.clone(),
-    ));
+    );
+    if let Some(handle) = reload_handle {
+        state = state.with_reload_handle(handle);
+    }
+    let state = Arc::new(state);
     // Phase-0: mark ready as soon as Foyer + S3 client built. The
     // origin head-bucket probe would go here once SHELF-07 lands.
     state.mark_ready();
-
-    let shutdown = CancellationToken::new();
-    spawn_signal_handler(shutdown.clone());
 
     let listen = config.http.listen;
     let request_timeout = config.http.request_timeout;

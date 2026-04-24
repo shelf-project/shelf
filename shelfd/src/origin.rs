@@ -123,6 +123,14 @@ impl S3Origin {
     pub fn bucket(&self) -> &str {
         &self.bucket
     }
+
+    /// SHELF-24: expose the configured S3 client so the pin-list
+    /// loader can reuse the same credential chain, region, and
+    /// `endpoint_url` override (MinIO/LocalStack) without rebuilding
+    /// them from scratch.
+    pub fn client(&self) -> &S3Client {
+        &self.client
+    }
 }
 
 impl Origin for S3Origin {

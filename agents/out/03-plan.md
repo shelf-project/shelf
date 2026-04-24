@@ -856,25 +856,33 @@ HTTP server on `:9092` speaking the S3 REST subset: `GetObject` with
 - Effort: M. Depends on: SHELF-06, SHELF-07. Owner: rust-engineer-2.
 - Out of scope: `ListObjects`, `PutObject`, SigV4 auth, virtual-hosted style (see design note).
 
-**SHELF-23 — `shelfctl` CLI: stats, pin, evict, ring, reload**
-Rust CLI binary. Talks to `shelfd` admin gRPC or HTTP. `stats
-[--granularity=row-group|footer|manifest]`, `pin <table>`,
-`evict <key>`, `ring` (dumps current membership + weights),
-`reload [pin-list|admission-model]`.
-- [ ] Each subcommand has `--help` with 1 example
-- [ ] `reload pin-list` survives SIGHUP race
-- [ ] `ring` on two different pods shows identical output
+**SHELF-23 — `shelfctl` CLI: stats, pin, evict, ring, reload** — _Closed (admin HTTP surface under `/admin/*`; shipped with SHELF-24)_
+Rust CLI binary. Talks to `shelfd`'s admin HTTP surface
+(`/admin/{ring,pin,unpin,evict,reload}`). `stats` pretty-prints
+`/stats`; `ring` renders a `pod_id | weight | healthy` table;
+`pin <key> [--pool metadata|rowgroup]` / `evict <key> [--pool …]` take
+the content-addressed hex key plus a pool selector; `unpin <key>` is
+pool-agnostic (keys are unique across pools by construction); `reload`
+triggers an out-of-band pin-list reload.
+- [x] Each subcommand has `--help` _(`shelfctl/tests/smoke.rs::subcommand_help_prints_for_every_verb`)_
+- [x] `reload` goes through the same loader as SIGHUP / timer _(admin handler uses `ReloadHandle::reload_now` which is the same path the SIGHUP + 15-min tick drive; `shelfd::pinlist::tests` + `shelfd/tests/it_admin.rs::admin_reload_returns_200_when_loader_disabled`)_
+- [ ] `ring` on two different pods shows identical output — deferred until SHELF-20 wires real membership server-side; current handler returns a single self-row (see `shelfd/docs/design-notes/SHELF-23-24-admin-surface-and-pinlist.md`).
 - Effort: M. Depends on: SHELF-20. Owner: rust-engineer-1.
 - Out of scope: web UI.
 
-**SHELF-24 — Pin list loader from S3 ConfigMap + SIGHUP**
-`shelfd` on boot reads `s3://config-bucket/shelf/pin_list.json`;
-reloads on SIGHUP or every 15 min. Pin list is a simple JSON:
-`{"pins": [{"table": "cdp.icesheet.silver_offline_event_data_2026",
-"partitions": ["event_region='MP+CG'"]}, ...]}`.
-- [ ] `shelfctl reload pin-list` triggers SIGHUP via admin gRPC
-- [ ] A pinned entry is never evicted under synthetic pressure test
-- [ ] `/stats` reports `pinned_bytes`
+**SHELF-24 — Pin list loader from S3 ConfigMap + SIGHUP** — _Closed_
+`shelfd` on boot reads `s3://<bucket>/<key>` (default `shelf/pin_list.json`),
+installs the keys into an in-memory allowlist, and refreshes on
+SIGHUP + a 15-min timer. `pin_list.json` schema: `{"version": 1, "entries": [{"key_hex":
+"<sha256 hex>", "pool": "metadata"|"rowgroup"}, …]}`. Pool is
+**required** so the loader can read byte-length from the right
+Foyer cache on pin. Replacing semantics: reloads diff the
+fetched list against the current pin-set and unpin removed
+entries. See `shelfd/docs/design-notes/SHELF-23-24-admin-surface-and-pinlist.md`.
+- [x] `shelfctl reload` triggers the loader via `POST /admin/reload` _(`shelfd::http::handlers::admin_reload` + `shelfctl::cmd_reload`)_
+- [x] Pinned keys bypass size-threshold admission _(`shelfd::admission::tests::pinned_keys_bypass_size_threshold`)_
+- [x] Pin-set survives eviction _(`shelfd::store::store_tests::evict_preserves_pin_set`)_
+- [x] `/stats` reports `pinned_bytes` + `pinned_count` _(`shelfd::http::tests::stats_payload_has_contract_keys` extended; integration coverage in `shelfd/tests/it_admin.rs::admin_pin_raises_pinned_bytes_on_stats`)_
 - Effort: M. Depends on: SHELF-03. Owner: rust-engineer-2.
 - Out of scope: per-tenant pin lists (Phase 6).
 

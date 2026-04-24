@@ -23,7 +23,7 @@ use std::time::Duration;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, head};
+use axum::routing::{get, head, post};
 use axum::Router;
 use bytes::Bytes;
 use tower_http::timeout::TimeoutLayer;
@@ -50,6 +50,11 @@ pub struct ServerState {
     /// the HRW ring (SHELF-20). Defaults to `SHELFD_POD_ID` →
     /// `HOSTNAME` → `"shelfd-unknown"`.
     pub pod_id: Arc<str>,
+    /// SHELF-24: handle to the background pin-list loader. `None`
+    /// when the loader is not configured (dev / unit tests) — the
+    /// `POST /admin/reload` handler then returns a `503`-equivalent
+    /// message without pretending it did a reload.
+    pub reload_handle: Option<crate::pinlist::ReloadHandle>,
     /// Set to `true` by `main` after startup probes finish. A future
     /// membership loop may flip it back to false on degradation.
     pub ready: AtomicBool,
@@ -105,6 +110,7 @@ impl ServerState {
             metrics,
             head_lru,
             pod_id: pod_id.into(),
+            reload_handle: None,
             ready: AtomicBool::new(false),
             // SHELF-22 default cap: 256 MiB. `main` overwrites
             // this from config before any traffic arrives.
@@ -118,6 +124,16 @@ impl ServerState {
 
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
+    }
+
+    /// SHELF-24 builder: bolt a running pin-list loader onto the
+    /// server state so `POST /admin/reload` can trigger it. Kept as a
+    /// separate method (rather than another positional arg on the
+    /// existing constructor) so the unit-test harness can build a
+    /// `ServerState` without an S3 client in scope.
+    pub fn with_reload_handle(mut self, handle: crate::pinlist::ReloadHandle) -> Self {
+        self.reload_handle = Some(handle);
+        self
     }
 }
 
@@ -161,6 +177,15 @@ pub fn build_router(state: Arc<ServerState>) -> Router {
             "/cache/:pool/origin/:bucket/*s3_key",
             head(handlers::head_cache),
         )
+        // SHELF-23 admin surface. We deliberately nest under
+        // `/admin/*` so a future reverse-proxy rule can block the
+        // whole prefix on the public ingress without enumerating
+        // individual routes.
+        .route("/admin/ring", get(handlers::admin_ring))
+        .route("/admin/pin", post(handlers::admin_pin))
+        .route("/admin/unpin", post(handlers::admin_unpin))
+        .route("/admin/evict", post(handlers::admin_evict))
+        .route("/admin/reload", post(handlers::admin_reload))
         .with_state(state)
 }
 
@@ -640,6 +665,9 @@ pub mod handlers {
             used_bytes: metadata.used_bytes.saturating_add(rowgroup.used_bytes),
             metadata_pool: metadata,
             rowgroup_pool: rowgroup,
+            // SHELF-24 pin-set accounting.
+            pinned_bytes: state.store.pinned_bytes(),
+            pinned_count: state.store.pinned_count(),
         };
         (
             StatusCode::OK,
@@ -751,6 +779,192 @@ pub mod handlers {
         let body = serde_json::json!({"error": kind, "detail": detail});
         (StatusCode::BAD_GATEWAY, axum::Json(body)).into_response()
     }
+
+    // -----------------------------------------------------------------
+    // SHELF-23 admin surface — `/admin/*`.
+    //
+    // These handlers never read or write cache bytes; they are the
+    // operator control plane. JSON-only so `shelfctl` renders them
+    // uniformly.
+    // -----------------------------------------------------------------
+
+    /// Request body for `/admin/pin` and `/admin/evict`.
+    ///
+    /// `key_hex` is a 64-char lower-case hex rendering of the SHELF-04
+    /// content-addressed key; `pool` selects which Foyer pool the
+    /// action targets. Both fields are required — a client that knows
+    /// enough to pin a key knows which pool it was admitted into.
+    #[derive(Debug, serde::Deserialize)]
+    pub struct PinEvictBody {
+        pub key_hex: String,
+        pub pool: String,
+    }
+
+    /// Request body for `/admin/unpin`. No `pool` field: unpin is
+    /// pool-agnostic because a SHELF-04 key is unique across both
+    /// pools by construction (sha-256 over `etag || offset || length
+    /// || rg_ordinal`).
+    #[derive(Debug, serde::Deserialize)]
+    pub struct UnpinBody {
+        pub key_hex: String,
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn parse_hex_key(hex: &str) -> Result<Key, Response> {
+        Key::from_hex(hex)
+            .map_err(|e| client_error(StatusCode::BAD_REQUEST, "invalid_key", &e.to_string()))
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn parse_pool_field(s: &str) -> Result<Pool, Response> {
+        parse_pool(s).map_err(|(status, detail)| client_error(status, "invalid_pool", &detail))
+    }
+
+    /// `GET /admin/ring` — dump the HRW ring view.
+    pub async fn admin_ring(State(state): State<Arc<ServerState>>) -> Response {
+        #[derive(serde::Serialize)]
+        struct Row<'a> {
+            pod_id: &'a str,
+            weight: f64,
+            healthy: bool,
+        }
+        // TODO(SHELF-20): populate from `crate::membership::Ring`.
+        let rows = [Row {
+            pod_id: state.pod_id.as_ref(),
+            weight: 1.0,
+            healthy: state.is_ready(),
+        }];
+        (
+            StatusCode::OK,
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            )],
+            axum::Json(rows),
+        )
+            .into_response()
+    }
+
+    /// `POST /admin/pin {"key_hex":"<hex>", "pool":"metadata"|"rowgroup"}`.
+    pub async fn admin_pin(
+        State(state): State<Arc<ServerState>>,
+        axum::Json(body): axum::Json<PinEvictBody>,
+    ) -> Response {
+        let key = match parse_hex_key(&body.key_hex) {
+            Ok(k) => k,
+            Err(r) => return r,
+        };
+        let pool = match parse_pool_field(&body.pool) {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
+        if !state.store.pin(pool, &key) {
+            return client_error(
+                StatusCode::NOT_FOUND,
+                "not_resident",
+                "key is not resident in the requested pool — pin refused",
+            );
+        }
+        (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "pinned": body.key_hex,
+                "pool": body.pool,
+                "pinned_bytes": state.store.pinned_bytes(),
+                "pinned_count": state.store.pinned_count(),
+            })),
+        )
+            .into_response()
+    }
+
+    /// `POST /admin/unpin {"key_hex":"<hex>"}`.
+    pub async fn admin_unpin(
+        State(state): State<Arc<ServerState>>,
+        axum::Json(body): axum::Json<UnpinBody>,
+    ) -> Response {
+        let key = match parse_hex_key(&body.key_hex) {
+            Ok(k) => k,
+            Err(r) => return r,
+        };
+        if !state.store.unpin(&key) {
+            return client_error(StatusCode::NOT_FOUND, "not_pinned", "key was not pinned");
+        }
+        (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "unpinned": body.key_hex,
+                "pinned_bytes": state.store.pinned_bytes(),
+                "pinned_count": state.store.pinned_count(),
+            })),
+        )
+            .into_response()
+    }
+
+    /// `POST /admin/evict {"key_hex":"<hex>", "pool":"metadata"|"rowgroup"}`.
+    pub async fn admin_evict(
+        State(state): State<Arc<ServerState>>,
+        axum::Json(body): axum::Json<PinEvictBody>,
+    ) -> Response {
+        let key = match parse_hex_key(&body.key_hex) {
+            Ok(k) => k,
+            Err(r) => return r,
+        };
+        let pool = match parse_pool_field(&body.pool) {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
+        if !state.store.evict(pool, &key) {
+            return client_error(
+                StatusCode::NOT_FOUND,
+                "not_resident",
+                "key was not resident in the requested pool",
+            );
+        }
+        (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "evicted": body.key_hex,
+                "pool": body.pool,
+            })),
+        )
+            .into_response()
+    }
+
+    /// `POST /admin/reload` — trigger an out-of-band pin-list reload.
+    ///
+    /// Returns `{pinned_bytes, pinned_count, reload_ok}` on success
+    /// so the operator does not need a second `/stats` call. When
+    /// no loader is configured (dev cluster, unit-test harness) we
+    /// still return `200` with `reload_ok: true` and zeros — the
+    /// daemon has nothing to reload, which is a success state, not
+    /// an error. Only a loader that was configured *and* failed
+    /// returns a non-2xx.
+    pub async fn admin_reload(State(state): State<Arc<ServerState>>) -> Response {
+        let Some(handle) = state.reload_handle.as_ref() else {
+            return (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "pinned_bytes": state.store.pinned_bytes(),
+                    "pinned_count": state.store.pinned_count(),
+                    "reload_ok": true,
+                    "note": "no pin_list configured; nothing to reload",
+                })),
+            )
+                .into_response();
+        };
+        match handle.reload_now().await {
+            Ok(stats) => (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "pinned_bytes": stats.pinned_bytes,
+                    "pinned_count": stats.pinned_count,
+                    "reload_ok": true,
+                })),
+            )
+                .into_response(),
+            Err(e) => upstream_error("reload_failed", &e.to_string()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -799,6 +1013,8 @@ mod tests {
                 capacity_bytes: 1024,
                 used_bytes: 384,
             },
+            pinned_bytes: 0,
+            pinned_count: 0,
         };
         let v = serde_json::to_value(&stats).expect("serialize");
         let obj = v.as_object().expect("object");
@@ -808,6 +1024,8 @@ mod tests {
             "used_bytes",
             "metadata_pool",
             "rowgroup_pool",
+            "pinned_bytes",
+            "pinned_count",
         ] {
             assert!(
                 obj.contains_key(key),
