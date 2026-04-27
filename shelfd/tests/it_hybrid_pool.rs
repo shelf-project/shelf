@@ -40,6 +40,7 @@ fn hybrid_pools(nvme_dir: std::path::PathBuf, nvme_bytes: u64) -> PoolsConfig {
             dram_bytes: 4 * 1024 * 1024,
             nvme_dir,
             nvme_bytes,
+            eviction_policy: shelfd::config::EvictionPolicy::default(),
         },
     }
 }
@@ -212,6 +213,73 @@ async fn hybrid_pool_survives_store_recreation() {
             payload.as_ref(),
             "on-disk recovery must be byte-identical when it happens"
         );
+    }
+}
+
+/// SHELF-E1b — every advertised `EvictionPolicy` must open the hybrid
+/// pool cleanly. Catches regressions in the Foyer dispatch wired up in
+/// `store::build_hybrid_rowgroup`.
+#[tokio::test]
+async fn hybrid_pool_opens_under_every_eviction_policy() {
+    use shelfd::config::EvictionPolicy;
+    for policy in [
+        EvictionPolicy::Lru,
+        EvictionPolicy::S3Fifo,
+        EvictionPolicy::Lfu,
+        EvictionPolicy::Fifo,
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut pools = hybrid_pools(dir.path().to_path_buf(), 32 * 1024 * 1024);
+        pools.rowgroup.eviction_policy = policy;
+        let store = FoyerStore::open(&pools)
+            .await
+            .unwrap_or_else(|e| panic!("open with {policy:?}: {e:?}"));
+        // Sanity: NVMe capacity is reflected on the store regardless of policy.
+        assert_eq!(store.disk_bytes_capacity(Pool::RowGroup), 32 * 1024 * 1024);
+    }
+}
+
+/// SHELF-E1b — directional regression for the rep-2 NVMe-non-engagement
+/// bug. Under LRU every memory eviction flows through to the NVMe ring,
+/// so a stream of one-shot inserts must eventually push
+/// `disk_bytes_used` above zero. We allow up to 5 s for Foyer's
+/// background flusher because the integration suite already tolerates
+/// async flush jitter elsewhere (`hybrid_pool_survives_store_recreation`).
+#[tokio::test]
+async fn lru_one_shot_inserts_populate_nvme() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // 4 MiB DRAM + 32 MiB NVMe — small enough that ~12 MiB of
+    // unique inserts force evictions out of memory.
+    let mut pools = hybrid_pools(dir.path().to_path_buf(), 32 * 1024 * 1024);
+    pools.rowgroup.eviction_policy = shelfd::config::EvictionPolicy::Lru;
+    let store = FoyerStore::open(&pools).await.expect("open lru");
+
+    // 12 × 1 MiB = 12 MiB of unique payloads. Each key is touched
+    // exactly once, mirroring Metabase's one-shot byte-range pattern
+    // that S3-FIFO filters out before promotion.
+    let payload = Bytes::from(vec![0x5Au8; 1024 * 1024]);
+    for i in 0..12u8 {
+        store
+            .insert(Pool::RowGroup, seed_key(i), payload.clone())
+            .await
+            .expect("insert");
+    }
+
+    // Wait up to 5 s for Foyer's flusher.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if store.disk_bytes_used(Pool::RowGroup) > 0 {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "LRU rowgroup never populated NVMe in 5s; \
+                 disk_bytes_used={} disk_bytes_capacity={}",
+                store.disk_bytes_used(Pool::RowGroup),
+                store.disk_bytes_capacity(Pool::RowGroup),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 

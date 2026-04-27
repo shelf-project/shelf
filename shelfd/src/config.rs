@@ -153,6 +153,48 @@ pub struct MetadataPoolConfig {
     pub dram_bytes: u64,
 }
 
+/// In-memory eviction policy for the row-group pool's DRAM tier.
+///
+/// SHELF-E1b — ADR-0009 originally pinned the hybrid pool to S3-FIFO
+/// for scan resistance. In production we observed that S3-FIFO's
+/// "small queue → main queue → disk" promotion path keeps **one-shot**
+/// reads (Metabase admin dashboards, ad-hoc BI) off NVMe entirely:
+/// items expire from the small queue before they ever earn promotion,
+/// so `shelf_disk_bytes_used` stays at zero indefinitely.
+///
+/// LRU is a workload-agnostic alternative — every memory eviction
+/// flows straight through to the NVMe ring, so disk gets populated
+/// even on one-shot patterns. The trade-off is reduced scan
+/// resistance under bursty `INSERT INTO` rewrites; we accept that
+/// for v0.5 and revisit once SHELF-26 replays produce per-policy
+/// hit-ratio numbers on rep-2's 7-day trace.
+///
+/// `s3_fifo` remains available behind the config flag so operators
+/// can flip back without a code change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvictionPolicy {
+    /// Foyer S3-FIFO — ADR-0009 default. Memory tier holds a small
+    /// probationary queue; only entries re-accessed there are
+    /// promoted to the main queue (and consequently to NVMe).
+    S3Fifo,
+    /// Foyer LRU. Every memory eviction flows through to disk.
+    /// Default for v0.5 onwards (SHELF-E1b).
+    Lru,
+    /// Foyer LFU (W-TinyLFU). Frequency-aware; useful when a small
+    /// hot set dominates.
+    Lfu,
+    /// Foyer FIFO. Insertion-order eviction; cheapest, no promotion
+    /// machinery — used primarily by replay benchmarks.
+    Fifo,
+}
+
+impl Default for EvictionPolicy {
+    fn default() -> Self {
+        Self::Lru
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RowGroupPoolConfig {
@@ -164,6 +206,14 @@ pub struct RowGroupPoolConfig {
     /// NVMe capacity in bytes. `0` disables the hybrid tier and
     /// keeps `rowgroup` DRAM-only — see ADR-0009 and SHELF-18.
     pub nvme_bytes: u64,
+    /// In-memory eviction policy. See [`EvictionPolicy`].
+    ///
+    /// Defaults to [`EvictionPolicy::Lru`] (SHELF-E1b) so freshly
+    /// deployed clusters populate NVMe out of the box. Existing
+    /// YAML without this field continues to parse — `serde(default)`
+    /// fills in the LRU default.
+    #[serde(default)]
+    pub eviction_policy: EvictionPolicy,
 }
 
 impl RowGroupPoolConfig {
@@ -521,6 +571,46 @@ pin_list:
         assert!(matches!(err, crate::Error::Config(_)));
     }
 
+    // SHELF-E1b — eviction policy parsing.
+    //
+    // The pre-E1b on-disk shape (no `eviction_policy:` field) must
+    // continue to parse so existing values files in deployments-repo
+    // don't need a synchronized bump. Default == LRU.
+
+    #[test]
+    fn rowgroup_eviction_policy_defaults_to_lru() {
+        let cfg = Config::from_yaml_str(MINIMAL, None).expect("parse");
+        assert_eq!(cfg.pools.rowgroup.eviction_policy, EvictionPolicy::Lru);
+    }
+
+    #[test]
+    fn rowgroup_eviction_policy_accepts_all_known_variants() {
+        for (yaml_value, expected) in [
+            ("lru", EvictionPolicy::Lru),
+            ("s3_fifo", EvictionPolicy::S3Fifo),
+            ("lfu", EvictionPolicy::Lfu),
+            ("fifo", EvictionPolicy::Fifo),
+        ] {
+            let yaml = MINIMAL.replace(
+                "    nvme_bytes: 0",
+                &format!("    nvme_bytes: 0\n    eviction_policy: {yaml_value}"),
+            );
+            let cfg = Config::from_yaml_str(&yaml, None)
+                .unwrap_or_else(|e| panic!("parse {yaml_value}: {e:?}"));
+            assert_eq!(cfg.pools.rowgroup.eviction_policy, expected);
+        }
+    }
+
+    #[test]
+    fn rowgroup_eviction_policy_rejects_unknown_variant() {
+        let yaml = MINIMAL.replace(
+            "    nvme_bytes: 0",
+            "    nvme_bytes: 0\n    eviction_policy: arc",
+        );
+        let err = Config::from_yaml_str(&yaml, None).unwrap_err();
+        assert!(matches!(err, crate::Error::Config(_)));
+    }
+
     // SHELF-18 — `RowGroupPoolConfig::validate_nvme` unit tests.
     //
     // Path handling is intentionally strict at boot (absolute path,
@@ -535,6 +625,7 @@ pin_list:
             dram_bytes: 1,
             nvme_dir: PathBuf::from(""),
             nvme_bytes: 0,
+            eviction_policy: EvictionPolicy::default(),
         };
         cfg.validate_nvme().expect("zero nvme bytes must be valid");
     }
@@ -545,6 +636,7 @@ pin_list:
             dram_bytes: 1,
             nvme_dir: PathBuf::from(""),
             nvme_bytes: 1,
+            eviction_policy: EvictionPolicy::default(),
         };
         let err = cfg.validate_nvme().unwrap_err();
         assert!(
@@ -558,6 +650,7 @@ pin_list:
             dram_bytes: 1,
             nvme_dir: PathBuf::from("relative/path"),
             nvme_bytes: 1,
+            eviction_policy: EvictionPolicy::default(),
         };
         let err = cfg.validate_nvme().unwrap_err();
         assert!(matches!(&err, crate::Error::Config(m) if m.contains("must be absolute")));
@@ -582,6 +675,7 @@ pin_list:
             dram_bytes: 1,
             nvme_dir: dir.clone(),
             nvme_bytes: 1,
+            eviction_policy: EvictionPolicy::default(),
         };
         cfg.validate_nvme().expect("creatable dir must validate");
         assert!(dir.is_dir(), "validator must create the missing dir");
@@ -606,6 +700,7 @@ pin_list:
             dram_bytes: 1,
             nvme_dir: path.clone(),
             nvme_bytes: 1,
+            eviction_policy: EvictionPolicy::default(),
         };
         let err = cfg.validate_nvme().unwrap_err();
         assert!(matches!(&err, crate::Error::Config(m) if m.contains("not a directory")));

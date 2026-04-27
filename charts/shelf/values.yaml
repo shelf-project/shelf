@@ -15,7 +15,7 @@ replicaCount: 3
 
 image:
   # -- Container registry + repository for the shelfd image.
-  repository: ghcr.io/penpencil-oss/shelf/shelfd
+  repository: ghcr.io/shelf-project/shelfd
   # -- Pull policy. IfNotPresent in prod; Always in dev overlay.
   pullPolicy: IfNotPresent
   # -- Image tag. Empty string => .Chart.AppVersion (0.1.0). Pin explicitly
@@ -92,6 +92,15 @@ priorityClassName: shelf-data-plane
 # (h2 throughput per stream on EKS). [plan §2 E3, §3 Phase 0 exit]
 # ---------------------------------------------------------------------------
 resources:
+  # Sizing rule (memory): pod limit MUST exceed
+  #   cache.pools.metadata.sizeBytes
+  # + cache.pools.rowgroup.dramSizeBytes
+  # + ~10 GiB of headroom for Rust runtime, the S3 connection pool's
+  #   in-flight response buffers, page cache for NVMe writes, and
+  #   tokio task stacks.
+  # Violating this rule causes the kernel OOM-killer to terminate the
+  # pod under load — see post-mortem in
+  #   shelfd/docs/runbooks/2026-04-shelf-2-oom.md.
   requests:
     # [BLUEPRINT §9.1 — "requests: {cpu: 8, memory: 48Gi}"]
     cpu: "8"
@@ -100,7 +109,7 @@ resources:
     # 2× requests is a placeholder to absorb bursty Foyer write batches.
     # [placeholder: phase-0 benchmark TBD — ticket SHELF-18]
     cpu: "16"
-    memory: "56Gi"
+    memory: "64Gi"
 
 # ---------------------------------------------------------------------------
 # Storage — NVMe PVC per pod.
@@ -109,9 +118,11 @@ storage:
   # -- StorageClass. Prefer local-nvme; ebs-gp3-wffc is the fallback.
   # [plan §4 SHELF-18 "local NVMe StorageClass (preferred) or ebs-gp3-wffc (fallback)"]
   storageClassName: local-nvme
-  # -- Disk size per pod. 500 GiB per ADR-0008 / SHELF-18.
-  # [ADR-0008 §Decision — "500 GiB NVMe" for pool.rowgroup]
-  size: 500Gi
+  # -- Disk size per pod. ADR-0008 / SHELF-18 set 500 GiB as the
+  # aspirational size; the deployed PVC on rep-2 is 240 GiB so the
+  # default here matches reality. Bump in your overlay if your node
+  # pool's local NVMe has more capacity.
+  size: 240Gi
   mountPath: /var/lib/shelf
 
 # ---------------------------------------------------------------------------
@@ -120,18 +131,45 @@ storage:
 cache:
   pools:
     metadata:
-      # -- DRAM-only, FrozenHot. Holds metadata.json, manifest lists,
+      # -- DRAM-only, SIEVE. Holds metadata.json, manifest lists,
       # manifests, Parquet footers, page indexes. [ADR-0008 §Decision]
       tier: dram
       policy: FrozenHot
       sizeBytes: 5368709120  # 5 GiB absolute (not a percentage)
     rowgroup:
-      # -- Hybrid DRAM + NVMe, S3-FIFO. Holds row-group byte-ranges.
+      # -- Hybrid DRAM + NVMe. Holds row-group byte-ranges.
       # [ADR-0008 §Decision, ADR-0009]
       tier: hybrid
-      policy: S3FIFO
-      dramSizeBytes: 60129542144  # ~56 GiB; remaining DRAM per pod
-      nvmeSizeBytes: 536870912000 # 500 GiB; matches storage.size
+      # -- In-memory eviction policy for the hybrid pool's DRAM tier.
+      # Allowed: `lru` | `s3_fifo` | `lfu` | `fifo`.
+      #
+      # SHELF-E1b — defaults to LRU because S3-FIFO's "small queue →
+      # main queue → disk" promotion path keeps one-shot reads
+      # (Metabase admin, ad-hoc BI) off NVMe entirely: items expire
+      # from the small queue before earning promotion, so
+      # `shelf_disk_bytes_used` stays at zero indefinitely. LRU
+      # flows every memory eviction through to the disk ring, so the
+      # NVMe tier actually fills under BI workloads.
+      #
+      # ADR-0009 originally pinned this to S3-FIFO for scan
+      # resistance; flip back to `s3_fifo` here when the SHELF-26
+      # replay harness shows a per-policy hit-ratio gain on your
+      # workload.
+      evictionPolicy: lru
+      # `policy` is retained as a human-readable hint for ops
+      # dashboards. Source of truth for shelfd is `evictionPolicy`.
+      policy: LRU
+      # -- DRAM portion of the hybrid pool, in bytes. MUST satisfy
+      # `metadata.sizeBytes + rowgroup.dramSizeBytes <= resources.limits.memory - 10 GiB`.
+      # 14 GiB by default leaves ~13 GiB of headroom on a 32 GiB pod
+      # for connection buffers / Rust runtime / NVMe write-back. The
+      # 60 GiB number that lived here was a Phase-0 sizing aspiration
+      # that did not survive contact with production: rep-2 OOM-killed
+      # 5x in 1h on 2026-04-27 because it tried to take 22 GiB DRAM
+      # inside a 32 GiB pod. See runbook
+      #   shelfd/docs/runbooks/2026-04-shelf-2-oom.md
+      dramSizeBytes: 15032385536   # 14 GiB
+      nvmeSizeBytes: 257698037760  # 240 GiB; matches storage.size
 
   admission:
     # -- Refuse inserts for objects > 1 GiB unless pinned. [ADR-0003]
