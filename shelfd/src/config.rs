@@ -284,10 +284,67 @@ pub struct MembershipConfig {
     /// DNS re-resolution cadence. 5 s per SHELF-20.
     #[serde(with = "humantime_serde", default = "default_dns_refresh")]
     pub dns_refresh: Duration,
+    /// Set to `false` to skip spawning the resolver (e.g. dev / single-pod
+    /// boots, the unit-test harness, or when running shelfd outside K8s
+    /// where the headless DNS name does not resolve). When `false` the
+    /// local `Router` stays empty and `is_local_owner` returns `false`
+    /// for every key — i.e. shelfd serves only what it has, no peer
+    /// rebalancing. Defaults to `true`.
+    #[serde(default = "default_membership_enabled")]
+    pub enabled: bool,
+    /// Control-plane port the resolver scrapes for `/stats`. Defaults to
+    /// `9090` to match `charts/shelf/values.yaml service.adminPort`.
+    #[serde(default = "default_membership_stats_port")]
+    pub stats_port: u16,
+    /// Data-plane port baked into `Member::endpoint` so peers know
+    /// where to send forwards. Defaults to `9092` to match
+    /// `charts/shelf/values.yaml service.s3shimPort`.
+    #[serde(default = "default_membership_data_port")]
+    pub data_port: u16,
+    /// Hard wall-clock deadline for one peer's `/stats` probe. Defaults
+    /// to 1 s — generous against same-AZ p99 (< 5 ms) but small enough
+    /// that one slow peer cannot stall a refresh round.
+    #[serde(with = "humantime_serde", default = "default_stats_timeout")]
+    pub stats_timeout: Duration,
+    /// Time to advertise `draining: true` on `/stats` before the
+    /// process exits. Must be ≥ 2× `dns_refresh` so every peer has
+    /// observed at least one refresh window with our drain bit set.
+    /// Defaults to 15 s.
+    #[serde(with = "humantime_serde", default = "default_drain_grace")]
+    pub drain_grace: Duration,
+    /// Capacity-bytes per HRW weight unit. A pod with 1 GiB of cache
+    /// has weight 1; a pod with 100 GiB has weight 100. Defaults to
+    /// 1 GiB.
+    #[serde(default = "default_weight_unit_bytes")]
+    pub weight_unit_bytes: u64,
 }
 
 fn default_dns_refresh() -> Duration {
     Duration::from_secs(5)
+}
+
+fn default_membership_enabled() -> bool {
+    true
+}
+
+fn default_membership_stats_port() -> u16 {
+    9090
+}
+
+fn default_membership_data_port() -> u16 {
+    9092
+}
+
+fn default_stats_timeout() -> Duration {
+    Duration::from_secs(1)
+}
+
+fn default_drain_grace() -> Duration {
+    Duration::from_secs(15)
+}
+
+fn default_weight_unit_bytes() -> u64 {
+    1024 * 1024 * 1024
 }
 
 /// SHELF-24 pin-list config.

@@ -32,6 +32,7 @@ use tracing::{field, Instrument};
 
 use crate::control::{PoolStats, Stats};
 use crate::head_lru::{HeadLru, HeadMeta};
+use crate::membership::DrainSignal;
 use crate::store::{Key, Pool, ReadOutcome, Store};
 
 /// Shared state the router hands to every handler.
@@ -58,6 +59,11 @@ pub struct ServerState {
     /// Set to `true` by `main` after startup probes finish. A future
     /// membership loop may flip it back to false on degradation.
     pub ready: AtomicBool,
+    /// SHELF-20: lameduck drain bit. Cloned from `main`, which flips
+    /// it on `SIGTERM` before the data plane shuts down. Surfaced on
+    /// `GET /stats` so peers' resolvers drop us from their HRW rings
+    /// during the grace window.
+    pub drain_signal: DrainSignal,
     /// SHELF-22 cap on unbounded `GetObject` — any `GET /:bucket/*key`
     /// without a `Range:` header whose object size exceeds this value
     /// responds `501 NotImplemented` with an S3 XML envelope. Kept as
@@ -112,6 +118,7 @@ impl ServerState {
             pod_id: pod_id.into(),
             reload_handle: None,
             ready: AtomicBool::new(false),
+            drain_signal: DrainSignal::default(),
             // SHELF-22 default cap: 256 MiB. `main` overwrites
             // this from config before any traffic arrives.
             s3_shim_max_full_object_bytes: AtomicU64::new(256 * 1024 * 1024),
@@ -133,6 +140,15 @@ impl ServerState {
     /// `ServerState` without an S3 client in scope.
     pub fn with_reload_handle(mut self, handle: crate::pinlist::ReloadHandle) -> Self {
         self.reload_handle = Some(handle);
+        self
+    }
+
+    /// SHELF-20 builder: install the lameduck `DrainSignal` shared with
+    /// `main`. When omitted, the default `DrainSignal` is permanently
+    /// inactive — fine for tests but production should always wire the
+    /// real one so `/stats` advertises drain on `SIGTERM`.
+    pub fn with_drain_signal(mut self, signal: DrainSignal) -> Self {
+        self.drain_signal = signal;
         self
     }
 }
@@ -685,12 +701,10 @@ pub mod handlers {
             // SHELF-24 pin-set accounting.
             pinned_bytes: state.store.pinned_bytes(),
             pinned_count: state.store.pinned_count(),
-            // SHELF-20 — `false` until `ServerState` carries a
-            // `membership::DrainSignal`. The `Resolver` already
-            // honours this field on inbound peer probes; wiring
-            // the local broadcaster lands alongside the SIGTERM
-            // handler in `main`.
-            draining: false,
+            // SHELF-20 — flipped by `main` on SIGTERM via the shared
+            // `DrainSignal`. Peers' resolvers drop us from their HRW
+            // rings within `dns_refresh` of seeing this transition.
+            draining: state.drain_signal.is_active(),
         };
         (
             StatusCode::OK,
@@ -844,26 +858,72 @@ pub mod handlers {
     }
 
     /// `GET /admin/ring` — dump the HRW ring view.
+    ///
+    /// Shape (stable contract — `shelfctl ring` and Track G dashboards
+    /// depend on it):
+    ///
+    /// ```json
+    /// {
+    ///   "self_id": "shelf-2",
+    ///   "draining": false,
+    ///   "ring_size": 3,
+    ///   "members": [
+    ///     {"pod_id": "shelf-0", "endpoint": "10.0.1.4:9092",
+    ///      "weight": 14, "is_self": false},
+    ///     {"pod_id": "shelf-1", "endpoint": "10.0.1.7:9092",
+    ///      "weight": 14, "is_self": false},
+    ///     {"pod_id": "shelf-2", "endpoint": "10.0.1.9:9092",
+    ///      "weight": 14, "is_self": true}
+    ///   ]
+    /// }
+    /// ```
+    ///
+    /// `members` is the *post-filter* set: peers advertising
+    /// `draining: true` have already been dropped by the local
+    /// `Resolver`, so an operator looking at this endpoint sees what
+    /// HRW will actually consider on the next route call. An empty
+    /// `members` array is a real signal that DNS or `/stats` probes
+    /// are failing — it is **not** the boot-time placeholder.
     pub async fn admin_ring(State(state): State<Arc<ServerState>>) -> Response {
         #[derive(serde::Serialize)]
         struct Row<'a> {
             pod_id: &'a str,
-            weight: f64,
-            healthy: bool,
+            endpoint: &'a str,
+            weight: u32,
+            is_self: bool,
         }
-        // TODO(SHELF-20): populate from `crate::membership::Ring`.
-        let rows = [Row {
-            pod_id: state.pod_id.as_ref(),
-            weight: 1.0,
-            healthy: state.is_ready(),
-        }];
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            self_id: &'a str,
+            draining: bool,
+            ring_size: usize,
+            members: Vec<Row<'a>>,
+        }
+        let view = state.router.view();
+        let members_slice = view.members();
+        let self_id = state.pod_id.as_ref();
+        let rows: Vec<Row<'_>> = members_slice
+            .iter()
+            .map(|m| Row {
+                pod_id: m.id.as_str(),
+                endpoint: m.endpoint.as_str(),
+                weight: m.weight,
+                is_self: m.id == self_id,
+            })
+            .collect();
+        let body = Body {
+            self_id,
+            draining: state.drain_signal.is_active(),
+            ring_size: rows.len(),
+            members: rows,
+        };
         (
             StatusCode::OK,
             [(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/json; charset=utf-8"),
             )],
-            axum::Json(rows),
+            axum::Json(body),
         )
             .into_response()
     }

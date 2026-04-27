@@ -18,6 +18,7 @@ use shelfd::{
     config::Config,
     head_lru::HeadLru,
     http::{self, ServerState},
+    membership::{DrainSignal, Resolver, ResolverConfig},
     metrics,
     origin::S3Origin,
     router::Router,
@@ -80,8 +81,16 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let admission = Arc::new(SizeThresholdPolicy::from_config(&config.admission));
     let head_lru = Arc::new(HeadLru::new(config.head_lru_entries));
 
+    // SHELF-20: shared lameduck bit. Cloned into `ServerState` so
+    // `/stats` can advertise it, and into the SIGTERM handler below
+    // so we can flip it before shutdown.
+    let drain_signal = DrainSignal::new();
+
+    // `shutdown` is the *hard* cancellation token: every long-lived
+    // task selects on it. The signal handler only cancels it AFTER
+    // the lameduck grace window has elapsed (or a second SIGTERM
+    // forces an immediate exit). See `spawn_signal_handler` below.
     let shutdown = CancellationToken::new();
-    spawn_signal_handler(shutdown.clone());
 
     // SHELF-24: construct the pin-list loader BEFORE building
     // `ServerState` so the resulting `ReloadHandle` can be threaded
@@ -127,12 +136,13 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let mut state = ServerState::with_head_lru_and_pod_id(
         store.clone(),
         origin.clone(),
-        router,
+        router.clone(),
         admission,
         metrics,
         head_lru,
         config.node.id.clone(),
-    );
+    )
+    .with_drain_signal(drain_signal.clone());
     if let Some(handle) = reload_handle {
         state = state.with_reload_handle(handle);
     }
@@ -140,6 +150,55 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // Phase-0: mark ready as soon as Foyer + S3 client built. The
     // origin head-bucket probe would go here once SHELF-07 lands.
     state.mark_ready();
+
+    // SHELF-20: spawn the membership resolver AFTER `state.mark_ready`
+    // so peers' first probe sees `ready=true`. The resolver writes
+    // into the same `Arc<Router>` we threaded into `ServerState`, so
+    // `is_local_owner` and `/admin/ring` see live updates with no
+    // extra plumbing.
+    //
+    // Resolver lifecycle is "spawn → drive `Router::update` →
+    // observe shutdown → exit". The signal handler installed below
+    // calls `resolver.begin_drain()` before cancelling `shutdown`,
+    // which makes the next `/stats` probe from peers carry
+    // `draining: true` and rotates this pod out of their rings.
+    let resolver = if config.membership.enabled {
+        let resolver_cfg = ResolverConfig {
+            headless_service: config.membership.headless_service.clone(),
+            stats_port: config.membership.stats_port,
+            data_port: config.membership.data_port,
+            dns_refresh: config.membership.dns_refresh,
+            stats_timeout: config.membership.stats_timeout,
+            self_id: config.node.id.clone(),
+            drain_grace: config.membership.drain_grace,
+            weight_unit_bytes: config.membership.weight_unit_bytes,
+        };
+        tracing::info!(
+            headless = %resolver_cfg.headless_service,
+            stats_port = resolver_cfg.stats_port,
+            data_port = resolver_cfg.data_port,
+            dns_refresh = ?resolver_cfg.dns_refresh,
+            drain_grace = ?resolver_cfg.drain_grace,
+            "spawning membership resolver",
+        );
+        match Resolver::spawn(
+            resolver_cfg,
+            router.clone(),
+            drain_signal.clone(),
+            shutdown.clone(),
+        ) {
+            Ok(r) => Some(Arc::new(r)),
+            Err(e) => {
+                tracing::error!(error = %e, "membership resolver failed to start; shelfd will run with an empty ring");
+                None
+            }
+        }
+    } else {
+        tracing::info!("membership resolver disabled by config (membership.enabled=false)");
+        None
+    };
+
+    spawn_signal_handler(shutdown.clone(), drain_signal.clone(), resolver.clone());
 
     let listen = config.http.listen;
     let request_timeout = config.http.request_timeout;
@@ -168,17 +227,45 @@ async fn run(args: Args) -> anyhow::Result<()> {
             r = shim_fut => r?,
         }
     } else {
-        http::serve(listen, state, request_timeout, shutdown).await?;
+        http::serve(listen, state, request_timeout, shutdown.clone()).await?;
+    }
+
+    // SHELF-20: data plane has stopped accepting new connections.
+    // Wait for the resolver loop to observe shutdown and exit so we
+    // don't race the `JoinHandle` drop in `Resolver::Drop`.
+    if let Some(r) = resolver.as_ref() {
+        if let Err(e) = r.join().await {
+            tracing::warn!(error = %e, "resolver task did not exit cleanly");
+        }
     }
 
     tracing::info!("shelfd shutdown complete");
     Ok(())
 }
 
-/// Cancel `token` on SIGTERM or SIGINT. On non-unix we only listen for
-/// Ctrl-C; shelfd is a linux-only binary in production but this keeps
-/// `cargo run` on macOS dev-machines sane.
-fn spawn_signal_handler(token: CancellationToken) {
+/// SIGTERM / SIGINT handler that orchestrates the SHELF-20 lameduck
+/// shutdown sequence:
+///
+/// 1.  Wait for the first signal.
+/// 2.  Flip [`DrainSignal::begin`] so the next `/stats` probe carries
+///     `draining: true`. Peers' resolvers drop us from their HRW
+///     rings within `dns_refresh + max(p99 stats probe latency)`.
+/// 3.  Block on `Resolver::wait_drained` (sleeps `drain_grace`, or
+///     races against `shutdown` for the hard-kill path).
+/// 4.  Cancel `shutdown`. The data plane stops accepting new
+///     connections; the `Resolver` loop exits.
+/// 5.  If a *second* signal arrives during the grace window, skip
+///     the wait and cancel immediately. This is what an operator
+///     hitting Ctrl-C twice expects.
+///
+/// On non-unix builds we degrade to a single Ctrl-C trigger. There is
+/// no second-signal escape hatch on Windows because the only relevant
+/// production target is linux/amd64+linux/arm64.
+fn spawn_signal_handler(
+    shutdown: CancellationToken,
+    drain: DrainSignal,
+    resolver: Option<Arc<Resolver>>,
+) {
     tokio::spawn(async move {
         #[cfg(unix)]
         {
@@ -201,6 +288,27 @@ fn spawn_signal_handler(token: CancellationToken) {
                 _ = term.recv() => tracing::info!("SIGTERM received"),
                 _ = int.recv()  => tracing::info!("SIGINT received"),
             }
+
+            drain.begin();
+            tracing::info!("drain signal raised; advertising draining=true on /stats");
+
+            if let Some(r) = resolver.as_ref() {
+                let grace = r.config().drain_grace;
+                tracing::info!(?grace, "entering lameduck grace window");
+                tokio::select! {
+                    _ = r.wait_drained(&shutdown) => {
+                        tracing::info!("lameduck grace elapsed");
+                    }
+                    _ = term.recv() => {
+                        tracing::warn!("second SIGTERM received; skipping grace");
+                    }
+                    _ = int.recv() => {
+                        tracing::warn!("second SIGINT received; skipping grace");
+                    }
+                }
+            } else {
+                tracing::info!("no resolver — cancelling shutdown immediately");
+            }
         }
         #[cfg(not(unix))]
         {
@@ -209,7 +317,11 @@ fn spawn_signal_handler(token: CancellationToken) {
                 return;
             }
             tracing::info!("Ctrl-C received");
+            drain.begin();
+            if let Some(r) = resolver.as_ref() {
+                r.wait_drained(&shutdown).await;
+            }
         }
-        token.cancel();
+        shutdown.cancel();
     });
 }

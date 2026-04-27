@@ -1,8 +1,18 @@
 # SHELF-20 — Membership resolver and lameduck drain
 
-**Status:** Implemented in `shelfd/src/membership.rs`. Wiring into
-`main.rs` (SIGTERM handler + `ServerState::drain_signal`) lands in a
-follow-up.
+**Status:** Implemented end-to-end in the Rust daemon.
+- `shelfd/src/membership.rs` — resolver, drain signal, traits.
+- `shelfd/src/main.rs` — `Resolver::spawn` after `state.mark_ready`,
+  drain-aware SIGTERM handler, post-serve `Resolver::join`.
+- `shelfd/src/http.rs` — `ServerState::drain_signal`,
+  `with_drain_signal` builder, `/stats.draining` reads from the live
+  signal, `/admin/ring` renders `Router::view()`.
+- `shelfd/src/config.rs` — `MembershipConfig` knobs (`enabled`,
+  `stats_port`, `data_port`, `stats_timeout`, `drain_grace`,
+  `weight_unit_bytes`) all default-able for backward compat.
+
+Plugin-side rebalance (SHELF-20c) is the remaining piece — see the
+"Follow-ups" section.
 
 ## Problem
 
@@ -131,15 +141,15 @@ de-emphasize very large peers) are not justified by current
 deployment shape (every pod has the same DRAM budget) and would
 make the ring decision harder to reason about.
 
-## What ships in this commit
+## What ships across the SHELF-20 stack
 
 - `shelfd/src/membership.rs`:
   - `ResolverConfig` with sensible defaults (`for_self`).
   - `DrainSignal` (cheap, clonable, idempotent).
   - `Resolver` with `spawn`, `spawn_with`, `begin_drain`,
-    `is_draining`, `wait_drained`, `join`.
+    `is_draining`, `wait_drained`, `join`, `config`.
   - `HostResolver` + `StatsProbe` traits with a production
-    implementation each.
+    implementation each (`TokioResolver`, `ReqwestProbe`).
   - Pure helpers `build_members`, `weight_for_capacity`.
   - 13 unit tests covering the pure helpers, drain signal,
     happy path, draining-peer filtering, all-draining preserves
@@ -149,31 +159,64 @@ make the ring decision harder to reason about.
   - `Stats.draining: bool` (`#[serde(default)]`) so the wire
     payload survives a wave of mixed-version clients.
 - `shelfd/src/http.rs`:
-  - `/stats` handler now emits `draining: false`.
-  - `stats_payload_has_contract_keys` test asserts the new key
-    is part of the wire contract Agent 5 consumes.
+  - `ServerState.drain_signal: DrainSignal` + `with_drain_signal`
+    builder so callers without a Resolver (tests) keep working.
+  - `/stats.draining` is now `state.drain_signal.is_active()`
+    instead of a hard-coded `false`.
+  - `/admin/ring` renders the live `Router::view()` as
+    `{self_id, draining, ring_size, members:[{pod_id, endpoint,
+    weight, is_self}]}`. An empty `members` array means DNS or
+    `/stats` probes are failing — it is **not** a placeholder.
+- `shelfd/src/main.rs`:
+  - Builds `DrainSignal` once, threads clones into `ServerState`
+    and into `Resolver::spawn` (skipped when
+    `membership.enabled = false`).
+  - SIGTERM/SIGINT handler now: (1) flips `DrainSignal::begin`,
+    (2) blocks on `Resolver::wait_drained`, (3) cancels
+    `shutdown`. A second signal during the grace window skips
+    the wait — operator escape hatch.
+  - After `http::serve` returns, `Resolver::join` is awaited so
+    the resolver `JoinHandle` cannot be dropped mid-flight.
+- `shelfd/src/config.rs`:
+  - `MembershipConfig` gains `enabled` (default `true`),
+    `stats_port` (`9090`), `data_port` (`9092`),
+    `stats_timeout` (`1s`), `drain_grace` (`15s`),
+    `weight_unit_bytes` (`1 GiB`). Every new field has
+    `#[serde(default)]` so existing configmaps parse unchanged.
+- `shelfd/tests/it_admin.rs`:
+  - `AdminHarness` exposes the live `Router` and `DrainSignal`
+    so tests can publish ring snapshots and flip drain.
+  - `admin_ring_empty_shape`, `admin_ring_reflects_router_view`,
+    and `stats_reflects_drain_signal` cover the new contract.
 
-## Follow-ups (not in this commit)
+## Follow-ups
 
-1. **`main.rs` wiring (SHELF-20a).** Build `DrainSignal` and a
-   `Router` in `main`, hand both clones to `ServerState` and to
-   `Resolver::spawn`. On `SIGTERM`, call `resolver.begin_drain()`
-   and `resolver.wait_drained(&shutdown).await` before
-   cancelling the shutdown token.
-2. **`/admin/ring` populates from `Router::view()`** instead of
-   the placeholder single-row response in
-   `http::handlers::admin_ring`.
-3. **Plugin-side rebalance (SHELF-20b).** Trino's `s3.endpoint`
-   stops being a single hostname; the plugin polls `/stats` on
-   every Shelf pod and routes by HRW. Until then the deployment
-   stays in 1:1 pinned mode (rep-N → shelf-N).
-4. **Phase 3 hardening:**
+1. **Plugin-side rebalance (SHELF-20c, deferred).** Trino's
+   `s3.endpoint` is still a single hostname per replica, so the
+   1:1 rep-N → shelf-N pinning is preserved end-to-end.
+   Retiring it requires a Java-side change in
+   `clients/trino/src/main/java/io/shelf/...`: poll `/stats`
+   on every Shelf pod, build a local `HashRing` (the golden
+   vectors in `shelfd/tests/fixtures/hrw_golden_vectors.txt`
+   guarantee parity with the Rust `Router`), and route per-key
+   to the HRW owner. Server-side forwarding via `peer.rs`
+   is an alternative if we'd rather keep the plugin thin —
+   call out in the design discussion.
+2. **Phase 3 hardening:**
    - SRV-record resolver for AZ awareness.
    - Chaos-drill test (`benchmarks/chaos/`) that randomly kills
      a pod mid-traffic and asserts client-side error rate
      stays under 0.1% during the rollout.
    - `shelf_membership_refreshes_total{outcome}` metric so
-     ops can spot a stuck resolver.
+     ops can spot a stuck resolver. Wire a `MetricsRecorder`
+     trait into `Resolver` so the daemon can emit it without
+     pulling `prometheus` into `membership.rs`.
+3. **Re-readiness on empty ring.** When `Router::view()` has
+   been empty for `> N` consecutive refreshes, flip
+   `state.ready` back to `false` so `/readyz` fails and the
+   pod gets cycled out. Defer until we have a real metric for
+   the "stuck-empty" condition; today's empty ring is still
+   served as "owner everything locally".
 
 ## Risks / non-decisions
 
