@@ -685,6 +685,12 @@ pub mod handlers {
             // SHELF-24 pin-set accounting.
             pinned_bytes: state.store.pinned_bytes(),
             pinned_count: state.store.pinned_count(),
+            // SHELF-20 — `false` until `ServerState` carries a
+            // `membership::DrainSignal`. The `Resolver` already
+            // honours this field on inbound peer probes; wiring
+            // the local broadcaster lands alongside the SIGTERM
+            // handler in `main`.
+            draining: false,
         };
         (
             StatusCode::OK,
@@ -1036,6 +1042,7 @@ mod tests {
             },
             pinned_bytes: 0,
             pinned_count: 0,
+            draining: false,
         };
         let v = serde_json::to_value(&stats).expect("serialize");
         let obj = v.as_object().expect("object");
@@ -1047,6 +1054,8 @@ mod tests {
             "rowgroup_pool",
             "pinned_bytes",
             "pinned_count",
+            // SHELF-20: peer drain advertisement.
+            "draining",
         ] {
             assert!(
                 obj.contains_key(key),

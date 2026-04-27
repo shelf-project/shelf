@@ -57,6 +57,16 @@ pub struct Stats {
     /// residency.
     #[serde(default)]
     pub pinned_count: usize,
+    /// SHELF-20: this pod is in lameduck mode and should be removed
+    /// from peers' rings on their next refresh. The local data plane
+    /// continues to serve in-flight reads until shutdown completes;
+    /// only **routing** is steered away.
+    ///
+    /// `#[serde(default)]` keeps the `/stats` wire compatible with
+    /// pre-SHELF-20 clients (e.g. `shelfctl stats` from a v0.4 build):
+    /// missing field => `false` => peer is healthy.
+    #[serde(default)]
+    pub draining: bool,
 }
 
 /// Per-pool capacity / usage section of [`Stats`].
