@@ -33,7 +33,7 @@ jobs:
       S3_PREFIX: "${{ vars.MV_CANDIDATES_S3_PREFIX }}"
     steps:
       - name: Checkout shelf tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
         uses: actions/setup-python@v5
