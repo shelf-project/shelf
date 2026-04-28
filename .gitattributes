@@ -1,0 +1,20 @@
+# OSS-publish hygiene: keep penpencil-cluster overlay out of `git archive` tarballs
+infra/penpencil export-ignore
+infra/penpencil/** export-ignore
+
+# Same treatment for the AI-iteration honest-history dirs (per launch playbook §brand)
+agents/out export-ignore
+agents/out/** export-ignore
+docs/rollout-v1 export-ignore
+docs/rollout-v1/** export-ignore
+
+# Common dev artefacts that don't belong in source tarballs
+.github export-ignore
+.github/** export-ignore
+.cursor export-ignore
+.cursor/** export-ignore
+
+# Image assets are binary
+*.png binary
+*.jpg binary
+*.jpeg binary

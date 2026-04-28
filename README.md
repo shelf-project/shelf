@@ -1,5 +1,9 @@
 # Shelf
 
+<p align="center">
+  <img src="docs/brand/shelf-logo.png" alt="Shelf" width="320" />
+</p>
+
 > A row-group-granular, plan-aware, Iceberg-native read cache for Trino. Rust, Apache 2.0, fail-open.
 
 [![CI](https://img.shields.io/badge/CI-pending-lightgrey)](./docs/quickstart/index.md)

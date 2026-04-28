@@ -1,0 +1,82 @@
+name: Bug report
+description: Report a defect in Shelf
+title: "bug: <short summary>"
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please fill in as much of the form as you
+        can — repro steps and version are the two most important fields.
+        For security issues, see SECURITY.md instead of filing a public
+        issue.
+
+  - type: input
+    id: version
+    attributes:
+      label: Shelf version
+      description: |
+        Output of `shelfctl --version`, the daemon image tag, or the chart
+        version.
+      placeholder: "v0.1.0-preview-10 / chart 0.5.0"
+    validations:
+      required: true
+
+  - type: input
+    id: deployment
+    attributes:
+      label: Deployment
+      description: |
+        Helm chart version + daemon image tag, plus the orchestrator
+        (e.g. EKS 1.30, kind, plain Docker).
+      placeholder: "chart 0.5.0, image v0.5.0, EKS 1.30"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A minimal, ordered list of steps. Include any client
+        configuration (Trino session properties, S3 client flags, etc.).
+      placeholder: |
+        1. Deploy chart with values …
+        2. Run query …
+        3. Observe …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include error messages verbatim where possible.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / metrics
+      description: |
+        Relevant `shelfd` logs (with timestamps), client-side errors, or
+        Prometheus metrics. Please redact anything sensitive — do not
+        paste credentials, internal hostnames, or customer data.
+      render: shell
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Anything else that might matter — kernel, container runtime,
+        storage backend, network policy, peer count, etc.
+      placeholder: |
+        Linux 6.6 / containerd 1.7 / 4 replicas / NVMe gp3
