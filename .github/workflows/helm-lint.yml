@@ -103,11 +103,17 @@ jobs:
         # --kube-version is required because Chart.yaml pins
         # kubeVersion: ">=1.27.0-0" and helm's built-in Capabilities
         # default is older than that.
+        # --validate=false on kubectl: the runner has no cluster, so
+        # kubectl would otherwise fan out to localhost:8080 to fetch
+        # the OpenAPI schema and fail the dry-run on connect. We are
+        # only checking that the rendered manifests parse as valid
+        # Kubernetes YAML (schema is enforced separately by helm
+        # template + Chart.yaml's kubeVersion predicate).
         run: |
           helm template shelf charts/shelf \
             --values charts/shelf/ci/lint-values.yaml \
             --kube-version 1.30.0 \
-          | kubectl apply --dry-run=client -f -
+          | kubectl apply --dry-run=client --validate=false -f -
 
   docker-build:
     name: docker build (shelfd)

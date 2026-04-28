@@ -146,10 +146,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Trivy filesystem scan
-        # 0.24.0 was never published; the action's release cadence
-        # jumped from 0.x → v0.x prefixed tags after the supply-chain
-        # migration. Pin to the latest 0.36.0 (Apr 2026 release).
-        uses: aquasecurity/trivy-action@0.36.0
+        # 0.24.0 was never published; the action moved to v-prefixed
+        # tags after the 2025 supply-chain rotation. Pin to the
+        # latest v0.36.0 (Apr 2026 release).
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
