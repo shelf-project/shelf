@@ -1,0 +1,821 @@
+name: release
+
+# Tag-driven release pipeline — SHELF launch playbook §2 (signed-artefact targets).
+#
+# Trigger:
+#   - push to a `v*` tag       — full release (image + chart + binaries +
+#                                 SBOM + provenance + signatures + GH Release)
+#   - workflow_dispatch        — dry-run (everything builds, nothing pushes,
+#                                 no Sigstore writes, no GH Release)
+#
+# What this workflow ships, per playbook:
+#   1. Multi-arch shelfd image  →  ghcr.io/aamir306/shelfd:<tag> (+ :latest on stable)
+#                                  for linux/amd64 + linux/arm64
+#   2. Helm chart (OCI)         →  ghcr.io/aamir306/charts/shelf:<tag>
+#   3. shelfctl static binaries →  linux/{amd64,arm64} (musl), darwin/{amd64,arm64}
+#                                  attached to the GitHub Release
+#   4. CycloneDX SBOM (syft)    →  attached to the image as a cosign attestation
+#                                  AND uploaded as a release asset
+#   5. SLSA v1.0 provenance     →  via slsa-framework/slsa-github-generator
+#   6. cosign keyless sigs      →  image, helm chart, SBOM blob, every binary tarball
+#   7. GitHub Release           →  notes from CHANGELOG.md [Unreleased] section
+#                                  (or auto-changelog fallback when CHANGELOG missing)
+#
+# Auth model — only `GITHUB_TOKEN` and OIDC tokens are used. No PATs, no
+# AWS keys, no long-lived secrets:
+#   - GHCR push  →  GITHUB_TOKEN with `packages: write`
+#   - Cosign     →  Sigstore Fulcio + Rekor via `id-token: write` (OIDC)
+#   - SLSA       →  same OIDC token
+#
+# Operator-facing release procedure: see RELEASING.md (shipped under the
+# OSS-hygiene branch). The workflow_dispatch trigger below lets a
+# maintainer rehearse the pipeline against any branch without cutting a
+# tag — invoke via `gh workflow run release.yml -f tag=v1.0.0-rc.0`.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name to simulate (e.g. v1.0.0-rc.0). Build/sign artefacts but do NOT push to GHCR or create a GitHub Release."
+        required: true
+        default: "v0.0.0-dryrun"
+
+permissions:
+  contents: read
+
+concurrency:
+  # One release per tag at a time. We deliberately do NOT cancel-in-progress
+  # — half-published artefacts in Rekor / GHCR would be worse than waiting.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ghcr.io/aamir306/shelfd
+  CHART_OCI_REPO: ghcr.io/aamir306/charts
+  REGISTRY: ghcr.io
+  COSIGN_VERSION: v2.4.1
+  SYFT_VERSION: v1.18.1
+  HELM_VERSION: v3.16.2
+
+jobs:
+  # ===================================================================
+  # 0. Preflight
+  # ===================================================================
+  # Resolves the effective release tag (push.ref vs workflow_dispatch.inputs)
+  # and decides whether this run actually publishes.
+  #
+  # Idempotency guard: if a manifest already exists at the target tag,
+  # we abort instead of double-publishing. GHCR retains immutable digests
+  # but accepts tag overwrites silently otherwise — the guard turns that
+  # into a hard fail.
+  # ===================================================================
+  preflight:
+    name: preflight
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      is_prerelease: ${{ steps.resolve.outputs.is_prerelease }}
+      is_dryrun: ${{ steps.resolve.outputs.is_dryrun }}
+      should_publish: ${{ steps.resolve.outputs.should_publish }}
+      shelfctl_present: ${{ steps.shelfctl.outputs.present }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Strip penpencil-cluster overlay from publish surface
+        run: |
+          set -euo pipefail
+          if [ -d "infra/penpencil" ]; then
+            git rm -rf --cached infra/penpencil/
+            rm -rf infra/penpencil/
+          fi
+          # Sanity check: zero penpencil identifiers anywhere in the publish tree
+          if rg -q -e 'penpencil' -e 'pw-data-cdp' -e '539436019547' -e 'alluxio.svc.cluster.local' \
+                  --glob '!agents/**' --glob '!docs/rollout-v1/**' --glob '!.git/**' .; then
+            echo "::error::Penpencil identifier leaked into publish surface — aborting release"
+            rg -n -e 'penpencil' -e 'pw-data-cdp' -e '539436019547' -e 'alluxio.svc.cluster.local' \
+               --glob '!agents/**' --glob '!docs/rollout-v1/**' --glob '!.git/**' .
+            exit 1
+          fi
+          echo "::notice::Publish surface clean of penpencil identifiers"
+
+      - name: Resolve release tag + flags
+        id: resolve
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TAG="${INPUT_TAG}"
+            DRYRUN=true
+            PUBLISH=false
+          else
+            TAG="${GITHUB_REF_NAME}"
+            DRYRUN=false
+            PUBLISH=true
+          fi
+
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?(\+[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::Tag '${TAG}' is not semver (expected vMAJOR.MINOR.PATCH[-PRE][+BUILD])."
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          if [[ "${VERSION}" == *-* ]]; then
+            PRERELEASE=true
+          else
+            PRERELEASE=false
+          fi
+
+          {
+            echo "tag=${TAG}"
+            echo "version=${VERSION}"
+            echo "is_prerelease=${PRERELEASE}"
+            echo "is_dryrun=${DRYRUN}"
+            echo "should_publish=${PUBLISH}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "### Release preflight"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Tag | \`${TAG}\` |"
+            echo "| Version | \`${VERSION}\` |"
+            echo "| Prerelease | \`${PRERELEASE}\` |"
+            echo "| Dry-run | \`${DRYRUN}\` |"
+            echo "| Publish | \`${PUBLISH}\` |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Idempotency guard — refuse to overwrite an existing tag
+        if: steps.resolve.outputs.should_publish == 'true'
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # `docker buildx imagetools inspect` exits non-zero when the
+          # tag is missing — that is the happy path. Exit code 0 means
+          # we would clobber a published release.
+          if docker buildx imagetools inspect "${IMAGE_NAME}:${TAG}" >/dev/null 2>&1; then
+            echo "::error::${IMAGE_NAME}:${TAG} already exists — refusing to overwrite. Bump the tag (semver) and retry."
+            exit 1
+          fi
+          echo "No existing manifest at ${IMAGE_NAME}:${TAG} — proceeding."
+
+      - name: Detect shelfctl crate
+        id: shelfctl
+        run: |
+          if [[ -f shelfctl/Cargo.toml ]]; then
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "present=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::shelfctl/Cargo.toml not found — binaries job will be skipped."
+          fi
+
+  # ===================================================================
+  # 1. Multi-arch container image (linux/amd64 + linux/arm64)
+  # ===================================================================
+  # Buildx + QEMU does cross-arch in a single job. We pin to the
+  # repo Dockerfile (multi-stage, distroless runtime) so the size gate
+  # already enforced in helm-lint.yml carries over.
+  #
+  # Output `digest` is consumed by downstream jobs (cosign sign, SBOM
+  # attest, SLSA provenance) so they all reference the same immutable
+  # image by sha256 — never by tag.
+  # ===================================================================
+  build-image:
+    name: build + push image
+    needs: preflight
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image: ${{ env.IMAGE_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: needs.preflight.outputs.should_publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          IS_PRERELEASE: ${{ needs.preflight.outputs.is_prerelease }}
+        run: |
+          set -euo pipefail
+          TAGS="${IMAGE_NAME}:${TAG}"
+          # `:latest` only floats on stable releases. Prereleases get
+          # the explicit tag and nothing else.
+          if [[ "${IS_PRERELEASE}" == "false" ]]; then
+            TAGS="${TAGS},${IMAGE_NAME}:latest"
+          fi
+          echo "tags=${TAGS}" >> "${GITHUB_OUTPUT}"
+          echo "Image tags: ${TAGS}"
+
+      - name: Build (and push when not dry-run)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: shelfd/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.tags.outputs.tags }}
+          push: ${{ needs.preflight.outputs.should_publish == 'true' }}
+          provenance: true
+          sbom: false  # we generate our own CycloneDX SBOM via syft below
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.preflight.outputs.version }}
+            org.opencontainers.image.created=${{ github.event.repository.updated_at }}
+
+      - name: Image digest
+        run: echo "Image digest = ${{ steps.build.outputs.digest }}"
+
+  # ===================================================================
+  # 2. Cosign keyless signature on the image (Sigstore Fulcio + Rekor)
+  # ===================================================================
+  # Skipped on dry-run because keyless signing writes to the public
+  # Rekor transparency log — there is no "test mode" for that.
+  # ===================================================================
+  sign-image:
+    name: cosign sign image
+    needs: [preflight, build-image]
+    if: needs.preflight.outputs.should_publish == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign image (keyless, OIDC)
+        env:
+          DIGEST: ${{ needs.build-image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          REF="${IMAGE_NAME}@${DIGEST}"
+          # `--yes` is required in non-TTY contexts (CI). The OIDC token
+          # comes from id-token: write above; cosign auto-discovers it.
+          cosign sign --yes "${REF}"
+          echo "Signed ${REF}"
+
+  # ===================================================================
+  # 3. SBOM (CycloneDX JSON) + cosign attest
+  # ===================================================================
+  # syft reads the published image (or the locally-loaded one in dry-run)
+  # and emits CycloneDX. We then `cosign attest` it as a SBOM predicate
+  # so consumers can verify-and-fetch via `cosign verify-attestation`.
+  # ===================================================================
+  sbom-image:
+    name: SBOM + attest
+    needs: [preflight, build-image]
+    if: needs.preflight.outputs.should_publish == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      sbom_path: ${{ steps.gen.outputs.sbom_path }}
+    steps:
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+        with:
+          syft-version: ${{ env.SYFT_VERSION }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate CycloneDX SBOM
+        id: gen
+        env:
+          DIGEST: ${{ needs.build-image.outputs.digest }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          OUT="shelfd-sbom-${TAG}.cyclonedx.json"
+          syft "${IMAGE_NAME}@${DIGEST}" -o cyclonedx-json="${OUT}"
+          echo "sbom_path=${OUT}" >> "${GITHUB_OUTPUT}"
+          ls -la "${OUT}"
+
+      - name: Upload SBOM artefact (for the GH Release job to attach)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: ${{ steps.gen.outputs.sbom_path }}
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Attest SBOM to the image (cosign attest --type cyclonedx)
+        env:
+          DIGEST: ${{ needs.build-image.outputs.digest }}
+          SBOM: ${{ steps.gen.outputs.sbom_path }}
+        run: |
+          set -euo pipefail
+          cosign attest --yes \
+            --predicate "${SBOM}" \
+            --type cyclonedx \
+            "${IMAGE_NAME}@${DIGEST}"
+
+      - name: Sign the SBOM blob itself (so consumers can verify the file)
+        env:
+          SBOM: ${{ steps.gen.outputs.sbom_path }}
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --output-signature "${SBOM}.sig" \
+            --output-certificate "${SBOM}.pem" \
+            "${SBOM}"
+
+      - name: Upload SBOM signature + cert
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-sig
+          path: |
+            ${{ steps.gen.outputs.sbom_path }}.sig
+            ${{ steps.gen.outputs.sbom_path }}.pem
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===================================================================
+  # 4. SLSA v1.0 (level 3) provenance for the container image
+  # ===================================================================
+  # Reusable workflow from slsa-framework/slsa-github-generator. It
+  # generates an in-toto provenance attestation and pushes it to the
+  # registry alongside the image as a cosign attestation. The official
+  # entry point for container images is `generator_container_slsa3.yml`.
+  # ===================================================================
+  provenance-image:
+    name: SLSA provenance (image)
+    needs: [preflight, build-image]
+    if: needs.preflight.outputs.should_publish == 'true'
+    permissions:
+      actions: read
+      id-token: write
+      packages: write
+      contents: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
+    with:
+      image: ghcr.io/aamir306/shelfd
+      digest: ${{ needs.build-image.outputs.digest }}
+      registry-username: ${{ github.actor }}
+    secrets:
+      registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+  # ===================================================================
+  # 5. Helm chart — package + push to OCI + cosign sign
+  # ===================================================================
+  helm-publish:
+    name: helm package + push (OCI) + sign
+    needs: preflight
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Helm lint (strict, with CI values)
+        run: |
+          helm lint charts/shelf \
+            --values charts/shelf/ci/lint-values.yaml \
+            --strict
+
+      - name: Package chart
+        id: pkg
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p .release
+          # --version + --app-version pin both the chart semver and the
+          # container appVersion to the release tag so users get a
+          # coherent (chart, image) pair.
+          helm package charts/shelf \
+            --version "${VERSION}" \
+            --app-version "${VERSION}" \
+            --destination .release
+          PKG=$(ls .release/shelf-*.tgz | head -1)
+          echo "pkg=${PKG}" >> "${GITHUB_OUTPUT}"
+          ls -la .release
+
+      - name: Log in to GHCR (helm registry)
+        if: needs.preflight.outputs.should_publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "${GH_TOKEN}" | helm registry login ${{ env.REGISTRY }} \
+            --username "${{ github.actor }}" \
+            --password-stdin
+
+      - name: Push chart to OCI registry
+        id: push
+        if: needs.preflight.outputs.should_publish == 'true'
+        env:
+          PKG: ${{ steps.pkg.outputs.pkg }}
+        run: |
+          set -euo pipefail
+          # `helm push` emits the OCI digest on stderr like:
+          #   Digest: sha256:abc...
+          # We capture both stdout+stderr to extract it for cosign.
+          OUT=$(helm push "${PKG}" "oci://${CHART_OCI_REPO}" 2>&1 | tee /dev/stderr)
+          DIGEST=$(echo "${OUT}" | awk -F': ' '/^Digest:/ {print $2}' | head -1)
+          if [[ -z "${DIGEST}" ]]; then
+            echo "::error::could not parse Digest from helm push output"
+            exit 1
+          fi
+          echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
+          echo "Chart digest = ${DIGEST}"
+
+      - name: Cosign sign chart artefact
+        if: needs.preflight.outputs.should_publish == 'true'
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${CHART_OCI_REPO}/shelf@${DIGEST}"
+
+      - name: Upload chart tarball as workflow artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: ${{ steps.pkg.outputs.pkg }}
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===================================================================
+  # 6. shelfctl static binaries (matrix)
+  # ===================================================================
+  # cross-rs for linux musl (truly static), native runners for macOS.
+  # `continue-on-error` per matrix slot so a single platform failure
+  # doesn't kill the whole release — note in summary, attach what built.
+  # ===================================================================
+  shelfctl:
+    name: shelfctl ${{ matrix.target }}
+    needs: preflight
+    if: needs.preflight.outputs.shelfctl_present == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    continue-on-error: true
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-22.04
+            cross: true
+            os: linux
+            arch: amd64
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-22.04
+            cross: true
+            os: linux
+            arch: arm64
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            cross: false
+            os: darwin
+            arch: amd64
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            cross: false
+            os: darwin
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross == true
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Build (cross)
+        if: matrix.cross == true
+        run: cross build --release --bin shelfctl --target ${{ matrix.target }} --locked
+
+      - name: Build (native)
+        if: matrix.cross == false
+        run: cargo build --release --bin shelfctl --target ${{ matrix.target }} --locked
+
+      - name: Strip binary
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/shelfctl"
+          if [[ "${{ matrix.os }}" == "darwin" ]]; then
+            strip "${BIN}" || true
+          else
+            # llvm-strip is bundled with rust; falls back to system strip.
+            strip "${BIN}" || llvm-strip "${BIN}" || true
+          fi
+          ls -la "${BIN}"
+
+      - name: Tarball
+        id: pkg
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          NAME="shelfctl-${TAG}-${{ matrix.os }}-${{ matrix.arch }}"
+          STAGE="dist/${NAME}"
+          mkdir -p "${STAGE}"
+          cp "target/${{ matrix.target }}/release/shelfctl" "${STAGE}/shelfctl"
+          cp LICENSE NOTICE "${STAGE}/" 2>/dev/null || true
+          cp README.md "${STAGE}/" 2>/dev/null || true
+          tar -czf "dist/${NAME}.tar.gz" -C dist "${NAME}"
+          (cd dist && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+          echo "tarball=dist/${NAME}.tar.gz" >> "${GITHUB_OUTPUT}"
+          echo "checksum=dist/${NAME}.tar.gz.sha256" >> "${GITHUB_OUTPUT}"
+          ls -la dist
+
+      - name: Install cosign
+        if: needs.preflight.outputs.should_publish == 'true'
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Sign tarball
+        if: needs.preflight.outputs.should_publish == 'true'
+        env:
+          TARBALL: ${{ steps.pkg.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --output-signature "${TARBALL}.sig" \
+            --output-certificate "${TARBALL}.pem" \
+            "${TARBALL}"
+
+      - name: Upload artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: shelfctl-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            ${{ steps.pkg.outputs.tarball }}
+            ${{ steps.pkg.outputs.checksum }}
+            ${{ steps.pkg.outputs.tarball }}.sig
+            ${{ steps.pkg.outputs.tarball }}.pem
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ===================================================================
+  # 7. GitHub Release — gather every artefact, publish notes, mark
+  #    prereleases appropriately. Notes come from CHANGELOG.md
+  #    [Unreleased] section if present, else fall back to autogenerated.
+  # ===================================================================
+  github-release:
+    name: GitHub Release
+    needs: [preflight, build-image, sign-image, sbom-image, helm-publish, shelfctl]
+    # `shelfctl` is allowed to skip (when crate absent) or partially fail;
+    # release should still cut. Use `always()` and gate on the must-have
+    # jobs explicitly.
+    if: |
+      always()
+      && needs.preflight.outputs.should_publish == 'true'
+      && needs.build-image.result == 'success'
+      && needs.sign-image.result == 'success'
+      && needs.sbom-image.result == 'success'
+      && needs.helm-publish.result == 'success'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artefacts to release/
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          # actions/download-artifact lays out one folder per upload —
+          # flatten everything into release/ for gh release upload.
+          find dist -type f \( \
+            -name '*.tar.gz' -o \
+            -name '*.tar.gz.sha256' -o \
+            -name '*.sig' -o \
+            -name '*.pem' -o \
+            -name '*.tgz' -o \
+            -name 'shelfd-sbom-*.cyclonedx.json' \
+          \) -exec cp -v {} release/ \;
+          ls -la release
+
+      - name: Build release notes
+        id: notes
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          DIGEST: ${{ needs.build-image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          NOTES_FILE="release/notes.md"
+          {
+            echo "## Shelf ${TAG}"
+            echo ""
+            echo "### Artefacts"
+            echo ""
+            echo "- **Container image:** \`${IMAGE_NAME}:${TAG}\` (\`${DIGEST}\`)"
+            echo "  - linux/amd64, linux/arm64"
+            echo "- **Helm chart:** \`oci://${CHART_OCI_REPO}/shelf:${VERSION}\`"
+            echo "- **shelfctl binaries:** linux/{amd64,arm64} (musl, static), darwin/{amd64,arm64}"
+            echo "- **SBOM (CycloneDX):** attached as cosign attestation + release asset"
+            echo "- **SLSA v1.0 provenance:** attached as cosign attestation"
+            echo ""
+            echo "### Verification"
+            echo ""
+            echo "\`\`\`bash"
+            echo "# Image signature"
+            echo "cosign verify ${IMAGE_NAME}:${TAG} \\"
+            echo "  --certificate-identity-regexp 'https://github.com/${{ github.repository }}/' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo ""
+            echo "# SBOM attestation"
+            echo "cosign verify-attestation ${IMAGE_NAME}:${TAG} \\"
+            echo "  --type cyclonedx \\"
+            echo "  --certificate-identity-regexp 'https://github.com/${{ github.repository }}/' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo "\`\`\`"
+            echo ""
+            echo "### Changes"
+            echo ""
+            if [[ -f CHANGELOG.md ]]; then
+              # Extract the [Unreleased] section if it exists; otherwise dump
+              # everything between the first two H2 headings.
+              awk '/^## \[Unreleased\]/{flag=1; next} /^## /{flag=0} flag' CHANGELOG.md \
+                | sed '/^[[:space:]]*$/N;/\n[[:space:]]*$/D' \
+                || echo "_See commit history._"
+            else
+              echo "_CHANGELOG.md not yet present in this branch — see commit history._"
+            fi
+          } > "${NOTES_FILE}"
+          echo "notes_file=${NOTES_FILE}" >> "${GITHUB_OUTPUT}"
+          cat "${NOTES_FILE}"
+
+      - name: Create GitHub Release + upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          IS_PRERELEASE: ${{ needs.preflight.outputs.is_prerelease }}
+          NOTES: ${{ steps.notes.outputs.notes_file }}
+        run: |
+          set -euo pipefail
+          PRERELEASE_FLAG=""
+          if [[ "${IS_PRERELEASE}" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          # Idempotency: if `gh release view ${TAG}` succeeds, this run
+          # is a re-attempt — upload missing assets with --clobber rather
+          # than failing.
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists — uploading assets with --clobber."
+            gh release upload "${TAG}" release/* --clobber
+          else
+            gh release create "${TAG}" \
+              --title "Shelf ${TAG}" \
+              --notes-file "${NOTES}" \
+              ${PRERELEASE_FLAG} \
+              release/*
+          fi
+
+  # ===================================================================
+  # 8. Aggregator — single status check for branch protection / humans
+  # ===================================================================
+  release-gate:
+    name: release gate
+    runs-on: ubuntu-22.04
+    if: always()
+    needs:
+      - preflight
+      - build-image
+      - sign-image
+      - sbom-image
+      - provenance-image
+      - helm-publish
+      - shelfctl
+      - github-release
+    steps:
+      - name: Summarize
+        env:
+          DRY: ${{ needs.preflight.outputs.is_dryrun }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### release pipeline result"
+            echo ""
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            echo "| preflight        | ${{ needs.preflight.result }} |"
+            echo "| build-image      | ${{ needs.build-image.result }} |"
+            echo "| sign-image       | ${{ needs.sign-image.result }} |"
+            echo "| sbom-image       | ${{ needs.sbom-image.result }} |"
+            echo "| provenance-image | ${{ needs.provenance-image.result }} |"
+            echo "| helm-publish     | ${{ needs.helm-publish.result }} |"
+            echo "| shelfctl         | ${{ needs.shelfctl.result }} |"
+            echo "| github-release   | ${{ needs.github-release.result }} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          # Dry-run: only the build/package lanes run. Other jobs are
+          # skipped, which is success-shaped.
+          # Real release: all must-have jobs must be success.
+          if [[ "${DRY}" == "true" ]]; then
+            for r in "${{ needs.preflight.result }}" "${{ needs.build-image.result }}" "${{ needs.helm-publish.result }}"; do
+              if [[ "$r" != "success" ]]; then
+                echo "::error::dry-run lane failed: ${r}"
+                exit 1
+              fi
+            done
+            echo "Dry-run lanes green."
+            exit 0
+          fi
+
+          for r in \
+            "${{ needs.preflight.result }}" \
+            "${{ needs.build-image.result }}" \
+            "${{ needs.sign-image.result }}" \
+            "${{ needs.sbom-image.result }}" \
+            "${{ needs.provenance-image.result }}" \
+            "${{ needs.helm-publish.result }}" \
+            "${{ needs.github-release.result }}"; do
+            if [[ "$r" != "success" ]]; then
+              echo "::error::release lane failed: ${r}"
+              exit 1
+            fi
+          done
+          echo "All required release lanes green."
