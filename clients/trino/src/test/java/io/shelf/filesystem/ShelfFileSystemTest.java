@@ -63,6 +63,26 @@ class ShelfFileSystemTest
     }
 
     @Test
+    void poolForRoutesIcebergMetadataSurfaceToMetadataPool()
+    {
+        // Track D1 — Puffin stats + position/equality deletes all
+        // belong in the DRAM-only metadata pool (BLUEPRINT §6.1b).
+        assertThat(ShelfFileSystem.poolFor(Location.of("s3://b/a/t-uuid.stats.puffin"))).isEqualTo(Pool.METADATA);
+        assertThat(ShelfFileSystem.poolFor(Location.of("s3://b/a/ndv.puffin"))).isEqualTo(Pool.METADATA);
+        assertThat(ShelfFileSystem.poolFor(Location.of("s3://b/a/ndv.stats"))).isEqualTo(Pool.METADATA);
+        assertThat(ShelfFileSystem.poolFor(Location.of("s3://b/a/00001-pos-deletes.parquet"))).isEqualTo(Pool.METADATA);
+        assertThat(ShelfFileSystem.poolFor(Location.of("s3://b/a/00001-positions.parquet"))).isEqualTo(Pool.METADATA);
+        assertThat(ShelfFileSystem.poolFor(Location.of("s3://b/a/00001-equality-deletes.parquet"))).isEqualTo(Pool.METADATA);
+        assertThat(ShelfFileSystem.poolFor(Location.of("s3://b/a/00001-equality.parquet"))).isEqualTo(Pool.METADATA);
+        assertThat(ShelfFileSystem.poolFor(Location.of("s3://b/a/deletes/foo.parquet"))).isEqualTo(Pool.METADATA);
+        assertThat(ShelfFileSystem.poolFor(Location.of("s3://b/a/part-00001-deletes-x.parquet"))).isEqualTo(Pool.METADATA);
+
+        // Regression guard: regular data parquet still rowgroup.
+        assertThat(ShelfFileSystem.poolFor(Location.of("s3://b/a/part-0.parquet"))).isEqualTo(Pool.ROWGROUP);
+        assertThat(ShelfFileSystem.poolFor(Location.of("s3://b/a/data/00001.parquet"))).isEqualTo(Pool.ROWGROUP);
+    }
+
+    @Test
     void writeOperationsDelegateVerbatim()
             throws IOException
     {

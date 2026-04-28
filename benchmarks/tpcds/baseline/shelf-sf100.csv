@@ -1,0 +1,6 @@
+engine,sf,query_id,phase,status,elapsed_ms,bytes_scanned,planning_ms,timestamp
+# F4 — baseline for the tag-time regression gate.
+# Populate after the first green SF100 run lands on `main`; until
+# then the regression gate publishes a warning ("no baseline, run
+# produced") instead of failing. Keep baseline and runner.py output
+# schema in lockstep.

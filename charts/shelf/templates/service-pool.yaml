@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Service
+metadata:
+  # Non-headless ClusterIP service for external clients (Trino).
+  #
+  # SHELF-22 — clients should NOT pin to a specific pod ordinal
+  # (`shelf-N.<headless>.svc:9092`). They target this single
+  # cluster-IP, kube-proxy load-balances across all Ready shelf pods,
+  # and a single pod restart is invisible to clients (the endpoint is
+  # removed when readiness fails, ~1/N keys take a one-shot S3 round-
+  # trip until the new pod re-warms).
+  #
+  # The existing headless `shelf` Service (clusterIP: None) keeps its
+  # role: per-pod DNS for SHELF-20 internal membership / shelfctl /
+  # debug. This Service exists ONLY for the s3shim port that external
+  # clients actually call.
+  name: {{ include "shelf.fullname" . }}-pool
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shelf.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "shelf.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: s3shim
+      port: {{ .Values.service.s3shimPort }}
+      targetPort: s3shim
+      protocol: TCP
+  internalTrafficPolicy: Cluster

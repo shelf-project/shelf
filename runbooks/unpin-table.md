@@ -22,7 +22,7 @@ cause a brief re-warm.
 
 ```bash
 # 1. What is currently pinned?
-aws s3 cp s3://penpencil-shelf-prod-config/pin_list.json - | jq '.pins[].table'
+aws s3 cp s3://example-shelf-prod-config/pin_list.json - | jq '.pins[].table'
 
 # 2. How large is the entry we'd remove?
 kubectl -n shelf exec shelf-0 -- shelfctl stats --pin cdp.icesheet.silver_offline_event_data_2026

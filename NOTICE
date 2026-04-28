@@ -1,8 +1,10 @@
 Shelf
 Copyright 2026 The Shelf Authors.
 
-This product includes software developed at Penpencil and contributed
-to the Shelf open-source project.
+This product was originally developed against an internal Trino-on-EKS
+deployment (see docs/cluster-handoff.md for the operational context the
+project was hardened against) and contributed to the Shelf open-source
+project.
 
 This product includes software from the following third-party projects:
 

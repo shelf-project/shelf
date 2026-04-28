@@ -195,6 +195,8 @@ fn singleflight_emits_leader_and_follower_events() {
                 dram_bytes: 1 << 20,
                 nvme_dir: PathBuf::from("/tmp/shelfd-it-trace-unused"),
                 nvme_bytes: 0,
+                eviction_policy: shelfd::config::EvictionPolicy::default(),
+                disk_cache: shelfd::config::RowGroupDiskCacheConfig::default(),
             },
         };
         let store = Arc::new(FoyerStore::open(&pools).await.expect("open"));

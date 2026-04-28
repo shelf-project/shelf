@@ -1,9 +1,9 @@
 ---
 # Front matter (machine-readable; mirrored in docs/security.md on launch)
 policy_version: 0.1-scaffold
-contact_channel: security@shelf.invalid      # TBD — replaced at OSS launch (Phase 7)
+contact_channel: security@shelf-project.dev
 pgp_fingerprint: TBD-PGP-FINGERPRINT-PLACEHOLDER  # replaced on first rotation
-disclosure_policy_url: https://github.com/penpencil-oss/shelf/blob/main/SECURITY.md
+disclosure_policy_url: https://github.com/shelf-project/shelf/blob/main/SECURITY.md
 response_sla:
   acknowledge: 48h
   triage: 5 business days
@@ -45,13 +45,17 @@ Slack. Use one of the channels below.
 
 ### 1.1 Preferred — email + PGP
 
-Send to **`security@shelf.invalid`** (TBD — will be replaced at OSS
-launch). Encrypt sensitive findings with our PGP key:
+Send to **`security@shelf-project.dev`**. Encrypt sensitive findings
+with our PGP key:
 
 ```
 Fingerprint : TBD-PGP-FINGERPRINT-PLACEHOLDER
-Key URL     : https://shelf.invalid/.well-known/shelf-security.asc  (TBD)
+Key URL     : https://shelf-project.dev/.well-known/shelf-security.asc  (TBD)
 ```
+
+Or open a
+[private vulnerability report on GitHub](https://github.com/shelf-project/shelf/security/advisories/new)
+— routed to the same rota.
 
 Include, to the extent you can:
 
@@ -170,7 +174,7 @@ None. This file is maintained as advisories are published.
 
 The canonical list lives on GitHub once the repo is public:
 
-- https://github.com/penpencil-oss/shelf/security/advisories (TBD)
+- https://github.com/shelf-project/shelf/security/advisories (TBD)
 
 ---
 

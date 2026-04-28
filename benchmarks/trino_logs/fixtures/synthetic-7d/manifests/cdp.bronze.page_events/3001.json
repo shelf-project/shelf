@@ -1,0 +1,38 @@
+[
+  {
+    "path": "page_events__2026-04-16.parquet",
+    "file_size_in_bytes": 2359,
+    "partition": {
+      "event_date": "2026-04-16"
+    },
+    "record_count": 200,
+    "etag": "2608ca4b188aba329bd96542b4f4919c"
+  },
+  {
+    "path": "page_events__2026-04-17.parquet",
+    "file_size_in_bytes": 2359,
+    "partition": {
+      "event_date": "2026-04-17"
+    },
+    "record_count": 200,
+    "etag": "2608ca4b188aba329bd96542b4f4919c"
+  },
+  {
+    "path": "page_events__2026-04-18.parquet",
+    "file_size_in_bytes": 2359,
+    "partition": {
+      "event_date": "2026-04-18"
+    },
+    "record_count": 200,
+    "etag": "2608ca4b188aba329bd96542b4f4919c"
+  },
+  {
+    "path": "page_events__2026-04-19.parquet",
+    "file_size_in_bytes": 2359,
+    "partition": {
+      "event_date": "2026-04-19"
+    },
+    "record_count": 200,
+    "etag": "2608ca4b188aba329bd96542b4f4919c"
+  }
+]

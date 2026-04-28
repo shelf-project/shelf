@@ -1,0 +1,56 @@
+# shelfd build context ignore list — SHELF-09.
+#
+# Build context is the repo root (see shelfd/Dockerfile). Anything
+# listed here never crosses the docker daemon boundary, which keeps
+# `docker build` from uploading multi-GB `target/` trees and speeds
+# every iteration.
+
+# --- Rust build artefacts (biggest win — hundreds of MB) -----------
+target/
+**/target/
+
+# --- VCS / CI / tooling --------------------------------------------
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+
+# --- Non-build corners of the monorepo -----------------------------
+benchmarks/
+charts/
+clients/
+observability/
+agents/
+chaos/
+runbooks/
+infra/
+tools/
+docs/
+SECURITY/
+
+# --- Markdown + standalone docs — LICENSE/NOTICE kept by exclusion -
+*.md
+!LICENSE
+!NOTICE
+
+# --- OS / editor cruft ---------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# --- Secrets / local-only ------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- Test fixtures & caches ----------------------------------------
+/tmp-data
+/.testdata
+**/criterion/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+node_modules/

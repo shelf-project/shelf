@@ -1,0 +1,432 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "SHELF-27 insight-first read-path dashboard. Four big-number stats (hit ratio / p99 latency / miss volume / error rate) answer 'is Shelf healthy?' in under 3 seconds; per-pool, per-route, HEAD, origin, and pinning rows drill into the 'why' without leaving the page. Supersedes observability/dashboards/shelf-read-path.json (SHELF-08 starter).",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "title": "shelfd metric dictionary",
+      "type": "link",
+      "url": "https://github.com/shelf-project/shelf/blob/main/shelfd/docs/metrics.md",
+      "targetBlank": true
+    },
+    {
+      "title": "SHELF-27 design note",
+      "type": "link",
+      "url": "https://github.com/shelf-project/shelf/blob/main/shelfd/docs/design-notes/SHELF-27-observability-dashboard.md",
+      "targetBlank": true
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Hit Ratio (5m) — overall + per pool",
+      "description": "sum(rate(shelf_hits_total{replica=~\"$replica\"}[5m])) / (hits + misses). Big number answers 'is the cache earning its keep right now?'. Per-pool rows confirm both metadata (footer/manifest) and rowgroup pools are hitting; the v0.5 gate wants overall ≥ 0.71.",
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 0.5},
+              {"color": "green", "value": 0.8}
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(shelf_hits_total{replica=~\"$replica\"}[5m])) / clamp_min(sum(rate(shelf_hits_total{replica=~\"$replica\"}[5m])) + sum(rate(shelf_misses_total{replica=~\"$replica\"}[5m])), 1e-9)",
+          "legendFormat": "overall"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(shelf_hits_total{replica=~\"$replica\",pool=\"metadata\"}[5m])) / clamp_min(sum(rate(shelf_hits_total{replica=~\"$replica\",pool=\"metadata\"}[5m])) + sum(rate(shelf_misses_total{replica=~\"$replica\",pool=\"metadata\"}[5m])), 1e-9)",
+          "legendFormat": "metadata"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(shelf_hits_total{replica=~\"$replica\",pool=\"rowgroup\"}[5m])) / clamp_min(sum(rate(shelf_hits_total{replica=~\"$replica\",pool=\"rowgroup\"}[5m])) + sum(rate(shelf_misses_total{replica=~\"$replica\",pool=\"rowgroup\"}[5m])), 1e-9)",
+          "legendFormat": "rowgroup"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "P99 Latency (5m)",
+      "description": "histogram_quantile(0.99, ...) over shelf_request_seconds_bucket. Paging threshold is 100 ms (ShelfReadPathP99Degraded).",
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.05},
+              {"color": "red", "value": 0.1}
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(shelf_request_seconds_bucket{replica=~\"$replica\"}[5m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Miss Volume (1m)",
+      "description": "sum(rate(shelf_misses_total{replica=~\"$replica\"}[1m])). Sustained high miss rate means warmup isn't done, rotation just happened, or pin list drifted. Pair with the per-pool hit-ratio panel below.",
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 1,
+          "custom": {"displayName": "req/s"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 500},
+              {"color": "red", "value": 2000}
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(shelf_misses_total{replica=~\"$replica\"}[1m]))",
+          "legendFormat": "misses req/s"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Error Rate (5m)",
+      "description": "sum(rate(shelf_request_seconds_count{replica=~\"$replica\",status=~\"5..\"}[5m])) / sum(rate(shelf_request_seconds_count[5m])). NOTE: shelf_request_seconds does NOT currently carry a `status` label — its labels are `path` and `outcome` (values: hit, miss, bad_request, not_found, error, ok). Until a `status` (or `outcome=~\"error\"`) surface is wired on the histogram, this panel will render 'No data'. Tracked as a follow-up in shelfd/docs/design-notes/SHELF-27-observability-dashboard.md. The ShelfReadPathHighErrorRate alert uses the same literal expression for consistency. TODO: switch to `outcome=~\"error\"` once metrics.md moves that selector into the supported set, or introduce a dedicated `shelf_http_requests_total{status}` counter.",
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.005},
+              {"color": "red", "value": 0.01}
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(shelf_request_seconds_count{replica=~\"$replica\",status=~\"5..\"}[5m])) / clamp_min(sum(rate(shelf_request_seconds_count[5m])), 1e-9)",
+          "legendFormat": "5xx share"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Hit Ratio by Pool",
+      "description": "Per-pool hit ratio. `metadata` (DRAM-only, FrozenHot) should sit ≥ 0.95 in steady state; `rowgroup` (hybrid S3FIFO) sits lower but should exceed the v0.5 gate of 0.71 overall. A divergence between the two tells you which pool is cold.",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {"lineWidth": 2, "fillOpacity": 10}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"]},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pool) (rate(shelf_hits_total{replica=~\"$replica\"}[5m])) / clamp_min(sum by (pool) (rate(shelf_hits_total{replica=~\"$replica\"}[5m])) + sum by (pool) (rate(shelf_misses_total{replica=~\"$replica\"}[5m])), 1e-9)",
+          "legendFormat": "{{pool}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "p50 / p95 / p99 Latency by Route",
+      "description": "Latency quantiles split by route. NOTE: the spec asks for `route=~\".*\"`; the shelfd histogram exposes this dimension as the `path` label (values: /cache, /cache/head, /stats). This panel uses `path` — the semantic is identical.",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {"lineWidth": 2, "fillOpacity": 5}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"]},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le, path) (rate(shelf_request_seconds_bucket{replica=~\"$replica\"}[5m])))",
+          "legendFormat": "p50 — {{path}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, path) (rate(shelf_request_seconds_bucket{replica=~\"$replica\"}[5m])))",
+          "legendFormat": "p95 — {{path}}"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le, path) (rate(shelf_request_seconds_bucket{replica=~\"$replica\"}[5m])))",
+          "legendFormat": "p99 — {{path}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "HEAD hit / miss by pool",
+      "description": "shelf_head_hits_total vs shelf_head_misses_total (SHELF-07). HEAD-LRU hit rate is a leading indicator of row-group hit rate; a collapse here usually precedes a cache-content collapse.",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"lineWidth": 2, "fillOpacity": 10}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"]},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pool) (rate(shelf_head_hits_total{replica=~\"$replica\"}[1m]))",
+          "legendFormat": "head hit — {{pool}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (pool) (rate(shelf_head_misses_total{replica=~\"$replica\"}[1m]))",
+          "legendFormat": "head miss — {{pool}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Origin call-rate (success vs failure)",
+      "description": "Origin (S3) traffic split. NOTE: the planned `shelf_origin_requests_total{verb,status}` counter is not yet emitted (see shelfd/docs/metrics.md 'Planned' table, owning ticket SHELF-05 obs pass). Until it lands we proxy 'failure' via shelfd_error_total{replica=~\"$replica\",component=\"origin\"} and 'success' via the miss-rate (misses are the calls that actually reach S3). TODO: rewire when shelf_origin_requests_total emits.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"lineWidth": 2, "fillOpacity": 10}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"]},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(shelf_misses_total{replica=~\"$replica\"}[1m]))",
+          "legendFormat": "origin GET (proxy: miss-rate)"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (kind) (rate(shelfd_error_total{replica=~\"$replica\",component=\"origin\"}[1m]))",
+          "legendFormat": "origin error — {{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Pinned Bytes",
+      "description": "Bytes currently pinned via the pin list (SHELF-24). NOTE: shelf_pinned_bytes is not yet emitted by shelfd (see shelfd/docs/metrics.md 'Planned' table). This panel is a placeholder. TODO: wire when shelf_pinned_bytes emits.",
+      "gridPos": {"h": 4, "w": 12, "x": 12, "y": 13},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "decimals": 1,
+          "noValue": "—  (shelf_pinned_bytes not yet emitted; SHELF-24)",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "blue", "value": null}
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(shelf_pinned_bytes{replica=~\"$replica\"})",
+          "legendFormat": "pinned"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Single-flight coalesced followers (rate)",
+      "description": "Rate of follower callers coalesced onto a single in-flight origin fetch per shelfd.singleflight{role=\"follower\"} event (SHELF-08). NOTE: this event is emitted only in trace spans today, not as a Prometheus counter. This panel is a placeholder. TODO: wire when a shelf_singleflight_followers_total counter is emitted.",
+      "gridPos": {"h": 4, "w": 12, "x": 12, "y": 17},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"lineWidth": 2, "fillOpacity": 10},
+          "noValue": "—  (shelf_singleflight_followers_total not yet emitted)"
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "list", "placement": "bottom", "calcs": []},
+        "tooltip": {"mode": "single"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(shelf_singleflight_followers_total{replica=~\"$replica\"}[1m]))",
+          "legendFormat": "follower coalesced"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["shelf", "cache", "SHELF-27", "read-path"],
+  "templating": {
+    "list": [
+      {
+        "current": {"selected": false, "text": "Prometheus", "value": "prometheus"},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus",
+        "multi": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "queryValue": "",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {"selected": true, "text": "All", "value": "$__all"},
+        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+        "definition": "label_values(shelf_hits_total, replica)",
+        "description": "Trino replica (rep-0 / rep-1 / rep-2 / rep-3). Populated from the `replica` label on shelfd metrics, which is driven by the `X-Shelf-Client-Replica` header set in each Trino replica's iceberg.properties (see SHELF-27a design note). Defaults to All; switch to a specific replica during canary to isolate its read-path behaviour.",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Replica",
+        "multi": true,
+        "name": "replica",
+        "options": [],
+        "query": {"query": "label_values(shelf_hits_total, replica)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Shelf — read path (SHELF-27)",
+  "uid": "shelf-read-path",
+  "version": 1,
+  "weekStart": ""
+}

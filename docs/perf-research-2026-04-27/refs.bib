@@ -1,0 +1,224 @@
+% Shelf perf research, 2026-04-27 — BibTeX entries for every paper cited in
+% ../perf-research-2026-04-27.md and the snapshot. Maintain in author-year
+% form so the citation keys (\cite{einziger2017tinylfu}, etc.) are obvious.
+
+@inproceedings{yang2023s3fifo,
+  author    = {Juncheng Yang and Yazhuo Zhang and Ziyue Qiu and Yao Yue and K. V. Rashmi},
+  title     = {{FIFO} queues are all you need for cache eviction},
+  booktitle = {Proceedings of the 29th {ACM} Symposium on Operating Systems Principles ({SOSP})},
+  year      = {2023},
+  pages     = {130--149},
+  publisher = {ACM},
+  doi       = {10.1145/3600006.3613147},
+  note      = {S3-FIFO. Foyer's default eviction; the Phase-A sweep tunes ghost-queue parameters.}
+}
+
+@inproceedings{zhang2024sieve,
+  author    = {Yazhuo Zhang and Juncheng Yang and Yao Yue and Ymir Vigfusson and K. V. Rashmi},
+  title     = {{SIEVE} is simpler than {LRU}: an efficient turn-key eviction algorithm for web caches},
+  booktitle = {21st {USENIX} Symposium on Networked Systems Design and Implementation ({NSDI})},
+  year      = {2024},
+  publisher = {USENIX Association},
+  url       = {https://www.usenix.org/conference/nsdi24/presentation/zhang-yazhuo}
+}
+
+@inproceedings{einziger2017tinylfu,
+  author    = {Gil Einziger and Roy Friedman and Ben Manes},
+  title     = {{TinyLFU}: a highly efficient cache admission policy},
+  booktitle = {Proceedings of the 2017 {USENIX} Annual Technical Conference ({USENIX} {ATC})},
+  year      = {2017},
+  publisher = {USENIX Association},
+  pages     = {161--173},
+  url       = {https://www.usenix.org/conference/atc17/technical-sessions/presentation/einziger},
+  note      = {Includes Window-TinyLFU (W-TinyLFU) and the Doorkeeper bloom filter; productionised in Caffeine.}
+}
+
+@inproceedings{song2020lrb,
+  author    = {Zhenyu Song and Daniel S. Berger and Kai Li and Wyatt Lloyd},
+  title     = {Learning Relaxed {Belady} for Content Distribution Network caching},
+  booktitle = {17th {USENIX} Symposium on Networked Systems Design and Implementation ({NSDI})},
+  year      = {2020},
+  publisher = {USENIX Association},
+  pages     = {529--544},
+  url       = {https://www.usenix.org/conference/nsdi20/presentation/song}
+}
+
+@inproceedings{vietri2018lecar,
+  author    = {Giuseppe Vietri and Liana V. Rodriguez and Wendy A. Martinez and Steven Lyons and Jason Liu and Raju Rangaswami and Ming Zhao and Giri Narasimhan},
+  title     = {Driving cache replacement with {ML}-based {LeCaR}},
+  booktitle = {10th {USENIX} Workshop on Hot Topics in Storage and File Systems ({HotStorage})},
+  year      = {2018},
+  publisher = {USENIX Association},
+  url       = {https://www.usenix.org/conference/hotstorage18/presentation/vietri}
+}
+
+@inproceedings{rodriguez2021cacheus,
+  author    = {Liana V. Rodriguez and Farzana Yusuf and Steven Lyons and Eysler Paz and Raju Rangaswami and Jason Liu and Ming Zhao and Giri Narasimhan},
+  title     = {{Learning Cache Replacement with} {CACHEUS}},
+  booktitle = {19th {USENIX} Conference on File and Storage Technologies ({FAST})},
+  year      = {2021},
+  publisher = {USENIX Association},
+  pages     = {341--354},
+  url       = {https://www.usenix.org/conference/fast21/presentation/rodriguez}
+}
+
+@article{megiddo2003arc,
+  author    = {Nimrod Megiddo and Dharmendra S. Modha},
+  title     = {{ARC}: a self-tuning, low overhead replacement cache},
+  booktitle = {2nd {USENIX} Conference on File and Storage Technologies ({FAST})},
+  year      = {2003},
+  publisher = {USENIX Association},
+  pages     = {115--130},
+  url       = {https://www.usenix.org/legacy/event/fast03/tech/full_papers/megiddo/megiddo.pdf}
+}
+
+@inproceedings{berg2020cachelib,
+  author    = {Benjamin Berg and Daniel S. Berger and Sara McAllister and Isaac Grosof and Sathya Gunasekar and Jimmy Lu and Michael Uhlar and Jim Carrig and Nathan Beckmann and Mor Harchol-Balter and Gregory R. Ganger},
+  title     = {The {CacheLib} caching engine: design and experiences at scale},
+  booktitle = {14th {USENIX} Symposium on Operating Systems Design and Implementation ({OSDI})},
+  year      = {2020},
+  publisher = {USENIX Association},
+  pages     = {753--768},
+  url       = {https://www.usenix.org/conference/osdi20/presentation/berg}
+}
+
+@article{mattson1970evaluation,
+  author    = {R. L. Mattson and J. Gecsei and D. R. Slutz and I. L. Traiger},
+  title     = {Evaluation techniques for storage hierarchies},
+  journal   = {{IBM} Systems Journal},
+  volume    = {9},
+  number    = {2},
+  pages     = {78--117},
+  year      = {1970},
+  doi       = {10.1147/sj.92.0078},
+  note      = {Foundational stack-distance / Mattson-curve work used as the MRC-estimator basis for A2.}
+}
+
+@inproceedings{hu2016kinetic,
+  author    = {Xiameng Hu and Xiaolin Wang and Yechen Li and Lan Zhou and Yingwei Luo and Chen Ding and Song Jiang and Zhenlin Wang},
+  title     = {{LAMA}: optimized locality-aware memory allocation for key-value cache},
+  booktitle = {Proceedings of the 2015 {USENIX} Annual Technical Conference},
+  year      = {2015},
+  publisher = {USENIX Association},
+  url       = {https://www.usenix.org/conference/atc15/technical-session/presentation/hu},
+  note      = {Cited in the plan as a kinetic-modelling reference for stack-distance approximation; the canonical work is Mattson 1970.}
+}
+
+@article{mitzenmacher2018sandwiched,
+  author    = {Michael Mitzenmacher},
+  title     = {A model for learned {Bloom} filters and related structures},
+  journal   = {arXiv preprint arXiv:1802.00884},
+  year      = {2018},
+  url       = {https://arxiv.org/abs/1802.00884},
+  note      = {Sandwiched Learned Bloom Filters; halves bloom memory at equal FPR.}
+}
+
+@inproceedings{kraska2018learned,
+  author    = {Tim Kraska and Alex Beutel and Ed H. Chi and Jeffrey Dean and Neoklis Polyzotis},
+  title     = {The case for learned index structures},
+  booktitle = {Proceedings of the 2018 {ACM} {SIGMOD} International Conference on Management of Data},
+  year      = {2018},
+  pages     = {489--504},
+  publisher = {ACM},
+  doi       = {10.1145/3183713.3196909}
+}
+
+@inproceedings{zhang2018surf,
+  author    = {Huanchen Zhang and Hyeontaek Lim and Viktor Leis and David G. Andersen and Michael Kaminsky and Kimberly Keeton and Andrew Pavlo},
+  title     = {{SuRF}: practical range query filtering with succinct range filters},
+  booktitle = {Proceedings of the 2018 {ACM} {SIGMOD} International Conference on Management of Data},
+  year      = {2018},
+  pages     = {323--336},
+  publisher = {ACM},
+  doi       = {10.1145/3183713.3196931}
+}
+
+@inproceedings{li2010linucb,
+  author    = {Lihong Li and Wei Chu and John Langford and Robert E. Schapire},
+  title     = {A contextual-bandit approach to personalized news article recommendation},
+  booktitle = {Proceedings of the 19th International Conference on World Wide Web ({WWW})},
+  year      = {2010},
+  pages     = {661--670},
+  publisher = {ACM},
+  doi       = {10.1145/1772690.1772758},
+  note      = {LinUCB; basis for the per-table coalescing-window proposal in B5.}
+}
+
+@inproceedings{mahgoub2024themis,
+  author    = {Ahmad {Mahgoub Mohamed Abdelfatah} and Hassan Md Hossain and Saurabh Bagchi},
+  title     = {{Themis}: fair and efficient {GPU} cluster scheduling},
+  booktitle = {21st {USENIX} Symposium on Networked Systems Design and Implementation ({NSDI})},
+  year      = {2024},
+  publisher = {USENIX Association},
+  url       = {https://www.usenix.org/conference/nsdi24},
+  note      = {Cited in the plan as a fairness reference; the multi-tenant cache application is Shelf-original.}
+}
+
+@inproceedings{vuppalapati2024cache,
+  author    = {Midhul Vuppalapati and Justin Miron and Rachit Agarwal and Dan Truong and Ashish Motivala and Thierry Cruanes},
+  title     = {Cache is the new disk: design considerations for the {Snowflake} elastic cache},
+  booktitle = {Proceedings of the 2024 {ACM} {SIGMOD} International Conference on Management of Data},
+  year      = {2024},
+  publisher = {ACM},
+  doi       = {10.1145/3626246.3653373}
+}
+
+@inproceedings{eisenbud2016maglev,
+  author    = {Daniel E. Eisenbud and Cheng Yi and Carlo Contavalli and Cody Smith and Roman Kononov and Eric Mann-Hielscher and Ardas Cilingiroglu and Bin Cheyney and Wentao Shang and Jinnah Dylan Hosein},
+  title     = {{Maglev}: a fast and reliable software network load balancer},
+  booktitle = {13th {USENIX} Symposium on Networked Systems Design and Implementation ({NSDI})},
+  year      = {2016},
+  publisher = {USENIX Association},
+  pages     = {523--535},
+  url       = {https://www.usenix.org/conference/nsdi16/technical-sessions/presentation/eisenbud}
+}
+
+@inproceedings{mirrokni2018chwbl,
+  author    = {Vahab Mirrokni and Mikkel Thorup and Morteza Zadimoghaddam},
+  title     = {Consistent hashing with bounded loads},
+  booktitle = {Proceedings of the Twenty-Ninth Annual {ACM-SIAM} Symposium on Discrete Algorithms ({SODA})},
+  year      = {2018},
+  pages     = {587--604},
+  publisher = {SIAM},
+  doi       = {10.1137/1.9781611975031.39}
+}
+
+@techreport{thaler1996hrw,
+  author      = {David G. Thaler and Chinya V. Ravishankar},
+  title       = {A name-based mapping scheme for {Rendezvous}},
+  institution = {University of Michigan},
+  number      = {CSE-TR-316-96},
+  year        = {1996},
+  note        = {Highest Random Weight (HRW) hashing; Shelf's current placement scheme.}
+}
+
+@inproceedings{cidon2017cliffhanger,
+  author    = {Asaf Cidon and Daniel Rushton and Stephen M. Rumble and Ryan Stutsman},
+  title     = {Memshare: a dynamic multi-tenant key-value cache},
+  booktitle = {2017 {USENIX} Annual Technical Conference ({USENIX} {ATC})},
+  year      = {2017},
+  publisher = {USENIX Association},
+  pages     = {321--334},
+  url       = {https://www.usenix.org/conference/atc17/technical-sessions/presentation/cidon},
+  note      = {Cited in the plan as ``Cliffhanger''; the dynamic memory-rebalancing technique applies to Shelf's metadata vs rowgroup pool sizing in C4.}
+}
+
+@inproceedings{berger2017adaptsize,
+  author    = {Daniel S. Berger and Ramesh K. Sitaraman and Mor Harchol-Balter},
+  title     = {{AdaptSize}: orchestrating the hot object memory cache in a content delivery network},
+  booktitle = {14th {USENIX} Symposium on Networked Systems Design and Implementation ({NSDI})},
+  year      = {2017},
+  publisher = {USENIX Association},
+  pages     = {483--498},
+  url       = {https://www.usenix.org/conference/nsdi17/technical-sessions/presentation/berger}
+}
+
+@inproceedings{schroeder2003web,
+  author    = {Bianca Schroeder and Mor Harchol-Balter},
+  title     = {Web servers under overload: how scheduling can help},
+  booktitle = {Proceedings of the {USENIX} 2003 Annual Technical Conference},
+  year      = {2003},
+  publisher = {USENIX Association},
+  url       = {https://www.usenix.org/legacy/event/usenix03/tech/schroeder.html},
+  note      = {Cited as a generic prefetch-quality reference; original work in scheduling.}
+}

@@ -1,29 +1,36 @@
 //! `shelfctl` — operator CLI for the `shelfd` cache daemon.
 //!
 //! Ticket ownership:
-//! - SHELF-23 — subcommands `stats`, `pin`, `unpin`, `evict`, `ring`,
-//!   `reload`. Each talks to `shelfd`'s control plane (HTTP in v1;
-//!   the gRPC scaffold in `shelfd/src/control.rs` will grow into a
-//!   real surface as SHELF-23 lands).
-//! - SHELF-24 — `reload pin-list` triggers SIGHUP on the target pod.
+//! - SHELF-23 — subcommands `stats`, `ring`, `pin <key>`, `unpin
+//!   <key>`, `evict <key>`, `reload`. Each talks to `shelfd`'s admin
+//!   HTTP surface under `/admin/*`.
+//! - SHELF-24 — `reload` is the in-band pin-list reload button. The
+//!   same refresh fires on `SIGHUP` and on the 15-minute timer
+//!   inside `shelfd` — this subcommand is for operators who want to
+//!   bypass the timer without shelling into the pod.
 //!
-//! Every subcommand body is `todo!()` until SHELF-23 merges, but the
-//! clap `derive` layout is final: operators see stable `--help` text
-//! from day one, which is the spec other agents (plugin, SRE) consume.
+//! The CLI is intentionally thin: every subcommand maps 1:1 to a
+//! single HTTP call against `--endpoint`. We deliberately never call
+//! into `shelfd`'s internals directly — the admin surface is the
+//! contract and exercising it from the CLI is the cheapest way to
+//! keep that contract honest.
 
+use anyhow::{anyhow, Context};
 use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 
 /// Shelf cache daemon operator CLI.
 #[derive(Debug, Parser)]
 #[command(name = "shelfctl", version, about, long_about = None)]
 struct Cli {
-    /// Base URL of the shelfd control endpoint, e.g.
-    /// `http://shelf-0.shelf.shelf.svc.cluster.local:9091`.
+    /// Base URL of the shelfd data-plane / admin endpoint. Defaults
+    /// match the in-cluster StatefulSet: `http://shelf-0.shelf.shelf.
+    /// svc.cluster.local:8080`. Dev loops use `http://127.0.0.1:8080`.
     #[arg(
         long,
         env = "SHELFCTL_ENDPOINT",
-        default_value = "http://127.0.0.1:9091"
+        default_value = "http://127.0.0.1:8080"
     )]
     endpoint: String,
 
@@ -35,37 +42,57 @@ struct Cli {
     command: Command,
 }
 
+/// Pool selector mirroring `shelfd::store::Pool`. Kept as a local
+/// `ValueEnum` (rather than re-exporting from `shelfd`) so `shelfctl`
+/// stays a pure HTTP client — no link dependency on the daemon's
+/// internals.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum PoolArg {
+    Metadata,
+    Rowgroup,
+}
+
+impl PoolArg {
+    fn as_wire(self) -> &'static str {
+        match self {
+            PoolArg::Metadata => "metadata",
+            PoolArg::Rowgroup => "rowgroup",
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Dump live cache statistics from the target pod.
-    Stats {
-        /// Optional granularity filter (`row-group`, `footer`, `manifest`).
-        #[arg(long)]
-        granularity: Option<String>,
-    },
-    /// Pin a table (optionally scoped to partitions) in the pin list.
+    /// Dump `/stats` from the target pod as pretty-printed JSON.
+    Stats,
+    /// Dump the HRW ring view — pod_id / weight / healthy per row.
+    Ring,
+    /// Pin a key (content-addressed hex) so it bypasses the size
+    /// threshold on admission.
     Pin {
-        /// Fully-qualified table name, e.g. `cdp.icesheet.silver_offline_event_data_2026`.
-        table: String,
-        /// Optional `key=value` partition predicates; may repeat.
-        #[arg(long)]
-        partition: Vec<String>,
+        /// Hex-encoded content-addressed key (64 chars).
+        key: String,
+        /// Which Foyer pool the key lives in.
+        #[arg(long, value_enum, default_value = "rowgroup")]
+        pool: PoolArg,
     },
-    /// Remove a table from the pin list.
-    Unpin { table: String },
-    /// Forcibly evict a single key from the cache.
-    Evict {
-        /// Hex-encoded content-addressed key.
+    /// Unpin a key. Pool-agnostic — content-addressed keys are
+    /// unique across pools by construction.
+    Unpin {
+        /// Hex-encoded content-addressed key (64 chars).
         key: String,
     },
-    /// Dump the current HRW ring view (membership + capacity weights).
-    Ring,
-    /// Trigger an out-of-band reload of a live config surface.
-    Reload {
-        /// What to reload.
-        #[arg(value_parser = ["pin-list", "admission-model"])]
-        target: String,
+    /// Evict a key from the given pool. The pin-set is preserved.
+    Evict {
+        /// Hex-encoded content-addressed key (64 chars).
+        key: String,
+        /// Which Foyer pool the key lives in.
+        #[arg(long, value_enum, default_value = "rowgroup")]
+        pool: PoolArg,
     },
+    /// Trigger an out-of-band pin-list reload. Equivalent to
+    /// sending the `shelfd` process a `SIGHUP`.
+    Reload,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -86,48 +113,149 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn dispatch(cli: &Cli) -> anyhow::Result<()> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("shelfctl/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("building HTTP client")?;
+
     match &cli.command {
-        Command::Stats { granularity } => cmd_stats(&cli.endpoint, granularity.as_deref()).await,
-        Command::Pin { table, partition } => cmd_pin(&cli.endpoint, table, partition).await,
-        Command::Unpin { table } => cmd_unpin(&cli.endpoint, table).await,
-        Command::Evict { key } => cmd_evict(&cli.endpoint, key).await,
-        Command::Ring => cmd_ring(&cli.endpoint).await,
-        Command::Reload { target } => cmd_reload(&cli.endpoint, target).await,
+        Command::Stats => cmd_stats(&client, &cli.endpoint).await,
+        Command::Ring => cmd_ring(&client, &cli.endpoint).await,
+        Command::Pin { key, pool } => cmd_pin(&client, &cli.endpoint, key, *pool).await,
+        Command::Unpin { key } => cmd_unpin(&client, &cli.endpoint, key).await,
+        Command::Evict { key, pool } => cmd_evict(&client, &cli.endpoint, key, *pool).await,
+        Command::Reload => cmd_reload(&client, &cli.endpoint).await,
     }
 }
 
-async fn cmd_stats(_endpoint: &str, _granularity: Option<&str>) -> anyhow::Result<()> {
-    todo!(
-        "SHELF-23: shelfctl: GET {{endpoint}}/stats?granularity=… and pretty-print; \
-         see 03-plan.md §4 SHELF-23"
-    )
+fn url(endpoint: &str, path: &str) -> String {
+    // Join without depending on `url` crate — endpoint never has a
+    // trailing slash in practice, and we control the path literals.
+    let endpoint = endpoint.trim_end_matches('/');
+    format!("{endpoint}{path}")
 }
 
-async fn cmd_pin(_endpoint: &str, _table: &str, _partitions: &[String]) -> anyhow::Result<()> {
-    todo!(
-        "SHELF-23: shelfctl: POST {{endpoint}}/pin {{table, partitions}}; see \
-         03-plan.md §4 SHELF-23 + SHELF-24"
-    )
+/// Normalise an HTTP response into `anyhow::Result<Response>` so
+/// non-2xx bodies get written to stderr and the process exits 1.
+async fn ok_or_bail(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let body = resp.text().await.unwrap_or_else(|_| "<no body>".into());
+    eprintln!("{status}: {body}");
+    Err(anyhow!("request failed: {status}"))
 }
 
-async fn cmd_unpin(_endpoint: &str, _table: &str) -> anyhow::Result<()> {
-    todo!("SHELF-23: shelfctl: DELETE {{endpoint}}/pin/{{table}}; see 03-plan.md §4 SHELF-23")
+async fn cmd_stats(client: &reqwest::Client, endpoint: &str) -> anyhow::Result<()> {
+    let resp = client
+        .get(url(endpoint, "/stats"))
+        .send()
+        .await
+        .context("GET /stats")?;
+    let resp = ok_or_bail(resp).await?;
+    let json: serde_json::Value = resp.json().await.context("parse /stats JSON")?;
+    println!("{}", serde_json::to_string_pretty(&json)?);
+    Ok(())
 }
 
-async fn cmd_evict(_endpoint: &str, _key: &str) -> anyhow::Result<()> {
-    todo!("SHELF-23: shelfctl: POST {{endpoint}}/evict {{key}}; see 03-plan.md §4 SHELF-23")
+#[derive(Debug, Serialize, Deserialize)]
+struct RingRow {
+    pod_id: String,
+    weight: f64,
+    healthy: bool,
 }
 
-async fn cmd_ring(_endpoint: &str) -> anyhow::Result<()> {
-    todo!(
-        "SHELF-23: shelfctl: GET {{endpoint}}/ring and render membership + \
-         weights in a sorted table; see 03-plan.md §4 SHELF-23"
-    )
+async fn cmd_ring(client: &reqwest::Client, endpoint: &str) -> anyhow::Result<()> {
+    let resp = client
+        .get(url(endpoint, "/admin/ring"))
+        .send()
+        .await
+        .context("GET /admin/ring")?;
+    let resp = ok_or_bail(resp).await?;
+    let rows: Vec<RingRow> = resp.json().await.context("parse /admin/ring JSON")?;
+    // Fixed-width table; operators grep this in noisy output.
+    println!("{:<40} {:>8} {:>8}", "pod_id", "weight", "healthy");
+    for r in rows {
+        println!("{:<40} {:>8.3} {:>8}", r.pod_id, r.weight, r.healthy);
+    }
+    Ok(())
 }
 
-async fn cmd_reload(_endpoint: &str, _target: &str) -> anyhow::Result<()> {
-    todo!(
-        "SHELF-23: shelfctl: POST {{endpoint}}/reload/{{target}}; see 03-plan.md §4 \
-         SHELF-23 + SHELF-24"
-    )
+#[derive(Debug, Serialize)]
+struct PinEvictBody<'a> {
+    key_hex: &'a str,
+    pool: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct UnpinBody<'a> {
+    key_hex: &'a str,
+}
+
+async fn cmd_pin(
+    client: &reqwest::Client,
+    endpoint: &str,
+    key: &str,
+    pool: PoolArg,
+) -> anyhow::Result<()> {
+    let resp = client
+        .post(url(endpoint, "/admin/pin"))
+        .json(&PinEvictBody {
+            key_hex: key,
+            pool: pool.as_wire(),
+        })
+        .send()
+        .await
+        .context("POST /admin/pin")?;
+    let resp = ok_or_bail(resp).await?;
+    let body: serde_json::Value = resp.json().await.context("parse /admin/pin JSON")?;
+    println!("{}", serde_json::to_string_pretty(&body)?);
+    Ok(())
+}
+
+async fn cmd_unpin(client: &reqwest::Client, endpoint: &str, key: &str) -> anyhow::Result<()> {
+    let resp = client
+        .post(url(endpoint, "/admin/unpin"))
+        .json(&UnpinBody { key_hex: key })
+        .send()
+        .await
+        .context("POST /admin/unpin")?;
+    let resp = ok_or_bail(resp).await?;
+    let body: serde_json::Value = resp.json().await.context("parse /admin/unpin JSON")?;
+    println!("{}", serde_json::to_string_pretty(&body)?);
+    Ok(())
+}
+
+async fn cmd_evict(
+    client: &reqwest::Client,
+    endpoint: &str,
+    key: &str,
+    pool: PoolArg,
+) -> anyhow::Result<()> {
+    let resp = client
+        .post(url(endpoint, "/admin/evict"))
+        .json(&PinEvictBody {
+            key_hex: key,
+            pool: pool.as_wire(),
+        })
+        .send()
+        .await
+        .context("POST /admin/evict")?;
+    let resp = ok_or_bail(resp).await?;
+    let body: serde_json::Value = resp.json().await.context("parse /admin/evict JSON")?;
+    println!("{}", serde_json::to_string_pretty(&body)?);
+    Ok(())
+}
+
+async fn cmd_reload(client: &reqwest::Client, endpoint: &str) -> anyhow::Result<()> {
+    let resp = client
+        .post(url(endpoint, "/admin/reload"))
+        .send()
+        .await
+        .context("POST /admin/reload")?;
+    let resp = ok_or_bail(resp).await?;
+    let body: serde_json::Value = resp.json().await.context("parse /admin/reload JSON")?;
+    println!("{}", serde_json::to_string_pretty(&body)?);
+    Ok(())
 }

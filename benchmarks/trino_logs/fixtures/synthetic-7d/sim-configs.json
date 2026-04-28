@@ -1,0 +1,28 @@
+{
+  "configs": [
+    {
+      "name": "baseline-512g",
+      "capacity_bytes": 549755813888,
+      "policy": "lru",
+      "size_threshold_bytes": 1073741824,
+      "pinned_bypass": true,
+      "pin_list": []
+    },
+    {
+      "name": "tight-16k",
+      "capacity_bytes": 16384,
+      "policy": "lru",
+      "size_threshold_bytes": 1073741824,
+      "pinned_bypass": true,
+      "pin_list": []
+    },
+    {
+      "name": "threshold-256b",
+      "capacity_bytes": 549755813888,
+      "policy": "size-only",
+      "size_threshold_bytes": 256,
+      "pinned_bypass": true,
+      "pin_list": []
+    }
+  ]
+}

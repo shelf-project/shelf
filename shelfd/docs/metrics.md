@@ -24,6 +24,8 @@ covered by the `registry_exposes_documented_series` regression test.
 | `shelfd_error_total`     | counter   | `{component,kind}`     | Typed errors; `component` = `error::Error::component()`.           | SHELF-08 |
 | `shelf_bytes_used`       | gauge     | `{pool,tier}`          | Bytes held per `(pool, tier)` — tier ∈ `{dram, nvme}`.             | SHELF-08 |
 | `shelf_request_seconds`  | histogram | `{path,outcome}`       | End-to-end HTTP request latency. `path` ∈ `/cache`, `/cache/head`, `/stats`; `outcome` ∈ `hit`, `miss`, `bad_request`, `not_found`, `error`, `ok`. | SHELF-08 |
+| `shelf_mv_hits_total`    | counter   | `{mv_name}`            | Hits served from a pinned Iceberg MV. Incremented only when the key maps to a file registered by the H3 mv-pin-watcher. | Track H5 |
+| `shelf_mv_bytes_served_total` | counter | `{mv_name}`          | Response bytes served from an MV-backed hit. Paired with `shelf_mv_hits_total` for avg rowgroup size; compare against `shelf_s3_shim_response_bytes_total` for "% of bytes served by MVs". | Track H5 |
 
 ## Planned (future tickets)
 

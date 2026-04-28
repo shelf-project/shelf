@@ -12,7 +12,7 @@
       }
     ]
   },
-  "description": "SHELF-08 starter read-path panel set: hit rate, miss rate, and request-latency p95 keyed on the Phase-0 shelfd /metrics surface. The full dashboard layout (SHELF-27) will supersede this.",
+  "description": "Superseded by charts/shelf/grafana/dashboards/shelf-read-path.json — retained for SHELF-08 backward-compat.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,

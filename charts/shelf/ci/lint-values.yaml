@@ -7,7 +7,7 @@
 replicaCount: 3
 
 image:
-  repository: ghcr.io/penpencil-oss/shelf/shelfd
+  repository: ghcr.io/shelf-project/shelfd
   tag: "0.1.0"
 
 serviceAccount:

@@ -1,0 +1,13 @@
+-- 03-join-two-tables: INNER JOIN across two Iceberg tables.
+-- Exercises row-group reads on BOTH sides of the join simultaneously;
+-- a single-table bug (e.g. predicate-pushdown failure) would surface
+-- here as a row-count delta. The LIMIT keeps the harness runtime
+-- bounded without skipping the join-plan semantics.
+SELECT u.user_id, u.country, COUNT(o.order_id) AS order_count
+FROM {catalog}.{schema}.{table_users} u
+INNER JOIN {catalog}.{schema}.{table_orders} o
+    ON o.user_id = u.user_id
+WHERE u.country IS NOT NULL
+GROUP BY u.user_id, u.country
+ORDER BY u.user_id
+LIMIT 5000

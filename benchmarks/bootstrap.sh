@@ -28,7 +28,7 @@ SCALE="${SHELF_BENCH_SCALE:-1tb}"
 FIXTURE_BUCKET="${SHELF_BENCH_FIXTURE_BUCKET:-}"
 BACKENDS="${SHELF_BENCH_BACKENDS:-raw-s3,fs-cache,alluxio-2-9,alluxio-3-dora,shelf}"
 DRY_RUN="${SHELF_BENCH_DRY_RUN:-1}"
-SHELF_IMAGE="${SHELF_BENCH_IMAGE:-ghcr.io/penpencil-oss/shelfd:scaffold}"
+SHELF_IMAGE="${SHELF_BENCH_IMAGE:-ghcr.io/shelf-project/shelfd:scaffold}"
 TRINO_IMAGE="${SHELF_BENCH_TRINO_IMAGE:-trinodb/trino:480}"
 
 usage() {

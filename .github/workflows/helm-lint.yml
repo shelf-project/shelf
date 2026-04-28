@@ -1,0 +1,150 @@
+name: helm-lint
+
+# SHELF-09 — PR gate for the shelf Helm chart and the shelfd image.
+#
+# Three jobs wire the "chart is installable and the image fits in the
+# size budget" acceptance criteria onto every PR:
+#
+#   1. helm-lint     — lints charts/shelf against the CI values snapshot
+#                      and each env overlay (dev/staging/prod).
+#   2. helm-template — renders the chart and pipes through
+#                      `kubectl apply --dry-run=client` to catch schema
+#                      breakage that helm lint misses.
+#   3. docker-build  — builds shelfd/Dockerfile with buildx, gates the
+#                      uncompressed image size at 150 MB (≈ 80 MB
+#                      compressed, the ticket AC), and writes the exact
+#                      byte count to the job summary.
+#
+# Design notes at
+#   shelfd/docs/design-notes/SHELF-09-dockerfile-and-helm-lint.md
+
+on:
+  pull_request:
+    paths:
+      - "charts/**"
+      - "shelfd/**"
+      - "shelfctl/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/helm-lint.yml"
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helm-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  helm-lint:
+    name: helm lint
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - name: Lint chart with CI values (strict)
+        run: |
+          helm lint charts/shelf \
+            --values charts/shelf/ci/lint-values.yaml \
+            --strict
+
+      # Env overlays are linted non-strict: prod values legitimately
+      # require IRSA annotations that dev/staging omit, and --strict
+      # would flag those as warnings-as-errors.
+      - name: Lint chart with dev overlay
+        run: helm lint charts/shelf --values charts/shelf/values-dev.yaml
+
+      - name: Lint chart with staging overlay
+        run: helm lint charts/shelf --values charts/shelf/values-staging.yaml
+
+      - name: Lint chart with prod overlay
+        run: helm lint charts/shelf --values charts/shelf/values-prod.yaml
+
+  helm-template:
+    name: helm template + kubectl dry-run
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.30.3
+
+      - name: Render chart and dry-run apply
+        # --kube-version is required because Chart.yaml pins
+        # kubeVersion: ">=1.27.0-0" and helm's built-in Capabilities
+        # default is older than that.
+        run: |
+          helm template shelf charts/shelf \
+            --values charts/shelf/ci/lint-values.yaml \
+            --kube-version 1.30.0 \
+          | kubectl apply --dry-run=client -f -
+
+  docker-build:
+    name: docker build (shelfd)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build shelfd image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: shelfd/Dockerfile
+          tags: shelfd:ci
+          push: false
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Distroless/cc (~66 MB uncompressed) + a stripped shelfd binary
+      # with aws-sdk-s3 + tonic + foyer lands in the 100-140 MB range
+      # uncompressed, which maps to ≤ 80 MB compressed (the ticket AC).
+      # We gate at 150 MB uncompressed to catch regressions cheaply
+      # without paying `docker save | gzip -c | wc -c` every run.
+      - name: Inspect and gate image size
+        run: |
+          set -euo pipefail
+          SIZE_BYTES=$(docker image inspect shelfd:ci --format '{{.Size}}')
+          SIZE_MIB=$(awk "BEGIN { printf \"%.2f\", ${SIZE_BYTES} / 1048576 }")
+          LIMIT_BYTES=$((150 * 1024 * 1024))
+
+          echo "shelfd:ci uncompressed size = ${SIZE_BYTES} bytes (${SIZE_MIB} MiB)"
+          {
+            echo "### shelfd image size"
+            echo ""
+            echo "- **Uncompressed:** ${SIZE_BYTES} bytes (${SIZE_MIB} MiB)"
+            echo "- **Gate:** 150 MiB uncompressed (≈ 80 MiB compressed, SHELF-09 AC)"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [ "${SIZE_BYTES}" -gt "${LIMIT_BYTES}" ]; then
+            echo "::error::shelfd:ci exceeds the 150 MiB uncompressed gate (${SIZE_MIB} MiB)."
+            exit 1
+          fi
+
+      - name: Smoke-test --help
+        run: docker run --rm --entrypoint /shelfd shelfd:ci --help

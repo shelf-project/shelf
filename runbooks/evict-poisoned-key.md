@@ -30,7 +30,7 @@ kubectl -n shelf exec shelf-0 -- shelfctl ring --lookup <KEY>
 # 3. Is the ETag stable? A multipart upload ETag is NOT MD5 (see
 # ADR-0001 / plan risk R-10). Re-stat the object to confirm we're not
 # chasing a post-rewrite key.
-aws s3api head-object --bucket penpencil-cdp-prod --key <OBJECT_KEY>
+aws s3api head-object --bucket example-cdp-prod --key <OBJECT_KEY>
 ```
 
 ## Mitigation

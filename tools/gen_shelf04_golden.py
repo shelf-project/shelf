@@ -21,11 +21,39 @@ import hashlib
 import struct
 import sys
 
+# Kept in lockstep with:
+#   - shelfd/src/store.rs::GOLDEN_INPUTS
+#   - clients/trino/src/test/java/io/shelf/client/KeyTest::GOLDEN_INPUTS
 GOLDEN_INPUTS: list[tuple[str, int, int, int]] = [
+    # -- SHELF-04 baseline --
     ('"9f8e6e48a1f7e2c3b5d41234567890ab"', 0,           8_192,  0),
     ('"aa11bb22cc33dd44ee55ff6677889900"', 536_854_528, 65_536, 0),
     ('"aa11bb22cc33dd44ee55ff6677889900"', 536_854_528, 65_536, 3),
     ('"d41d8cd98f00b204e9800998ecf8427e-7"', 1,         1,      42),
+    # -- SHELF-16: row-group ordinal variants --
+    # Same (etag, offset, length), three distinct rg ordinals (0, 1, 7).
+    ('"rg-ordinal-sweep"',              4_096,                      131_072,         0),
+    ('"rg-ordinal-sweep"',              4_096,                      131_072,         1),
+    ('"rg-ordinal-sweep"',              4_096,                      131_072,         7),
+    # Offset = u64::MAX / 2 with ordinal 0 and 255 (upper half of offset
+    # space exercises every byte lane of the LE u64 encoding).
+    ('"big-offset"',                    9_223_372_036_854_775_807,  16,              0),
+    ('"big-offset"',                    9_223_372_036_854_775_807,  16,              255),
+    # Length = 1 byte with ordinal = u16 ceiling (65_535).
+    ('"single-byte"',                   0,                          1,               65_535),
+    # Length = 16 MiB with ordinal 4_096 (rg-count scale).
+    ('"row-group-xl"',                  0,                          16 * 1024 * 1024, 4_096),
+    # Multipart-form ETag with ordinals 0 and 2. The literal value
+    # includes both outer double-quotes and the `-N` multipart suffix
+    # marker; we treat it as opaque bytes.
+    ('""-multipart"',                  0,                          4_096,           0),
+    ('""-multipart"',                  0,                          4_096,           2),
+    # ASCII-only 8-byte ETag (no surrounding quotes — 8 bytes exactly),
+    # every ordinal in 0..=3 to pin the hot-path ordinals.
+    ('shelf16b',                          2_048,                      8_192,           0),
+    ('shelf16b',                          2_048,                      8_192,           1),
+    ('shelf16b',                          2_048,                      8_192,           2),
+    ('shelf16b',                          2_048,                      8_192,           3),
 ]
 
 HEADER = """# SHELF-04 golden vectors — shared by Rust and Java key tests.

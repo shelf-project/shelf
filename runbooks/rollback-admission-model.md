@@ -22,7 +22,7 @@ Expected recovery: hit-rate within 1 hour of warmup.
 ```bash
 # 1. Confirm the bad promotion. Last N versions of the S3 object.
 aws s3api list-object-versions \
-  --bucket penpencil-shelf-prod-config \
+  --bucket example-shelf-prod-config \
   --prefix admission-model.onnx \
   | jq '.Versions[:5] | .[] | {VersionId, LastModified, IsLatest}'
 
@@ -30,7 +30,7 @@ aws s3api list-object-versions \
 kubectl -n shelf exec shelf-0 -- shelfctl stats --admission | grep promoted
 
 # 3. Double-check the in-flight trainer isn't about to overwrite.
-curl -s https://airflow.penpencil.internal/api/v1/dags/shelf_admission_model_trainer/dagRuns?state=running | jq '.dag_runs'
+curl -s https://airflow.example.internal/api/v1/dags/shelf_admission_model_trainer/dagRuns?state=running | jq '.dag_runs'
 ```
 
 ## Mitigation
@@ -39,8 +39,8 @@ curl -s https://airflow.penpencil.internal/api/v1/dags/shelf_admission_model_tra
    VersionId over the current latest:
    ```bash
    aws s3api copy-object \
-     --bucket penpencil-shelf-prod-config \
-     --copy-source "penpencil-shelf-prod-config/admission-model.onnx?versionId=<GOOD_VERSION>" \
+     --bucket example-shelf-prod-config \
+     --copy-source "example-shelf-prod-config/admission-model.onnx?versionId=<GOOD_VERSION>" \
      --key admission-model.onnx
    kubectl -n shelf exec shelf-0 -- shelfctl reload admission-model
    # fan-out to all pods

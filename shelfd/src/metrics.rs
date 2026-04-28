@@ -34,26 +34,66 @@ pub struct Registry {
     pub errors_total: IntCounterVec,
     pub bytes_used: IntGaugeVec,
     pub request_seconds: HistogramVec,
+    /// SHELF-18 — disk-tier hits for pools that run as a Foyer
+    /// `HybridCache`. Only the `rowgroup` pool ever observes a
+    /// non-zero value today; the label is kept so future pools
+    /// can join without a metric rename.
+    pub disk_hits_total: IntCounterVec,
+    /// SHELF-18 — disk-tier misses (memory miss → disk miss).
+    pub disk_misses_total: IntCounterVec,
+    /// SHELF-18 — best-effort bytes resident on the NVMe tier. See
+    /// `FoyerStore::disk_bytes_used` for the approximation used.
+    pub disk_bytes_used: IntGaugeVec,
+    /// SHELF-18 — NVMe quota from `pools.rowgroup.nvme_bytes`.
+    pub disk_bytes_capacity: IntGaugeVec,
+    /// Track B3 — bytes returned by origin GET/HEAD requests,
+    /// partitioned by bucket + outcome (`hit` is unused here;
+    /// outcomes are `ok` / `not_found` / `error` / `timeout`).
+    /// Subtract from `shelf_s3_shim_response_bytes_total` to see
+    /// how many bytes the cache saved going over the wire.
+    pub origin_request_bytes_total: IntCounterVec,
+    /// Track B3 — origin latency histogram, one observation per
+    /// `get_range` / `head` call.
+    pub origin_request_seconds: HistogramVec,
+    /// Track B3 — bytes the S3 shim returned to Trino. Partitioned
+    /// by outcome (`hit_memory` / `hit_disk` / `miss` / `passthrough`).
+    /// This is the numerator of the cache byte-efficiency KPI:
+    ///   1 - (shelf_origin_request_bytes_total / shelf_s3_shim_response_bytes_total)
+    pub s3_shim_response_bytes_total: IntCounterVec,
 }
+
+/// Track G-11 — global handle for `shelf_hits_total` so the
+/// background warm-sampler (`crate::warm_sampler`) can read the
+/// per-pool counter without holding an `Arc<Registry>`. `Registry::init`
+/// clones this handle into the struct so existing call sites keep
+/// working.
+pub static HITS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_hits_total",
+        "Cache hits, partitioned by Foyer pool (see ADR-0008).",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register hits_total")
+});
+
+/// Track G-11 — global handle for `shelf_misses_total`. See
+/// [`HITS_TOTAL`] for rationale.
+pub static MISSES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_misses_total",
+        "Cache misses that fell through to origin.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register misses_total")
+});
 
 impl Registry {
     /// Register every Shelf metric. Safe to call once per process.
     pub fn init() -> crate::Result<Self> {
-        let hits_total = register_int_counter_vec_with_registry!(
-            "shelf_hits_total",
-            "Cache hits, partitioned by Foyer pool (see ADR-0008).",
-            &["pool"],
-            REGISTRY
-        )
-        .map_err(|e| crate::Error::Internal(anyhow::anyhow!("register hits: {e}")))?;
-
-        let misses_total = register_int_counter_vec_with_registry!(
-            "shelf_misses_total",
-            "Cache misses that fell through to origin.",
-            &["pool"],
-            REGISTRY
-        )
-        .map_err(|e| crate::Error::Internal(anyhow::anyhow!("register misses: {e}")))?;
+        let hits_total = HITS_TOTAL.clone();
+        let misses_total = MISSES_TOTAL.clone();
 
         let head_hits_total = register_int_counter_vec_with_registry!(
             "shelf_head_hits_total",
@@ -97,6 +137,23 @@ impl Registry {
         )
         .map_err(|e| crate::Error::Internal(anyhow::anyhow!("register req_seconds: {e}")))?;
 
+        // SHELF-18 disk-tier series.
+        //
+        // These live as module-level `Lazy` statics so the
+        // `FoyerStore::get` hot path can bump them without owning
+        // an `Arc<Registry>` handle. `Registry::init` clones the
+        // handles in so `/metrics` touches and the `Registry`
+        // struct surface stay symmetric with the other series.
+        let disk_hits_total = DISK_HITS_TOTAL.clone();
+        let disk_misses_total = DISK_MISSES_TOTAL.clone();
+        let disk_bytes_used = DISK_BYTES_USED.clone();
+        let disk_bytes_capacity = DISK_BYTES_CAPACITY.clone();
+
+        // Track B3 — origin + shim byte / latency telemetry.
+        let origin_request_bytes_total = ORIGIN_REQUEST_BYTES_TOTAL.clone();
+        let origin_request_seconds = ORIGIN_REQUEST_SECONDS.clone();
+        let s3_shim_response_bytes_total = S3_SHIM_RESPONSE_BYTES_TOTAL.clone();
+
         Ok(Self {
             hits_total,
             misses_total,
@@ -105,9 +162,334 @@ impl Registry {
             errors_total,
             bytes_used,
             request_seconds,
+            disk_hits_total,
+            disk_misses_total,
+            disk_bytes_used,
+            disk_bytes_capacity,
+            origin_request_bytes_total,
+            origin_request_seconds,
+            s3_shim_response_bytes_total,
         })
     }
 }
+
+/// SHELF-18 disk-tier counters / gauges, registered lazily into the
+/// global [`REGISTRY`].
+///
+/// Exposed as module-level statics so modules that do not hold an
+/// `Arc<Registry>` (e.g. the hot-path `store.rs`) can increment them
+/// directly. `Registry::init` clones these handles for the `Registry`
+/// struct so consumers that already read from the struct keep
+/// working.
+pub static DISK_HITS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_disk_hits_total",
+        "Cache hits served from the NVMe tier of a hybrid pool (SHELF-18).",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register disk_hits")
+});
+
+pub static DISK_MISSES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_disk_misses_total",
+        "Misses that reached the NVMe tier of a hybrid pool and still missed.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register disk_misses")
+});
+
+pub static DISK_BYTES_USED: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_disk_bytes_used",
+        "Best-effort bytes held on the NVMe tier of each pool.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register disk_bytes_used")
+});
+
+pub static DISK_BYTES_CAPACITY: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_disk_bytes_capacity",
+        "Configured NVMe capacity for each pool (pools.<pool>.nvme_bytes).",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register disk_bytes_capacity")
+});
+
+/// Track B3 — bytes returned by origin calls. Label `outcome` is
+/// one of `ok`, `not_found`, `error`, `timeout`. Label `op` is
+/// `get_range` or `head`. `bucket` is cardinality-bounded (one per
+/// origin client, typically 1-5 in practice).
+pub static ORIGIN_REQUEST_BYTES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_origin_request_bytes_total",
+        "Bytes returned by origin (S3) requests, excludes HTTP headers.",
+        &["bucket", "op", "outcome"],
+        REGISTRY
+    )
+    .expect("register origin_request_bytes_total")
+});
+
+/// Track B3 — origin latency in seconds. Histogram buckets chosen
+/// to cover ~1 ms (cache-side miss retry) up to 30 s (request
+/// timeout).
+pub static ORIGIN_REQUEST_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec_with_registry!(
+        "shelf_origin_request_seconds",
+        "End-to-end origin request latency, per op + outcome.",
+        &["bucket", "op", "outcome"],
+        prometheus::exponential_buckets(0.001, 2.0, 15).expect("origin bucket gen"),
+        REGISTRY
+    )
+    .expect("register origin_request_seconds")
+});
+
+/// Track B3 — bytes the S3 shim returned to Trino. `outcome`
+/// mirrors the cache outcome: `hit_memory`, `hit_disk`, `miss`,
+/// `passthrough`. `op` is `get_object` / `head_object`.
+pub static S3_SHIM_RESPONSE_BYTES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_s3_shim_response_bytes_total",
+        "Response body bytes served by the S3 shim, by op + outcome.",
+        &["op", "outcome"],
+        REGISTRY
+    )
+    .expect("register s3_shim_response_bytes_total")
+});
+
+/// Track E8 — admission-policy outcomes. `decision` is one of
+/// `admit`, `reject_size`, `reject_model`, `reject_other`. `pool`
+/// matches the cache pool label used elsewhere.
+pub static ADMISSIONS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_admissions_total",
+        "Admission-policy decisions, per pool.",
+        &["pool", "decision"],
+        REGISTRY
+    )
+    .expect("register admissions_total")
+});
+
+/// Track E8 — eviction cause. `reason` is one of
+/// `capacity`, `ttl`, `admin`, `unpin`, `reload`. The counter is
+/// intentionally coarse; Foyer's own internal eviction callbacks
+/// feed it from `store.rs`.
+pub static EVICTIONS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_evictions_total",
+        "Cache evictions, per pool + reason.",
+        &["pool", "reason"],
+        REGISTRY
+    )
+    .expect("register evictions_total")
+});
+
+/// Track E8 — live single-flight fan-in count. Gauge because it's
+/// a snapshot; counters would require a (pool, key) cardinality
+/// explosion. See [`FoyerStore::get_or_fetch`].
+pub static INFLIGHT_SINGLEFLIGHT: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_inflight_singleflight",
+        "In-flight single-flight fetches per pool.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register inflight_singleflight")
+});
+
+/// Track E7 — per-fingerprint query count. `fingerprint` is the
+/// canonicalised jsonPlan fingerprint the plugin tags on each
+/// request via an `X-Shelf-Query-Fingerprint` HTTP header (or, in
+/// absence, derives from the split identifier). `tenant` is the
+/// Trino resource group or user prefix we report cost against.
+///
+/// Cardinality cap: the plugin truncates unique fingerprints to the
+/// top-200 by rolling window; anything outside the cap is mapped to
+/// the sentinel `other`. This keeps the series count bounded even
+/// under pathological one-shot workloads.
+pub static QUERIES_SERVED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_queries_served_total",
+        "Queries served by shelf, grouped by jsonPlan fingerprint + tenant. \
+         Feeds the MV advisor (H1) and the $/query cost dashboard.",
+        &["fingerprint", "tenant"],
+        REGISTRY
+    )
+    .expect("register queries_served_total")
+});
+
+/// Track E7 — per-fingerprint bytes saved by cache hits. Bytes
+/// saved = bytes served from shelf that did **not** go to the S3
+/// origin. Paired with `QUERIES_SERVED_TOTAL` to compute
+/// bytes-saved-per-query, which is the primary signal the MV
+/// advisor (H1) uses to rank candidate materialised views.
+pub static BYTES_SAVED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_bytes_saved_total",
+        "Bytes served out of the shelf cache (i.e. saved from the S3 origin), \
+         grouped by jsonPlan fingerprint + tenant. Combine with \
+         shelf_queries_served_total for a per-fingerprint $/query picture.",
+        &["fingerprint", "tenant"],
+        REGISTRY
+    )
+    .expect("register bytes_saved_total")
+});
+
+/// Track H5 — per-MV hit count. `mv_name` is the fully-qualified
+/// materialized view name (`schema.table`) resolved from the pinned
+/// file set maintained by H3's mv-pin-watcher. Bounded by the number
+/// of MVs published in a cluster (typically <500 in production) so
+/// cardinality is a non-issue; queries that touch an unpinned file
+/// are not counted here — this series intentionally *only* fires
+/// on MV-backed hits so the numerator matches "work the MV saved
+/// us", which is what H1's advisor and the $/query dashboard want.
+pub static MV_HITS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_mv_hits_total",
+        "Cache hits served from a pinned Iceberg materialized view, \
+         per fully-qualified MV name. Incremented when a /cache GET \
+         resolves a key that the H3 mv-pin-watcher registered as \
+         belonging to an MV snapshot.",
+        &["mv_name"],
+        REGISTRY
+    )
+    .expect("register mv_hits_total")
+});
+
+/// Track H5 — per-MV bytes returned to Trino from the cache. Paired
+/// with `MV_HITS_TOTAL` to drive the "MV served bytes / MV hits"
+/// panel (average rowgroup size per MV) and the "MV served bytes /
+/// origin bytes" panel (how much origin traffic the MV killed).
+pub static MV_BYTES_SERVED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_mv_bytes_served_total",
+        "Bytes served from a pinned Iceberg materialized view, per \
+         fully-qualified MV name. Excludes HTTP headers; matches the \
+         semantics of shelf_s3_shim_response_bytes_total but scoped \
+         to MV-backed hits only.",
+        &["mv_name"],
+        REGISTRY
+    )
+    .expect("register mv_bytes_served_total")
+});
+
+/// Track G-4 — per-table hit counter. Adds a `table` label that is
+/// derived in the S3 shim from the Iceberg-on-S3 path layout
+/// (`<bucket>/<schema>/<table>/{data,metadata}/...`). Carried as a
+/// **separate** series — not a new label on `shelf_hits_total` — so
+/// existing PromQL (`sum(shelf_hits_total)`, alert rules, dashboard
+/// panels) keeps the exact label set it has today.
+///
+/// Cardinality: cardinality is the prod table count (≤ ~500 per
+/// the cdp catalog as of 2026-04-27) × 2 pools = ≤ 1_000 series
+/// per metric. Unparsed keys (e.g. `.alluxio_s3_api_metadata/*`
+/// from prior deployments, presigned junk, manifest temp files)
+/// fold into the sentinel label `other` so a freshly-deployed
+/// daemon never explodes its label set.
+pub static HITS_BY_TABLE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_hits_by_table_total",
+        "Cache hits, partitioned by Foyer pool + Iceberg table \
+         (`schema.table`) parsed from the S3 key. Layered alongside \
+         shelf_hits_total so existing dashboards keep working; \
+         cardinality is bounded by the prod table count.",
+        &["pool", "table"],
+        REGISTRY
+    )
+    .expect("register hits_by_table_total")
+});
+
+/// Track G-4 companion — per-table miss counter. Same labelling
+/// convention as [`HITS_BY_TABLE_TOTAL`]. Together they answer
+/// "which dashboard / pipeline is cold?" without needing to
+/// cross-join Trino query logs against shelf metrics.
+pub static MISSES_BY_TABLE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_misses_by_table_total",
+        "Cache misses, partitioned by Foyer pool + Iceberg table.",
+        &["pool", "table"],
+        REGISTRY
+    )
+    .expect("register misses_by_table_total")
+});
+
+/// Track G-10 — Foyer / pool engine resets that wiped in-memory or
+/// on-disk state without a process restart. The post-cutover snapshot
+/// 2026-04-27 caught `shelf_hits_total` rolling back to 0 multiple
+/// times on shelf-2 with no pod restart, suggesting Foyer was
+/// re-initialising one of the pools mid-flight. There was no metric
+/// to confirm or alert on that, so the symptom only surfaced via
+/// hand-eyeballing dashboards. `reason` is one of:
+///   `pool_open_retry`  — `FoyerStore::open` retried after a Foyer
+///                        device init failure.
+///   `nvme_format`      — disk ring was reformatted (e.g. UFS root
+///                        change, Foyer compaction abort).
+///   `oom_recovery`     — pool was rebuilt after a controlled
+///                        eviction loop broke containment.
+///   `manual`           — operator-triggered via `POST /admin/reset`
+///                        (when SHELF-23 surfaces it).
+///   `other`            — unclassified; investigate.
+pub static ENGINE_RESETS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_engine_resets_total",
+        "Foyer pool engine resets that wiped resident state without \
+         a process restart. Non-zero on a healthy cluster is a paging \
+         signal: dashboards must alert at rate > 0 over 15m.",
+        &["pool", "reason"],
+        REGISTRY
+    )
+    .expect("register engine_resets_total")
+});
+
+/// Track G-11 — wall-clock seconds from pod ready until the rolling
+/// hit-ratio first crosses the operator-configured warm threshold
+/// (default 0.50). Captured once per pod lifetime; subsequent
+/// crossings are no-ops. The signal answers the Karpenter
+/// spot-churn question "how long does a freshly-rotated shelfd
+/// pod take to start *being* a cache" and is the SLI for the
+/// post-cutover canary gate (≥ 80% hit ratio after 12h warm).
+///
+/// Implementation: a one-shot gauge — once the threshold crosses we
+/// `set()` the elapsed seconds and never overwrite. Operators read
+/// the gauge by `max_over_time(...)` so a missing pod (rotated
+/// before warming) shows up as a gap instead of a phantom 0.
+pub static WARM_THRESHOLD_CROSSED_SECONDS: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_warm_threshold_crossed_seconds",
+        "Seconds from pod ready until rolling hit ratio first crossed \
+         the configured warm threshold. Set once per pod lifetime; \
+         absent until the threshold actually crosses.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register warm_threshold_crossed_seconds")
+});
+
+/// Track G-11 companion — current rolling hit ratio per pool, in
+/// basis points (0–10_000). Sampled by the same `warm_sampler`
+/// task that flips `WARM_THRESHOLD_CROSSED_SECONDS`. Exposed as
+/// an integer gauge to dodge the "scientific notation in YAML"
+/// landmine the Helm chart hit on big-number floats; clients
+/// divide by 100 for a percentage. A separate gauge from
+/// `(hits / (hits+misses))` because the Foyer counters are
+/// monotonic-since-boot and can hide the *current* warmth state
+/// behind a giant cold-start tail.
+pub static ROLLING_HIT_RATIO_BPS: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_rolling_hit_ratio_bps",
+        "Rolling hit ratio per pool, in basis points (0-10_000). \
+         Window is the last 60s of hits/misses; resets once per \
+         minute. Divide by 100 for a percentage.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register rolling_hit_ratio_bps")
+});
 
 /// Stable list of metric series `shelfd` exposes on `/metrics` in the
 /// Phase-0 gate build. Kept as module-level data so `docs/metrics.md`
@@ -121,6 +503,32 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelfd_error_total",
     "shelf_bytes_used",
     "shelf_request_seconds",
+    // SHELF-18 — disk-tier telemetry.
+    "shelf_disk_hits_total",
+    "shelf_disk_misses_total",
+    "shelf_disk_bytes_used",
+    "shelf_disk_bytes_capacity",
+    // Track B3 — origin + shim byte / latency telemetry.
+    "shelf_origin_request_bytes_total",
+    "shelf_origin_request_seconds",
+    "shelf_s3_shim_response_bytes_total",
+    // Track E8 — admission + eviction + single-flight telemetry.
+    "shelf_admissions_total",
+    "shelf_evictions_total",
+    "shelf_inflight_singleflight",
+    // Track E7 — per-fingerprint telemetry substrate for MV advisor.
+    "shelf_queries_served_total",
+    "shelf_bytes_saved_total",
+    // Track H5 — per-MV hit / byte counters feeding the MV Grafana panel.
+    "shelf_mv_hits_total",
+    "shelf_mv_bytes_served_total",
+    // Track G-10 / G-11 — engine-reset alert + warm-up SLI.
+    "shelf_engine_resets_total",
+    "shelf_warm_threshold_crossed_seconds",
+    "shelf_rolling_hit_ratio_bps",
+    // Track G-4 — per-table hit / miss counters.
+    "shelf_hits_by_table_total",
+    "shelf_misses_by_table_total",
 ];
 
 #[cfg(test)]
@@ -163,6 +571,25 @@ mod tests {
             reg.errors_total.desc(),
             reg.bytes_used.desc(),
             reg.request_seconds.desc(),
+            reg.disk_hits_total.desc(),
+            reg.disk_misses_total.desc(),
+            reg.disk_bytes_used.desc(),
+            reg.disk_bytes_capacity.desc(),
+            reg.origin_request_bytes_total.desc(),
+            reg.origin_request_seconds.desc(),
+            reg.s3_shim_response_bytes_total.desc(),
+            ADMISSIONS_TOTAL.desc(),
+            EVICTIONS_TOTAL.desc(),
+            INFLIGHT_SINGLEFLIGHT.desc(),
+            QUERIES_SERVED_TOTAL.desc(),
+            BYTES_SAVED_TOTAL.desc(),
+            MV_HITS_TOTAL.desc(),
+            MV_BYTES_SERVED_TOTAL.desc(),
+            ENGINE_RESETS_TOTAL.desc(),
+            WARM_THRESHOLD_CROSSED_SECONDS.desc(),
+            ROLLING_HIT_RATIO_BPS.desc(),
+            HITS_BY_TABLE_TOTAL.desc(),
+            MISSES_BY_TABLE_TOTAL.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -200,6 +627,61 @@ mod tests {
         reg.request_seconds
             .with_label_values(&["/cache", "hit"])
             .observe(0.0);
+        reg.disk_hits_total
+            .with_label_values(&["rowgroup"])
+            .inc_by(0);
+        reg.disk_misses_total
+            .with_label_values(&["rowgroup"])
+            .inc_by(0);
+        reg.disk_bytes_used.with_label_values(&["rowgroup"]).set(0);
+        reg.disk_bytes_capacity
+            .with_label_values(&["rowgroup"])
+            .set(0);
+        reg.origin_request_bytes_total
+            .with_label_values(&["b", "get_range", "ok"])
+            .inc_by(0);
+        reg.origin_request_seconds
+            .with_label_values(&["b", "get_range", "ok"])
+            .observe(0.0);
+        reg.s3_shim_response_bytes_total
+            .with_label_values(&["get_object", "miss"])
+            .inc_by(0);
+        ADMISSIONS_TOTAL
+            .with_label_values(&["metadata", "admit"])
+            .inc_by(0);
+        EVICTIONS_TOTAL
+            .with_label_values(&["metadata", "admin"])
+            .inc_by(0);
+        INFLIGHT_SINGLEFLIGHT
+            .with_label_values(&["metadata"])
+            .set(0);
+        QUERIES_SERVED_TOTAL
+            .with_label_values(&["fp-abc", "tenant-x"])
+            .inc_by(0);
+        BYTES_SAVED_TOTAL
+            .with_label_values(&["fp-abc", "tenant-x"])
+            .inc_by(0);
+        MV_HITS_TOTAL
+            .with_label_values(&["analytics.top_ten"])
+            .inc_by(0);
+        MV_BYTES_SERVED_TOTAL
+            .with_label_values(&["analytics.top_ten"])
+            .inc_by(0);
+        ENGINE_RESETS_TOTAL
+            .with_label_values(&["metadata", "pool_open_retry"])
+            .inc_by(0);
+        WARM_THRESHOLD_CROSSED_SECONDS
+            .with_label_values(&["metadata"])
+            .set(0);
+        ROLLING_HIT_RATIO_BPS
+            .with_label_values(&["metadata"])
+            .set(0);
+        HITS_BY_TABLE_TOTAL
+            .with_label_values(&["metadata", "other"])
+            .inc_by(0);
+        MISSES_BY_TABLE_TOTAL
+            .with_label_values(&["metadata", "other"])
+            .inc_by(0);
 
         let families = REGISTRY.gather();
         let names: HashSet<String> = families.iter().map(|f| f.get_name().to_owned()).collect();

@@ -1,0 +1,38 @@
+{
+  "tables": [
+    {
+      "catalog": "cdp",
+      "schema": "icesheet",
+      "table": "silver_events_2026",
+      "snapshot_id": 1001,
+      "partition_spec": [
+        {
+          "field": "event_region",
+          "transform": "identity"
+        }
+      ],
+      "entries_file": "cdp.icesheet.silver_events_2026/1001.json"
+    },
+    {
+      "catalog": "cdp",
+      "schema": "gold",
+      "table": "daily_revenue",
+      "snapshot_id": 2001,
+      "partition_spec": [],
+      "entries_file": "cdp.gold.daily_revenue/2001.json"
+    },
+    {
+      "catalog": "cdp",
+      "schema": "bronze",
+      "table": "page_events",
+      "snapshot_id": 3001,
+      "partition_spec": [
+        {
+          "field": "event_date",
+          "transform": "identity"
+        }
+      ],
+      "entries_file": "cdp.bronze.page_events/3001.json"
+    }
+  ]
+}

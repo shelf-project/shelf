@@ -1,0 +1,166 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Track H5 — Materialized view acceleration dashboard. Answers the two questions the exec summary asks every week: 'How many queries did MVs save us?' and 'How much origin traffic did MVs kill?'. Pairs `shelf_mv_hits_total{mv_name}` with `shelf_mv_bytes_served_total{mv_name}` and compares them to the overall shim / origin surface. Feeds the MV advisor's post-hoc verification loop (H1).",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {"title": "H1 MV advisor",    "url": "https://github.com/shelf-project/shelf/blob/main/runbooks/mv-advisor.md",     "type": "link", "icon": "external link"},
+    {"title": "H3 pin watcher",   "url": "https://github.com/shelf-project/shelf/blob/main/runbooks/mv-pin-watcher.md", "type": "link", "icon": "external link"}
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total MV hits (24h)",
+      "description": "`sum(increase(shelf_mv_hits_total[24h]))` — number of cache hits served from pinned MV files in the last 24 hours.",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
+      "targets": [
+        {
+          "expr": "sum(increase(shelf_mv_hits_total[24h]))",
+          "legendFormat": "hits"
+        }
+      ],
+      "options": {"colorMode": "value", "graphMode": "area"}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Bytes served by MVs (24h)",
+      "description": "`sum(increase(shelf_mv_bytes_served_total[24h]))`. Divide by total shim response bytes for the 'MV share of served traffic' KPI.",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
+      "targets": [
+        {
+          "expr": "sum(increase(shelf_mv_bytes_served_total[24h]))",
+          "legendFormat": "bytes"
+        }
+      ],
+      "options": {"colorMode": "value", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"unit": "bytes"}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "MV share of shim response bytes (1h)",
+      "description": "How much of the bytes shelfd served to Trino came from an MV. Numerator is `shelf_mv_bytes_served_total`; denominator is the full shim surface `shelf_s3_shim_response_bytes_total`. Above 30% is the H-track ship bar.",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
+      "targets": [
+        {
+          "expr": "sum(rate(shelf_mv_bytes_served_total[1h])) / ignoring() sum(rate(shelf_s3_shim_response_bytes_total[1h]))",
+          "legendFormat": "mv_share"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Active MVs (5m)",
+      "description": "Count of distinct `mv_name` labels that registered at least one hit in the last 5 minutes. Drifts downward after an MV is deprecated and traffic re-routes elsewhere.",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
+      "targets": [
+        {
+          "expr": "count(sum by (mv_name) (rate(shelf_mv_hits_total[5m])) > 0)",
+          "legendFormat": "active"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "MV hits per second (top 10 MVs)",
+      "description": "Per-MV hit rate, top 10 by volume. Use to spot the MVs carrying the fleet and the ones about to be retired.",
+      "gridPos": {"h": 10, "w": 12, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
+      "targets": [
+        {
+          "expr": "topk(10, sum by (mv_name) (rate(shelf_mv_hits_total[5m])))",
+          "legendFormat": "{{mv_name}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Bytes served per MV (top 10)",
+      "description": "Per-MV bytes-served rate; complement of the hit-rate panel. Large spread between this and the hit panel means one MV is serving big rowgroups.",
+      "gridPos": {"h": 10, "w": 12, "x": 12, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
+      "targets": [
+        {
+          "expr": "topk(10, sum by (mv_name) (rate(shelf_mv_bytes_served_total[5m])))",
+          "legendFormat": "{{mv_name}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "Bps"}}
+    },
+    {
+      "id": 20,
+      "type": "table",
+      "title": "MV scoreboard (24h)",
+      "description": "Per-MV totals for the last 24 hours. Sort by bytes-served to see which MVs the advisor (H1) should keep recommending and which ones are dead weight.",
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 14},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
+      "targets": [
+        {
+          "expr": "sum by (mv_name) (increase(shelf_mv_hits_total[24h]))",
+          "format": "table",
+          "refId": "A",
+          "legendFormat": "hits"
+        },
+        {
+          "expr": "sum by (mv_name) (increase(shelf_mv_bytes_served_total[24h]))",
+          "format": "table",
+          "refId": "B",
+          "legendFormat": "bytes"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {"byField": "mv_name", "mode": "outer"}
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["shelf", "mv", "cache"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Datasource",
+        "current": {}
+      }
+    ]
+  },
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Shelf · Materialized View Acceleration",
+  "uid": "shelf-mv-acceleration",
+  "version": 1,
+  "weekStart": ""
+}
