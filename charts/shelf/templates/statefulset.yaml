@@ -113,6 +113,16 @@ spec:
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- if and .Values.probes.startup (gt (int (.Values.probes.startup.failureThreshold | default 0)) 0) }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: data
+            initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds | default 5 }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds | default 5 }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds | default 3 }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

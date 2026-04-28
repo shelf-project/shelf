@@ -351,6 +351,20 @@ affinity:
 # S3 HEAD probe succeed. [plan §4 SHELF-02]
 # ---------------------------------------------------------------------------
 probes:
+  # -- SHELF-22 fast-follow: a startupProbe with a permissive grace
+  # window suspends liveness/readiness until shelfd finishes Foyer NVMe
+  # recovery (observed ~64 s on 240 GiB hybrid pool, can spike to 120 s
+  # on cold cache after a node-replace). Without this, the rolling
+  # restart in helm rev 23 produced 2 in-pod restarts on shelf-1
+  # (Exit 137, liveness probe failed) because Foyer recovery raced past
+  # the 75 s liveness grace (15 s initialDelay + 3 × 20 s period). After
+  # the startupProbe succeeds, the normal liveness/readiness probes
+  # take over. Set failureThreshold=0 to disable (legacy behaviour).
+  startup:
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 60   # 60 × 5 s = 5 min total grace
   liveness:
     initialDelaySeconds: 15
     periodSeconds: 20
