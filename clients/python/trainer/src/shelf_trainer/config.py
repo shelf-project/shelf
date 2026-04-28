@@ -30,8 +30,11 @@ class TrainerSettings(BaseSettings):
     )
 
     trino_host: str = Field(
-        default="trino.penpencil.svc.cluster.local",
-        description="Trino coordinator host used for query-log reads.",
+        default="localhost",
+        description=(
+            "Trino coordinator host used for query-log reads. Set via "
+            "SHELF_TRAINER_TRINO_HOST or the .env file in production."
+        ),
     )
     trino_port: int = Field(default=443)
     trino_user: str = Field(default="shelf_trainer")
@@ -44,7 +47,7 @@ class TrainerSettings(BaseSettings):
         description="Bucket holding pin_list.json and admission_v*.{txt,meta.json}.",
     )
     s3_config_prefix: str = Field(default="shelf/")
-    s3_region: str = Field(default="ap-south-1")
+    s3_region: str = Field(default="us-east-1")
 
     pin_list_top_n: int = Field(
         default=200,

@@ -2,7 +2,7 @@
 
 **Alert:** `ShelfPodRestarting`
 **Severity:** page
-**Dashboard:** https://grafana.penpencil.internal/d/shelf-overview
+**Dashboard:** https://grafana.example.internal/d/shelf-overview
 
 ## Symptom
 

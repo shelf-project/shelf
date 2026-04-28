@@ -1,0 +1,138 @@
+# Production overlay — example values for a 3-pod shelfd StatefulSet on
+# a dedicated EKS node pool with NVMe-backed PVCs and IRSA-based S3 auth.
+#
+# Treat this file as a starting template, NOT a drop-in. Tune sizing,
+# bucket names, and IRSA role ARN to match your environment, then commit
+# the result to your own deployments repo.
+#
+# Sizing rule of thumb (per pod):
+#   pod.limits.memory MUST exceed
+#     cache.pools.metadata.sizeBytes
+#   + cache.pools.rowgroup.dramSizeBytes
+#   + (origin.pool.maxConnections × ~32 MiB worst-case rowgroup)
+#   + cache.pools.rowgroup.diskCache.submitQueueSizeThresholdBytes
+#   + ~3 GiB Rust runtime / tokio stacks / jemalloc fragmentation headroom
+#
+# Violating this rule causes the kernel OOM-killer to terminate the pod
+# under load. The defaults below are conservative for a 32 GiB pod limit
+# on a node with ~27 GiB allocatable.
+
+replicaCount: 3
+
+image:
+  repository: ghcr.io/shelf-project/shelfd
+  pullPolicy: IfNotPresent
+  # Pin to the exact tag your release pipeline produces. Empty string =
+  # .Chart.AppVersion (acceptable in dev; never in prod).
+  tag: "0.1.0"
+
+serviceAccount:
+  create: true
+  annotations:
+    # IRSA role with read access to the origin bucket. Replace with your
+    # own role ARN. The role's trust policy must permit
+    # system:serviceaccount:<ns>:<release-name>-shelf.
+    eks.amazonaws.com/role-arn: arn:aws:iam::000000000000:role/shelf-prod-s3-read
+
+resources:
+  requests:
+    cpu: "4"
+    memory: "24Gi"
+  limits:
+    cpu: "8"
+    memory: "32Gi"
+
+storage:
+  # Prefer local-nvme on instance-store node families (i4i, c6id, m6id,
+  # c7gd). Fall back to ebs-gp3-wffc on EBS-only families.
+  storageClassName: local-nvme
+  size: 240Gi
+
+cache:
+  pools:
+    metadata:
+      sizeBytes: 5368709120          # 5 GiB
+    rowgroup:
+      # SHELF-E1b — LRU so every memory eviction flows through to NVMe.
+      # S3-FIFO is scan-resistant but keeps one-shot BI reads off NVMe;
+      # flip back to s3_fifo only when the SHELF-26 replay harness
+      # shows a per-policy hit-ratio gain on your workload.
+      evictionPolicy: lru
+      dramSizeBytes: 15032385536     # 14 GiB
+      nvmeSizeBytes: 257698037760    # 240 GiB; matches storage.size
+      # Foyer LODC tunables — bound the disk-cache submit queue so a
+      # burst of inflight rowgroups can't OOM the pod under load.
+      diskCache:
+        flushers: 4                                 # was Foyer default 1
+        bufferPoolSizeBytes: 268435456              # 256 MiB (Foyer default 16 MiB)
+        submitQueueSizeThresholdBytes: 1073741824   # 1 GiB hard cap on LODC RSS pressure
+  admission:
+    sizeThresholdMiB: 1024
+    pinnedBypass: true
+    model:
+      enabled: false
+      s3Uri: ""
+      maxAgeHours: 48
+  pinList:
+    # S3-backed pin list. Operators regenerate this from query logs;
+    # see tools/gen_pin_list.py.
+    s3Uri: ""
+    reloadIntervalSeconds: 900
+
+origin:
+  # Origin bucket (the data lake Trino reads).
+  bucket: ""
+  region: us-east-1
+  pool:
+    # 128 × ~32 MiB = ~4 GiB worst-case in-flight buffer cap.
+    # Trino's S3 client reuses connections aggressively, so 128 saturates
+    # a single shelfd pod's bandwidth before connection count matters.
+    maxConnections: 128
+    idleTimeoutSeconds: 60
+
+trino:
+  namespace: trino
+  coordinatorPodLabels:
+    app: trino
+    component: coordinator
+  workerPodLabels:
+    app: trino
+    component: worker
+
+networkPolicy:
+  enabled: true
+
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  additionalLabels:
+    release: kube-prometheus-stack
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+priorityClass:
+  create: true
+  value: 100000
+
+nodeSelector:
+  workload: shelf
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - topologyKey: kubernetes.io/hostname
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: shelf
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: topology.kubernetes.io/zone
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: shelf
+
+logging:
+  level: info

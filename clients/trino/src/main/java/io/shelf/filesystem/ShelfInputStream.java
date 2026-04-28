@@ -14,12 +14,15 @@
 package io.shelf.filesystem;
 
 import io.shelf.client.CircuitBreaker;
+import io.shelf.client.Key;
 import io.shelf.client.Pool;
 import io.shelf.client.RangeFetcher;
+import io.shelf.client.RowGroupIndex;
 import io.shelf.client.ShelfHttpClient;
 import io.trino.filesystem.TrinoInputStream;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Objects;
 
 /**
@@ -41,6 +44,14 @@ import java.util.Objects;
  * <p>Failover is sticky per stream: once a Shelf call fails for a stream,
  * the stream uses the delegate for the remainder of its lifetime. Trino
  * never sees a Shelf-specific error.
+ *
+ * <p><b>Per-range keying (SHELF-16).</b> Instead of using a single
+ * file-level {@code contentKey} for every read, this stream derives
+ * {@code Key.fromTuple(etag, rangeOffset, rangeLength, rgOrdinal)}
+ * fresh for each read. The ordinal comes from the supplied
+ * {@link RowGroupIndex}; for non-Parquet files and footer-less Parquet
+ * the index is {@link RowGroupIndex#constantZero()} so the key shape
+ * collapses to the pre-SHELF-16 behaviour.
  */
 public final class ShelfInputStream
         extends TrinoInputStream
@@ -50,7 +61,8 @@ public final class ShelfInputStream
     private final CircuitBreaker breaker;
     private final String endpoint;
     private final Pool pool;
-    private final String contentKey;
+    private final byte[] etag;
+    private final RowGroupIndex index;
     private final long length;
 
     private long position;
@@ -64,7 +76,8 @@ public final class ShelfInputStream
             CircuitBreaker breaker,
             String endpoint,
             Pool pool,
-            String contentKey,
+            byte[] etag,
+            RowGroupIndex index,
             long length)
     {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
@@ -72,7 +85,14 @@ public final class ShelfInputStream
         this.breaker = Objects.requireNonNull(breaker, "breaker");
         this.endpoint = Objects.requireNonNull(endpoint, "endpoint");
         this.pool = Objects.requireNonNull(pool, "pool");
-        this.contentKey = Objects.requireNonNull(contentKey, "contentKey");
+        Objects.requireNonNull(etag, "etag");
+        if (etag.length == 0) {
+            throw new IllegalArgumentException("etag must be non-empty");
+        }
+        // Defensive copy: the caller-supplied bytes must not mutate
+        // underneath a stream that will use them across many reads.
+        this.etag = Arrays.copyOf(etag, etag.length);
+        this.index = Objects.requireNonNull(index, "index");
         if (length < 0) {
             throw new IllegalArgumentException("length must be >= 0");
         }
@@ -129,6 +149,12 @@ public final class ShelfInputStream
         int want = (int) Math.min((long) len, length - position);
 
         if (!stickyDelegate && !breaker.isOpen()) {
+            // SHELF-16: derive the cache key from this specific range
+            // + row-group ordinal. Two reads of the same byte range
+            // under different ordinals hash to different keys, so the
+            // cache can distinguish them.
+            int rgOrdinal = index.ordinalFor(position, want);
+            String contentKey = Key.fromTuple(etag, position, want, rgOrdinal).toHex();
             try {
                 byte[] bytes = fetcher.rangeGet(endpoint, pool, contentKey, position, want);
                 System.arraycopy(bytes, 0, b, off, want);

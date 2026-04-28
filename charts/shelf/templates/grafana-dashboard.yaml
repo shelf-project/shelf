@@ -1,0 +1,42 @@
+{{- /*
+SHELF-27 — Grafana dashboard + alert rules ConfigMaps.
+
+The kube-prometheus-stack sidecar scrapes ConfigMaps labelled
+`grafana_dashboard: "1"` (see
+https://github.com/grafana/helm-charts/blob/main/charts/grafana/values.yaml
+`sidecar.dashboards.label`) and auto-loads every file in the CM as a
+dashboard. The alert-rules CM mirrors the pattern with
+`grafana_alert: "1"` so operators can opt alerts in/out independently.
+
+Guarded by `.Values.grafana.enabled` so clusters without Grafana don't
+get orphan ConfigMaps.
+*/ -}}
+{{- if .Values.grafana.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "shelf.fullname" . }}-grafana-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shelf.labels" . | nindent 4 }}
+    {{ .Values.grafana.dashboardLabel.key }}: {{ .Values.grafana.dashboardLabel.value | quote }}
+  annotations:
+    shelf.io/ticket: SHELF-27
+data:
+  shelf-read-path.json: |-
+{{ .Files.Get "grafana/dashboards/shelf-read-path.json" | indent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "shelf.fullname" . }}-grafana-alerts
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shelf.labels" . | nindent 4 }}
+    {{ .Values.grafana.alertLabel.key }}: {{ .Values.grafana.alertLabel.value | quote }}
+  annotations:
+    shelf.io/ticket: SHELF-27
+data:
+  shelf-read-path.yml: |-
+{{ .Files.Get "grafana/alerts/shelf-read-path.yml" | indent 4 }}
+{{- end }}

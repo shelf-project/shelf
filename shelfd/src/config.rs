@@ -46,8 +46,12 @@ pub struct Config {
     /// Membership resolver (SHELF-20).
     pub membership: MembershipConfig,
 
-    /// Pin list source + reload cadence (SHELF-24).
-    pub pin_list: PinListConfig,
+    /// Pin list source + reload cadence (SHELF-24). Optional
+    /// because dev clusters and the unit-test harness boot without a
+    /// config-bucket; `None` means the pin-list loader is never
+    /// spawned and the in-memory pin-set stays empty.
+    #[serde(default)]
+    pub pin_list: Option<PinListConfig>,
 
     /// Cap on the HEAD-response LRU (SHELF-07).
     #[serde(default = "default_head_lru_entries")]
@@ -58,6 +62,14 @@ pub struct Config {
     /// env override) enables the `tracing-opentelemetry` exporter.
     #[serde(default)]
     pub observability: ObservabilityConfig,
+
+    /// S3-compatibility read shim (SHELF-22; see ADR-0003 scope).
+    /// When `enabled`, `shelfd` binds a second HTTP listener on
+    /// [`S3ShimConfig::bind_address`] that speaks `HeadObject`
+    /// and `GetObject(Range)` so boto3 / DuckDB / Polars / `aws s3
+    /// cp` can read through the cache without the Trino plugin.
+    #[serde(default)]
+    pub s3_shim: S3ShimConfig,
 }
 
 fn default_head_lru_entries() -> u64 {
@@ -122,11 +134,65 @@ pub struct PoolsConfig {
     pub rowgroup: RowGroupPoolConfig,
 }
 
+/// Absolute default for `pool.metadata`'s DRAM budget, in bytes.
+///
+/// 5 GiB per ADR-0008 and SHELF-17. The Rust side has no
+/// `Default` impl today — config comes from `charts/shelf/values.yaml`
+/// (`cache.pools.metadata.sizeBytes`) — so this constant is the
+/// single source of truth for anyone constructing a `PoolsConfig`
+/// in-process (benchmarks, integration tests, future `Default`
+/// impls). Keep it in sync with the Helm value and with ADR-0008
+/// §Decision.
+pub const DEFAULT_METADATA_DRAM_BYTES: u64 = 5 * (1 << 30);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataPoolConfig {
-    /// DRAM quota in bytes. 5 GiB absolute per ADR-0008.
+    /// DRAM quota in bytes. 5 GiB absolute per ADR-0008 — see
+    /// [`DEFAULT_METADATA_DRAM_BYTES`] and SHELF-17.
     pub dram_bytes: u64,
+}
+
+/// In-memory eviction policy for the row-group pool's DRAM tier.
+///
+/// SHELF-E1b — ADR-0009 originally pinned the hybrid pool to S3-FIFO
+/// for scan resistance. In production we observed that S3-FIFO's
+/// "small queue → main queue → disk" promotion path keeps **one-shot**
+/// reads (Metabase admin dashboards, ad-hoc BI) off NVMe entirely:
+/// items expire from the small queue before they ever earn promotion,
+/// so `shelf_disk_bytes_used` stays at zero indefinitely.
+///
+/// LRU is a workload-agnostic alternative — every memory eviction
+/// flows straight through to the NVMe ring, so disk gets populated
+/// even on one-shot patterns. The trade-off is reduced scan
+/// resistance under bursty `INSERT INTO` rewrites; we accept that
+/// for v0.5 and revisit once SHELF-26 replays produce per-policy
+/// hit-ratio numbers on rep-2's 7-day trace.
+///
+/// `s3_fifo` remains available behind the config flag so operators
+/// can flip back without a code change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvictionPolicy {
+    /// Foyer S3-FIFO — ADR-0009 default. Memory tier holds a small
+    /// probationary queue; only entries re-accessed there are
+    /// promoted to the main queue (and consequently to NVMe).
+    S3Fifo,
+    /// Foyer LRU. Every memory eviction flows through to disk.
+    /// Default for v0.5 onwards (SHELF-E1b).
+    Lru,
+    /// Foyer LFU (W-TinyLFU). Frequency-aware; useful when a small
+    /// hot set dominates.
+    Lfu,
+    /// Foyer FIFO. Insertion-order eviction; cheapest, no promotion
+    /// machinery — used primarily by replay benchmarks.
+    Fifo,
+}
+
+impl Default for EvictionPolicy {
+    fn default() -> Self {
+        Self::Lru
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,10 +200,132 @@ pub struct MetadataPoolConfig {
 pub struct RowGroupPoolConfig {
     /// DRAM portion of the hybrid pool.
     pub dram_bytes: u64,
-    /// NVMe directory (the PVC mount point).
+    /// NVMe directory (the PVC mount point). Ignored when
+    /// [`RowGroupPoolConfig::nvme_bytes`] is `0`.
     pub nvme_dir: PathBuf,
-    /// NVMe capacity in bytes.
+    /// NVMe capacity in bytes. `0` disables the hybrid tier and
+    /// keeps `rowgroup` DRAM-only — see ADR-0009 and SHELF-18.
     pub nvme_bytes: u64,
+    /// In-memory eviction policy. See [`EvictionPolicy`].
+    ///
+    /// Defaults to [`EvictionPolicy::Lru`] (SHELF-E1b) so freshly
+    /// deployed clusters populate NVMe out of the box. Existing
+    /// YAML without this field continues to parse — `serde(default)`
+    /// fills in the LRU default.
+    #[serde(default)]
+    pub eviction_policy: EvictionPolicy,
+    /// Foyer Large-Object Disk Cache (LODC) tunables for the NVMe
+    /// tier. The defaults are deliberately *higher* than Foyer's
+    /// own defaults (`flushers=1`, `buffer_pool_size=16 MiB`,
+    /// `submit_queue_size_threshold=32 MiB`) because shelfd's
+    /// production workload spills 256 in-flight × ~32 MiB Parquet
+    /// rowgroups; Foyer's stock sizing causes
+    /// `[lodc] submit queue overflow` warnings + RSS bloat that
+    /// previously OOM-killed `shelf-1` (2026-04-27). See
+    /// `shelfd/docs/runbooks/2026-04-shelf-1-oom.md`.
+    ///
+    /// Field is `#[serde(default)]` so existing config YAML keeps
+    /// parsing.
+    #[serde(default)]
+    pub disk_cache: RowGroupDiskCacheConfig,
+}
+
+/// Foyer LODC pipeline tunables for the rowgroup hybrid pool.
+///
+/// All fields are optional; an absent value leaves the matching
+/// Foyer 0.12 default in place. The chart's `values.yaml`
+/// surfaces all three under
+/// `cache.pools.rowgroup.diskCache.{flushers,bufferPoolSizeBytes,
+/// submitQueueSizeThresholdBytes}`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RowGroupDiskCacheConfig {
+    /// Concurrent flusher tasks. Default in Foyer 0.12 is `1`,
+    /// which serialises every region write to NVMe and saturates
+    /// trivially under burst. Production target is `4`.
+    #[serde(default)]
+    pub flushers: Option<usize>,
+    /// Total flush buffer pool size in bytes (shared across
+    /// flushers). Foyer 0.12 default is 16 MiB. We bump this to
+    /// 256 MiB in production so a single burst of inflight Parquet
+    /// rowgroups does not immediately fill the submit queue.
+    #[serde(default)]
+    pub buffer_pool_size_bytes: Option<u64>,
+    /// Submit-queue size threshold in bytes. Once the total
+    /// estimated size of entries waiting to be flushed crosses this
+    /// threshold, **further entries are dropped** (Foyer logs
+    /// `[lodc] submit queue overflow`). The Foyer default is
+    /// `buffer_pool_size * 2`; we set this explicitly to bound RSS
+    /// growth from the LODC pipeline. Production target is 1 GiB.
+    #[serde(default)]
+    pub submit_queue_size_threshold_bytes: Option<u64>,
+    /// SHELF-21e-v2 — admission rate-limit (bytes/sec) into the
+    /// Foyer Large-Object Disk Cache pipeline. When set, shelfd
+    /// installs Foyer's built-in [`foyer::RateLimitPicker`] on the
+    /// `HybridCacheBuilder`, which throttles admissions so the
+    /// sustained write rate into NVMe never exceeds this ceiling.
+    ///
+    /// Why this knob exists on top of `flushers` +
+    /// `buffer_pool_size_bytes` + `submit_queue_size_threshold_bytes`:
+    /// those three bound the *size* of the LODC pipeline, but under
+    /// sustained ingress above the EBS drain rate the submit queue
+    /// still overflows (`[lodc] submit queue overflow, new entry
+    /// ignored`). The admission picker bounds the *rate* at the
+    /// admission seam, so DRAM stays hot but NVMe writes cap at a
+    /// value the disk can actually absorb.
+    ///
+    /// `None` ⇒ no limiter (pre-preview-8 behaviour; Foyer's
+    /// `AdmitAllPicker` is used). Production recommendation is
+    /// ~200 MB/s (≈ `209_715_200`) based on the EBS gp3 baseline of
+    /// ~250 MiB/s per volume, leaving headroom for the region-reclaim
+    /// read path that shares the disk.
+    #[serde(default)]
+    pub admission_bytes_per_sec: Option<u64>,
+}
+
+impl RowGroupPoolConfig {
+    /// Validate the NVMe block. SHELF-18: if `nvme_bytes > 0` the
+    /// directory must be non-empty, absolute, and either already
+    /// exist or be creatable. When `nvme_bytes == 0` we skip
+    /// validation entirely so an unused `nvme_dir` field (dev,
+    /// unit tests) does not block startup.
+    pub fn validate_nvme(&self) -> crate::Result<()> {
+        if self.nvme_bytes == 0 {
+            return Ok(());
+        }
+        if self.nvme_dir.as_os_str().is_empty() {
+            return Err(crate::Error::Config(
+                "pools.rowgroup.nvme_dir must be non-empty when nvme_bytes > 0".into(),
+            ));
+        }
+        if !self.nvme_dir.is_absolute() {
+            return Err(crate::Error::Config(format!(
+                "pools.rowgroup.nvme_dir must be absolute, got `{}`",
+                self.nvme_dir.display()
+            )));
+        }
+        // If the path exists it must be a directory. If it does
+        // not exist we do a dry-run `create_dir_all` so the daemon
+        // fails at boot rather than at first insert. `FoyerStore::open`
+        // will call `create_dir_all` again — that is a cheap no-op
+        // once the dir exists and keeps the two callsites honest.
+        if self.nvme_dir.exists() {
+            if !self.nvme_dir.is_dir() {
+                return Err(crate::Error::Config(format!(
+                    "pools.rowgroup.nvme_dir `{}` exists but is not a directory",
+                    self.nvme_dir.display()
+                )));
+            }
+        } else {
+            std::fs::create_dir_all(&self.nvme_dir).map_err(|e| {
+                crate::Error::Config(format!(
+                    "pools.rowgroup.nvme_dir `{}` is not creatable: {e}",
+                    self.nvme_dir.display()
+                ))
+            })?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,20 +351,99 @@ pub struct MembershipConfig {
     /// DNS re-resolution cadence. 5 s per SHELF-20.
     #[serde(with = "humantime_serde", default = "default_dns_refresh")]
     pub dns_refresh: Duration,
+    /// Set to `false` to skip spawning the resolver (e.g. dev / single-pod
+    /// boots, the unit-test harness, or when running shelfd outside K8s
+    /// where the headless DNS name does not resolve). When `false` the
+    /// local `Router` stays empty and `is_local_owner` returns `false`
+    /// for every key — i.e. shelfd serves only what it has, no peer
+    /// rebalancing. Defaults to `true`.
+    #[serde(default = "default_membership_enabled")]
+    pub enabled: bool,
+    /// Control-plane port the resolver scrapes for `/stats`. Defaults to
+    /// `9090` to match `charts/shelf/values.yaml service.adminPort`.
+    #[serde(default = "default_membership_stats_port")]
+    pub stats_port: u16,
+    /// Data-plane port baked into `Member::endpoint` so peers know
+    /// where to send forwards. Defaults to `9092` to match
+    /// `charts/shelf/values.yaml service.s3shimPort`.
+    #[serde(default = "default_membership_data_port")]
+    pub data_port: u16,
+    /// Hard wall-clock deadline for one peer's `/stats` probe. Defaults
+    /// to 1 s — generous against same-AZ p99 (< 5 ms) but small enough
+    /// that one slow peer cannot stall a refresh round.
+    #[serde(with = "humantime_serde", default = "default_stats_timeout")]
+    pub stats_timeout: Duration,
+    /// Time to advertise `draining: true` on `/stats` before the
+    /// process exits. Must be ≥ 2× `dns_refresh` so every peer has
+    /// observed at least one refresh window with our drain bit set.
+    /// Defaults to 15 s.
+    #[serde(with = "humantime_serde", default = "default_drain_grace")]
+    pub drain_grace: Duration,
+    /// Capacity-bytes per HRW weight unit. A pod with 1 GiB of cache
+    /// has weight 1; a pod with 100 GiB has weight 100. Defaults to
+    /// 1 GiB.
+    #[serde(default = "default_weight_unit_bytes")]
+    pub weight_unit_bytes: u64,
 }
 
 fn default_dns_refresh() -> Duration {
     Duration::from_secs(5)
 }
 
+fn default_membership_enabled() -> bool {
+    true
+}
+
+fn default_membership_stats_port() -> u16 {
+    9090
+}
+
+fn default_membership_data_port() -> u16 {
+    9092
+}
+
+fn default_stats_timeout() -> Duration {
+    Duration::from_secs(1)
+}
+
+fn default_drain_grace() -> Duration {
+    Duration::from_secs(15)
+}
+
+fn default_weight_unit_bytes() -> u64 {
+    1024 * 1024 * 1024
+}
+
+/// SHELF-24 pin-list config.
+///
+/// The loader reads `s3://{bucket}/{key}` on boot and then refreshes
+/// on both a timer and `SIGHUP`. We split bucket + key rather than
+/// accepting a single `s3://…` URI because:
+///
+/// 1. The `aws-sdk-s3` client already owns the region + endpoint
+///    resolution — a URI would duplicate that logic.
+/// 2. Helm charts already template bucket + key as separate values
+///    (`configBucket`, `pinListKey`); matching the chart shape saves
+///    an adapter layer in the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinListConfig {
-    /// S3 bucket + key, e.g. `s3://config-bucket/shelf/pin_list.json`.
-    pub source: String,
+    /// S3 bucket name (no `s3://` prefix).
+    pub bucket: String,
+    /// Object key, e.g. `shelf/pin_list.json`.
+    #[serde(default = "default_pin_key")]
+    pub key: String,
     /// SIGHUP + periodic reload cadence. 15 min per SHELF-24.
     #[serde(with = "humantime_serde", default = "default_pin_reload")]
-    pub reload_interval: Duration,
+    pub refresh_period: Duration,
+    /// Allow operators to keep the config stanza but silence the
+    /// loader (e.g. during incident response).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_pin_key() -> String {
+    "shelf/pin_list.json".to_owned()
 }
 
 fn default_pin_reload() -> Duration {
@@ -198,6 +465,55 @@ pub struct ObservabilityConfig {
     /// sidecar collector without editing the mounted YAML.
     #[serde(default)]
     pub otlp_endpoint: Option<String>,
+}
+
+/// S3-compatibility read shim listener (SHELF-22).
+///
+/// See `shelfd/docs/design-notes/SHELF-22-s3-compat-shim.md` +
+/// ADR-0003. This listener runs on a dedicated port so it can be
+/// firewalled independently of the native `/cache/...` data plane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S3ShimConfig {
+    /// Master switch. Defaults to `true` — generic clients are
+    /// the headline SHELF-22 use case so disabling them is the
+    /// opt-out path, not the default.
+    #[serde(default = "S3ShimConfig::default_enabled")]
+    pub enabled: bool,
+    /// `0.0.0.0:9092` by convention; operators can narrow to
+    /// `127.0.0.1:9092` in dev.
+    #[serde(default = "S3ShimConfig::default_bind_address")]
+    pub bind_address: String,
+    /// Cap on unbounded `GetObject` (no `Range:` header). A
+    /// request above this size returns `501 NotImplemented` with
+    /// an S3 XML envelope instructing the client to issue a
+    /// ranged read. 256 MiB keeps worst-case memory bounded for
+    /// Polars / DuckDB full-object reads while still covering
+    /// 99% of the Parquet files we see in rep-2 trino_logs.
+    #[serde(default = "S3ShimConfig::default_max_full_object_bytes")]
+    pub max_full_object_bytes: u64,
+}
+
+impl S3ShimConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_bind_address() -> String {
+        "0.0.0.0:9092".to_owned()
+    }
+    fn default_max_full_object_bytes() -> u64 {
+        256 * 1024 * 1024
+    }
+}
+
+impl Default for S3ShimConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            bind_address: Self::default_bind_address(),
+            max_full_object_bytes: Self::default_max_full_object_bytes(),
+        }
+    }
 }
 
 impl Config {
@@ -279,6 +595,7 @@ impl Config {
                 "pools.rowgroup.dram_bytes must be > 0".into(),
             ));
         }
+        self.pools.rowgroup.validate_nvme()?;
         if self.admission.size_threshold_bytes == 0 {
             return Err(crate::Error::Config(
                 "admission.size_threshold_bytes must be > 0".into(),
@@ -324,7 +641,9 @@ admission:
 membership:
   headless_service: shelf.shelf.svc.cluster.local
 pin_list:
-  source: "s3://cfg/pin_list.json"
+  bucket: "cfg"
+  key: "shelf/pin_list.json"
+  refresh_period: "15m"
 "#;
 
     #[test]
@@ -374,5 +693,176 @@ pin_list:
         let bad = MINIMAL.to_owned() + "\ngrafana: true\n";
         let err = Config::from_yaml_str(&bad, None).unwrap_err();
         assert!(matches!(err, crate::Error::Config(_)));
+    }
+
+    // SHELF-E1b — eviction policy parsing.
+    //
+    // The pre-E1b on-disk shape (no `eviction_policy:` field) must
+    // continue to parse so existing values files in deployments-repo
+    // don't need a synchronized bump. Default == LRU.
+
+    #[test]
+    fn rowgroup_eviction_policy_defaults_to_lru() {
+        let cfg = Config::from_yaml_str(MINIMAL, None).expect("parse");
+        assert_eq!(cfg.pools.rowgroup.eviction_policy, EvictionPolicy::Lru);
+    }
+
+    #[test]
+    fn rowgroup_eviction_policy_accepts_all_known_variants() {
+        for (yaml_value, expected) in [
+            ("lru", EvictionPolicy::Lru),
+            ("s3_fifo", EvictionPolicy::S3Fifo),
+            ("lfu", EvictionPolicy::Lfu),
+            ("fifo", EvictionPolicy::Fifo),
+        ] {
+            let yaml = MINIMAL.replace(
+                "    nvme_bytes: 0",
+                &format!("    nvme_bytes: 0\n    eviction_policy: {yaml_value}"),
+            );
+            let cfg = Config::from_yaml_str(&yaml, None)
+                .unwrap_or_else(|e| panic!("parse {yaml_value}: {e:?}"));
+            assert_eq!(cfg.pools.rowgroup.eviction_policy, expected);
+        }
+    }
+
+    #[test]
+    fn rowgroup_eviction_policy_rejects_unknown_variant() {
+        let yaml = MINIMAL.replace(
+            "    nvme_bytes: 0",
+            "    nvme_bytes: 0\n    eviction_policy: arc",
+        );
+        let err = Config::from_yaml_str(&yaml, None).unwrap_err();
+        assert!(matches!(err, crate::Error::Config(_)));
+    }
+
+    // SHELF-21e-v2 — `RowGroupDiskCacheConfig::admission_bytes_per_sec`
+    // plumbing. Verifies the new field is optional (unset YAML keeps
+    // parsing) and that a set value round-trips into the struct, so
+    // `build_rowgroup_pool` can hand it to Foyer's `RateLimitPicker`.
+    #[test]
+    fn rowgroup_disk_cache_admission_defaults_to_none() {
+        let cfg = Config::from_yaml_str(MINIMAL, None).expect("parse");
+        assert!(
+            cfg.pools
+                .rowgroup
+                .disk_cache
+                .admission_bytes_per_sec
+                .is_none(),
+            "default must be unset so pre-preview-8 values.yaml keeps working"
+        );
+    }
+
+    #[test]
+    fn rowgroup_disk_cache_admission_accepts_set_value() {
+        let yaml = MINIMAL.replace(
+            "    nvme_bytes: 0",
+            "    nvme_bytes: 0\n    disk_cache:\n      admission_bytes_per_sec: 209715200",
+        );
+        let cfg = Config::from_yaml_str(&yaml, None).expect("parse");
+        assert_eq!(
+            cfg.pools.rowgroup.disk_cache.admission_bytes_per_sec,
+            Some(209_715_200)
+        );
+    }
+
+    // SHELF-18 — `RowGroupPoolConfig::validate_nvme` unit tests.
+    //
+    // Path handling is intentionally strict at boot (absolute path,
+    // reject files-that-look-like-dirs) so operators hear about
+    // misconfigurations before the daemon binds its listener. The
+    // `nvme_bytes == 0` path is the noop-escape used by SHELF-17
+    // tests and the no-PVC dev cluster.
+
+    #[test]
+    fn validate_nvme_noop_when_zero_bytes() {
+        let cfg = RowGroupPoolConfig {
+            dram_bytes: 1,
+            nvme_dir: PathBuf::from(""),
+            nvme_bytes: 0,
+            eviction_policy: EvictionPolicy::default(),
+            disk_cache: RowGroupDiskCacheConfig::default(),
+        };
+        cfg.validate_nvme().expect("zero nvme bytes must be valid");
+    }
+
+    #[test]
+    fn validate_nvme_rejects_empty_dir_when_enabled() {
+        let cfg = RowGroupPoolConfig {
+            dram_bytes: 1,
+            nvme_dir: PathBuf::from(""),
+            nvme_bytes: 1,
+            eviction_policy: EvictionPolicy::default(),
+            disk_cache: RowGroupDiskCacheConfig::default(),
+        };
+        let err = cfg.validate_nvme().unwrap_err();
+        assert!(
+            matches!(&err, crate::Error::Config(m) if m.contains("nvme_dir must be non-empty"))
+        );
+    }
+
+    #[test]
+    fn validate_nvme_rejects_relative_path() {
+        let cfg = RowGroupPoolConfig {
+            dram_bytes: 1,
+            nvme_dir: PathBuf::from("relative/path"),
+            nvme_bytes: 1,
+            eviction_policy: EvictionPolicy::default(),
+            disk_cache: RowGroupDiskCacheConfig::default(),
+        };
+        let err = cfg.validate_nvme().unwrap_err();
+        assert!(matches!(&err, crate::Error::Config(m) if m.contains("must be absolute")));
+    }
+
+    #[test]
+    fn validate_nvme_creates_missing_absolute_dir() {
+        // Pick a deterministic per-test path under `std::env::temp_dir`
+        // so we do not pull in `tempfile` for what is a ~ms
+        // existence check. The test cleans up after itself.
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "shelfd-validate-nvme-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!dir.exists(), "precondition: dir must not exist");
+        let cfg = RowGroupPoolConfig {
+            dram_bytes: 1,
+            nvme_dir: dir.clone(),
+            nvme_bytes: 1,
+            eviction_policy: EvictionPolicy::default(),
+            disk_cache: RowGroupDiskCacheConfig::default(),
+        };
+        cfg.validate_nvme().expect("creatable dir must validate");
+        assert!(dir.is_dir(), "validator must create the missing dir");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_nvme_rejects_non_directory_path() {
+        // Create a temp *file* and point the validator at it — the
+        // validator must refuse rather than silently accept.
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "shelfd-validate-nvme-file-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"x").expect("seed file");
+        let cfg = RowGroupPoolConfig {
+            dram_bytes: 1,
+            nvme_dir: path.clone(),
+            nvme_bytes: 1,
+            eviction_policy: EvictionPolicy::default(),
+            disk_cache: RowGroupDiskCacheConfig::default(),
+        };
+        let err = cfg.validate_nvme().unwrap_err();
+        assert!(matches!(&err, crate::Error::Config(m) if m.contains("not a directory")));
+        let _ = std::fs::remove_file(&path);
     }
 }

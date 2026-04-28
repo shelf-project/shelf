@@ -1,0 +1,68 @@
+# SHELF-27 — Prometheus alert rules for the Shelf read path.
+#
+# Thresholds and windows are documented in
+# shelfd/docs/design-notes/SHELF-27-observability-dashboard.md.
+#
+# NOTE: `shelf_request_seconds` is emitted with labels `path` and
+# `outcome`; it does NOT currently carry a `status` label. The
+# `ShelfReadPathHighErrorRate` rule ships with the literal
+# `status=~"5.."` selector the SHELF-27 spec calls for — once the
+# histogram is augmented with a status (or we introduce a dedicated
+# shelf_http_requests_total counter) this rule starts firing on real
+# data. Until then the selector matches zero series, which means the
+# rule evaluates to NaN and does NOT page (Prometheus treats NaN > 0.01
+# as false). See shelfd/docs/metrics.md for the authoritative label
+# surface.
+#
+# REPLICA-DIMENSION NOTE: every rule below groups `by (replica)` so
+# that the compressed-canary rollout (see docs/rollout-v1.md) fires a
+# page for the specific Trino replica whose read path is degraded,
+# rather than collapsing all four into a single "the cache is broken"
+# signal that requires manual drill-down. The `replica` label itself
+# is attached by shelfd's s3_shim when it sees the
+# `X-Shelf-Client-Replica` header set in each Trino replica's
+# iceberg.properties (see shelfd/docs/design-notes/SHELF-27a-per-replica-label.md).
+# Until SHELF-27a lands and shelfd emits the label, `by (replica)`
+# collapses to a single empty-label group — alerts fire cluster-wide
+# as they did pre-rollout. This is correct-by-construction: the
+# moment the label appears, the alerts automatically split per-replica
+# without any rule change.
+
+groups:
+  - name: shelf-read-path
+    rules:
+      - alert: ShelfReadPathHighErrorRate
+        expr: |
+          sum by (replica) (rate(shelf_request_seconds_count{status=~"5.."}[10m]))
+            / clamp_min(sum by (replica) (rate(shelf_request_seconds_count[10m])), 1e-9) > 0.01
+        for: 10m
+        labels:
+          severity: page
+          service: shelf
+          replica: '{{ $labels.replica }}'
+        annotations:
+          summary: "Shelf 5xx rate above 1% for 10m on replica {{ $labels.replica }}"
+          runbook: "https://internal/runbooks/shelf-errors"  # SHELF-28 runbook
+
+      - alert: ShelfReadPathP99Degraded
+        expr: |
+          histogram_quantile(0.99, sum by (le, replica) (rate(shelf_request_seconds_bucket[10m]))) > 0.1
+        for: 10m
+        labels:
+          severity: warn
+          service: shelf
+          replica: '{{ $labels.replica }}'
+        annotations:
+          summary: "Shelf p99 read latency > 100ms for 10m on replica {{ $labels.replica }}"
+
+      - alert: ShelfReadPathHitRatioCollapsed
+        expr: |
+          (sum by (replica) (rate(shelf_hits_total[30m])) /
+           clamp_min(sum by (replica) (rate(shelf_hits_total[30m])) + sum by (replica) (rate(shelf_misses_total[30m])), 1e-9)) < 0.4
+        for: 30m
+        labels:
+          severity: info
+          service: shelf
+          replica: '{{ $labels.replica }}'
+        annotations:
+          summary: "Shelf hit-ratio < 40% for 30m on replica {{ $labels.replica }} — check rotation / warmup"

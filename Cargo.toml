@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
 license = "Apache-2.0"
-repository = "https://github.com/penpencil-oss/shelf"
+repository = "https://github.com/shelf-project/shelf"
 readme = "README.md"
 
 # Shared dep versions. Binaries pick what they need from this table so that
@@ -61,6 +61,19 @@ prost = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
 # Bench deps
 criterion = { version = "0.5", features = ["html_reports"] }
+# Embedded admin UI — rust-embed bakes the Vite bundle into the binary
+# under the `ui` feature. `mime_guess` resolves a Content-Type from the
+# asset path so we don't ship our own extension table.
+rust-embed = "8"
+mime_guess = "2"
+# SHELF E2 — zstd for Pool::Metadata compression. Pure-Rust (no C
+# deps) via the bundled `zstd-safe` layer; `zstd = "0.13"` pins a
+# maintained line. Metadata pool is the only caller for now.
+zstd = "0.13"
+# SHELF-D7 — `POST /cache/contains` encodes its hit-bitmap as
+# base64 so callers don't need a binary content-type handler. Kept
+# on the `0.22` line which is the last to build on our MSRV.
+base64 = "0.22"
 
 [profile.release]
 lto = "thin"

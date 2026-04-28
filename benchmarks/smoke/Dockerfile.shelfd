@@ -1,0 +1,55 @@
+# Multi-stage image for the shelfd daemon used by the SHELF-12 smoke
+# harness. NOT a production image: builds debug-profile on every run,
+# pulls full toolchain, no distroless hardening. See
+# `shelf/benchmarks/smoke/docs/SHELF-12-design-notes.md` for scope.
+#
+# Lives under benchmarks/smoke/ on purpose: the production Dockerfile
+# for shelfd is out of scope for SHELF-12 (and not yet authored).
+
+# ---- optional UI stage ----
+# Always runs — its cost is a few seconds on a warm npm cache, and
+# the produced dist/ is only baked into the binary when
+# SHELFD_FEATURES contains `ui`. Keeping it unconditional means the
+# `ui` toggle is a single build arg, not a profile-level rewrite of
+# the compose graph.
+FROM node:20-alpine AS ui-builder
+WORKDIR /ui
+RUN corepack enable
+COPY shelfd/ui/package.json shelfd/ui/pnpm-lock.yaml* ./
+RUN pnpm install --frozen-lockfile 2>/dev/null || pnpm install
+COPY shelfd/ui/ ./
+RUN pnpm build
+
+# ---- builder ----
+FROM rust:1.83-slim-bookworm AS builder
+ARG SHELFD_FEATURES=""
+WORKDIR /build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      pkg-config libssl-dev protobuf-compiler ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Build context is the repo root so we can pick up the workspace as-is.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml deny.toml ./
+COPY shelfd ./shelfd
+COPY shelfctl ./shelfctl
+
+# Overlay the freshly built SPA on top of the committed placeholder.
+# When SHELFD_FEATURES omits `ui`, `rust-embed` is never compiled and
+# this layer is a no-op.
+COPY --from=ui-builder /ui/dist/ /build/shelfd/ui/dist/
+
+RUN if [ -n "$SHELFD_FEATURES" ]; then \
+      cargo build -p shelfd --release --features "$SHELFD_FEATURES"; \
+    else \
+      cargo build -p shelfd --release; \
+    fi
+
+# ---- runtime ----
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /build/target/release/shelfd /usr/local/bin/shelfd
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/shelfd"]

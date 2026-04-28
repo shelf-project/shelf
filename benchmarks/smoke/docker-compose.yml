@@ -1,0 +1,155 @@
+# SHELF-12 smoke harness.
+#
+# Spins up MinIO + iceberg-rest + shelfd + Trino 480 (with
+# shelf-trino-plugin) and a one-shot seed container that writes three
+# tiny Iceberg tables into MinIO via the REST catalog. `run-smoke.sh`
+# drives the 10 canonical queries cold + warm and asserts shelfd
+# cache-hit counters rose on the warm run.
+#
+# Scope: read-only, Phase-0/1 end-to-end verification. Not a benchmark.
+
+name: shelf-smoke
+
+networks:
+  shelf-smoke:
+    driver: bridge
+
+volumes:
+  minio-data:
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2024-12-13T22-19-12Z
+    container_name: shelf-smoke-minio
+    networks: [shelf-smoke]
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    command: ["server", "/data", "--console-address", ":9001"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  minio-setup:
+    image: minio/mc:latest
+    container_name: shelf-smoke-minio-setup
+    networks: [shelf-smoke]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      set -eu;
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing local/iceberg-warehouse;
+      mc mb --ignore-existing local/shelfd-pin-list;
+      echo 'buckets ready';
+      "
+
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.6.0
+    container_name: shelf-smoke-iceberg-rest
+    networks: [shelf-smoke]
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      CATALOG_WAREHOUSE: s3://iceberg-warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+    ports:
+      - "127.0.0.1:8181:8181"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/8181"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  seed:
+    image: python:3.12-slim
+    container_name: shelf-smoke-seed
+    networks: [shelf-smoke]
+    depends_on:
+      iceberg-rest:
+        condition: service_healthy
+    working_dir: /seed
+    volumes:
+      - ./seed:/seed
+    environment:
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      WAREHOUSE_BUCKET: iceberg-warehouse
+      ICEBERG_REST_URI: http://iceberg-rest:8181
+    command: ["bash", "/seed/seed.sh"]
+
+  shelfd:
+    build:
+      context: ../..
+      dockerfile: benchmarks/smoke/Dockerfile.shelfd
+      args:
+        # Forwarded into the builder stage. Default: empty (no
+        # features, stock image). Set `SHELFD_FEATURES=ui` in the
+        # shell (e.g. `SHELFD_FEATURES=ui make smoke-up`) to bake the
+        # embedded admin UI in, reachable at http://127.0.0.1:9091/ui.
+        SHELFD_FEATURES: "${SHELFD_FEATURES:-}"
+    container_name: shelf-smoke-shelfd
+    networks: [shelf-smoke]
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    environment:
+      RUST_LOG: info
+      SHELFD_ORIGIN_ENDPOINT: http://minio:9000
+      SHELFD_ORIGIN_BUCKET: iceberg-warehouse
+      SHELFD_ORIGIN_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./config/shelfd/shelfd.yaml:/etc/shelfd/shelfd.yaml:ro
+    command: ["--config", "/etc/shelfd/shelfd.yaml"]
+    ports:
+      - "127.0.0.1:9091:9090"  # data-plane port (hosts /metrics per SHELF-02) mapped as 9091 externally
+      - "127.0.0.1:9092:9092"  # SHELF-22 S3-compat read shim (Iceberg s3.endpoint points here)
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9090/healthz || exit 1"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+
+  trino-coordinator:
+    image: trinodb/trino:480
+    container_name: shelf-smoke-trino
+    networks: [shelf-smoke]
+    depends_on:
+      shelfd:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./config/trino/etc:/etc/trino:ro
+      - ../../clients/trino/target/shelf-trino-plugin-0.0.1-SNAPSHOT.jar:/usr/lib/trino/plugin/shelf/shelf-trino-plugin.jar:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/v1/info | grep -q '\"starting\":false'"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 20s

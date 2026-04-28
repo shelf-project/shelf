@@ -1,0 +1,26 @@
+q_count_store_sales cold  ok                             wall=   10586ms plan=   13ms ana=    2ms cpu=   7770ms phys=           0B rows=1
+q_count_store_sales warm1 ok                             wall=   10690ms plan=   12ms ana=    2ms cpu=   7700ms phys=           0B rows=1
+q_count_store_sales warm2 ok                             wall=   10624ms plan=   11ms ana=    2ms cpu=   7710ms phys=           0B rows=1
+q_topk_brand_revenue cold  ok                             wall=   13630ms plan=  187ms ana=   12ms cpu=  10793ms phys=           0B rows=10
+q_topk_brand_revenue warm1 ok                             wall=   13455ms plan=   41ms ana=    3ms cpu=  10699ms phys=           0B rows=10
+q_topk_brand_revenue warm2 ok                             wall=   13107ms plan=   37ms ana=    3ms cpu=  10518ms phys=           0B rows=10
+q_filter_pushdown_customer cold  ok                             wall=    5657ms plan=   21ms ana=    2ms cpu=    595ms phys=           0B rows=1
+q_filter_pushdown_customer warm1 ok                             wall=    5519ms plan=   19ms ana=    2ms cpu=    559ms phys=           0B rows=1
+q_filter_pushdown_customer warm2 ok                             wall=    5542ms plan=   18ms ana=    2ms cpu=    550ms phys=           0B rows=1
+q_join_three_way cold  ok                             wall=   14806ms plan=   62ms ana=    5ms cpu=  12149ms phys=           0B rows=3
+q_join_three_way warm1 ok                             wall=   15123ms plan=   43ms ana=    4ms cpu=  11672ms phys=           0B rows=3
+q_join_three_way warm2 ok                             wall=   13744ms plan=   42ms ana=    4ms cpu=  11324ms phys=           0B rows=3
+q_window_top_per_state cold  ok                             wall=   15282ms plan=   41ms ana=    7ms cpu=  11302ms phys=           0B rows=636
+q_window_top_per_state warm1 ok                             wall=   15128ms plan=   31ms ana=    5ms cpu=  11193ms phys=           0B rows=636
+q_window_top_per_state warm2 ok                             wall=   15105ms plan=   29ms ana=    4ms cpu=  11139ms phys=           0B rows=636
+q_agg_rollup cold  ok                             wall=   15397ms plan=   31ms ana=    5ms cpu=  11344ms phys=           0B rows=142
+q_agg_rollup warm1 ok                             wall=   14943ms plan=   22ms ana=    4ms cpu=  11057ms phys=           0B rows=142
+q_agg_rollup warm2 ok                             wall=   14840ms plan=   22ms ana=    4ms cpu=  11061ms phys=           0B rows=142
+q_inventory_join cold  ok                             wall=    5524ms plan=   33ms ana=    4ms cpu=   6040ms phys=           0B rows=20
+q_inventory_join warm1 ok                             wall=    5674ms plan=   31ms ana=    3ms cpu=   5854ms phys=           0B rows=20
+q_inventory_join warm2 ok                             wall=    5339ms plan=   32ms ana=    4ms cpu=   5720ms phys=           0B rows=20
+q_correlated_subquery cold  ok                             wall=   12576ms plan=   42ms ana=    3ms cpu=   9467ms phys=           0B rows=100
+q_correlated_subquery warm1 ok                             wall=   12965ms plan=   27ms ana=    2ms cpu=   9489ms phys=           0B rows=100
+q_correlated_subquery warm2 ok                             wall=   12702ms plan=   28ms ana=    2ms cpu=   9431ms phys=           0B rows=100
+
+wrote /tmp/shelf_smoke/results-trino-tpcds-sf1.csv

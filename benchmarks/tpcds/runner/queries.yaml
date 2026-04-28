@@ -1,0 +1,24 @@
+# F2 — per-query overrides for run.py.
+#
+# The 99 TPC-DS queries are copied verbatim from trinodb/trino's
+# `plugin/trino-tpcds/src/main/resources/tpcds/`. Most run in under
+# 60 seconds at SF1000 on our 192 vCPU / 768 GiB budget. The
+# exceptions live here — predicate-heavy joins that can overshoot
+# without a tight per-query wall-clock cap.
+#
+# The keys are query stems (`q3`, `q67`, …). Missing entries inherit
+# `DEFAULT_TIMEOUT_S = 600` in run.py.
+
+timeouts_seconds:
+  # Predicate-heavy residual (BLUEPRINT §7.4.4) — Warp Speed wins
+  # today; still cap so shelf's TCP timeout doesn't swamp the
+  # runner.
+  q6: 900
+  q13: 900
+  q33: 900
+  q34: 900
+  q82: 900
+
+  # Extreme multi-join queries that can dominate a run if they hang.
+  q72: 1200
+  q95: 1200

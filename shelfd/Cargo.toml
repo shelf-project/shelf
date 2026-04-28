@@ -1,7 +1,13 @@
 [package]
 name = "shelfd"
 description = "Shelf cache daemon — Iceberg-native, row-group-granular read cache for Trino"
-version.workspace = true
+# SHELF-21e-v2 — preview-8 carries the Foyer LODC admission
+# rate-limiter (bytes/sec) on top of the preview-7 LODC tunables.
+# Override the workspace-level 0.1.0 here because the shelfd binary
+# ships on the `0.1.0-preview-N` Docker tag stream (matches
+# `charts/shelf/Chart.yaml::appVersion`); shelfctl stays on the
+# workspace version.
+version = "0.1.0-preview-10"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -36,7 +42,7 @@ opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 prometheus = { workspace = true }
-bytes = { workspace = true }
+bytes = { workspace = true, features = ["serde"] }
 futures = { workspace = true }
 once_cell = { workspace = true }
 sha2 = { workspace = true }
@@ -49,11 +55,39 @@ aws-sdk-s3 = { workspace = true }
 foyer = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
+# SHELF E2 — Pool::Metadata compression (gated behind `zstd_metadata`
+# feature). The dep compiles fine off-feature; only the wrapper in
+# `compression.rs` is disabled.
+zstd = { workspace = true }
+# SHELF-D7 — bitmap encoder for `POST /cache/contains`.
+base64 = { workspace = true }
+# SHELF-E6 — peer probe HTTP client. `reqwest` is also used in dev
+# tests; duplicating the entry keeps the runtime feature set narrow
+# (no blocking, no native-tls) without forcing dev tests through the
+# same feature gate.
+reqwest = { workspace = true }
+# SHELF-21c — adapter to bridge axum's `Body` (UnsyncBoxBody, !Sync)
+# into `aws_smithy_types::byte_stream::ByteStream::from_body_1_x`,
+# which requires `Send + Sync`. `sync_wrapper` is already in the
+# dependency tree transitively via axum + http; declaring it here
+# is a zero-cost direct reference. `http-body` is similarly already
+# transitively present via axum and aws-smithy-types; we re-declare
+# it for the trait + Frame types the SyncBody adapter implements.
+sync_wrapper = "1"
+http-body = "1"
+# Optional: embedded admin UI (see `ui` feature). `rust-embed` bundles
+# the `ui/dist/` Vite build into the binary; `mime_guess` picks a
+# Content-Type from the asset path.
+rust-embed = { workspace = true, optional = true }
+mime_guess = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
-reqwest = { workspace = true }
 tokio = { workspace = true }
+# SHELF-18 — integration tests for the hybrid NVMe pool need a
+# per-test temp directory that the foyer `DirectFsDevice` can own
+# and clean up on drop.
+tempfile = "3"
 
 [features]
 # Feature flags track ADR-0001/2/3/4/8/9 scope. The defaults represent
@@ -61,6 +95,11 @@ tokio = { workspace = true }
 # agents/4-shelfd-builder.md Pass 2 "Feature flags compile each pass
 # independently".
 default = []
+# Embedded admin UI (see src/ui.rs). When enabled, the Vite build at
+# `ui/dist/` is baked into the binary and served at `/ui`. Off by
+# default so the CI image stays identical and we don't require a
+# node toolchain on the critical build path.
+ui = ["dep:rust-embed", "dep:mime_guess"]
 # Enable the Foyer NVMe tier (SHELF-18). Off by default while the
 # hybrid pool is behind a PVC that only exists in rep-2.
 foyer_pool = []
@@ -69,6 +108,10 @@ foyer_pool = []
 raft = []
 # ADR-0004 keeps Arrow Flight out of v1. Same reason.
 flight = []
+# SHELF E2 — flip Pool::Metadata on-cache compression. Off by default
+# until the benchmark in `benchmarks/compression/` shows a positive
+# capacity × latency trade-off on rep-2's 7-day trace.
+zstd_metadata = []
 
 [[bench]]
 name = "hashring"

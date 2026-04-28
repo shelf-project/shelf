@@ -21,7 +21,7 @@ check `shelfctl stats --pinned-bytes` before adding.
 
 ```bash
 # 1. Current pin list.
-aws s3 cp s3://penpencil-shelf-prod-config/pin_list.json - | jq .
+aws s3 cp s3://example-shelf-prod-config/pin_list.json - | jq .
 
 # 2. How much NVMe is already pinned?
 kubectl -n shelf exec shelf-0 -- shelfctl stats --pinned-bytes

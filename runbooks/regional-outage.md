@@ -23,9 +23,9 @@ state, Shelf's value is exactly the keys already in its NVMe / DRAM —
 
 ```bash
 # 1. Is S3 actually down, or just slow?
-time aws s3api head-bucket --bucket penpencil-cdp-prod
+time aws s3api head-bucket --bucket example-cdp-prod
 aws cloudwatch get-metric-statistics --region ap-south-1 --namespace AWS/S3 \
-  --metric-name 5xxErrors --dimensions Name=BucketName,Value=penpencil-cdp-prod \
+  --metric-name 5xxErrors --dimensions Name=BucketName,Value=example-cdp-prod \
   Name=FilterId,Value=EntireBucket --start-time $(date -u -d '15 min ago' +%FT%T) \
   --end-time $(date -u +%FT%T) --period 60 --statistics Sum
 

@@ -1,0 +1,10 @@
+-- 02-group-by-user: GROUP BY with aggregation.
+-- Exercises row-group byte-range reads on two columns plus the
+-- shuffling path. ORDER BY makes the result set order-independent for
+-- the harness's sorted-hash canonicalisation (no LIMIT so we hash the
+-- full set).
+SELECT user_id, COUNT(*) AS n, SUM(value) AS total_value
+FROM {catalog}.{schema}.{table_events}
+WHERE {partition_column} >= DATE '{partition_value}'
+GROUP BY user_id
+ORDER BY user_id

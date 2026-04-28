@@ -36,12 +36,41 @@ import org.junit.jupiter.api.Test;
  */
 class KeyTest
 {
-    /** Inputs: {@code (etag, offset, length, rg_ordinal)}. */
+    /**
+     * Inputs: {@code (etag, offset, length, rg_ordinal)}.
+     *
+     * <p>Kept byte-for-byte in lockstep with {@code GOLDEN_INPUTS} in
+     * {@code shelfd/src/store.rs} and {@code tools/gen_shelf04_golden.py}.
+     * Any drift is caught by {@link #goldenVectorsMatchSharedFixture}
+     * because all three consume the exact same fixture file.
+     */
     private static final Object[][] GOLDEN_INPUTS = new Object[][] {
-            {"\"9f8e6e48a1f7e2c3b5d41234567890ab\"", 0L,           8_192L,  0},
-            {"\"aa11bb22cc33dd44ee55ff6677889900\"", 536_854_528L, 65_536L, 0},
-            {"\"aa11bb22cc33dd44ee55ff6677889900\"", 536_854_528L, 65_536L, 3},
-            {"\"d41d8cd98f00b204e9800998ecf8427e-7\"", 1L,         1L,      42},
+            // -- SHELF-04 baseline --
+            {"\"9f8e6e48a1f7e2c3b5d41234567890ab\"",  0L,                          8_192L,           0},
+            {"\"aa11bb22cc33dd44ee55ff6677889900\"",  536_854_528L,                65_536L,          0},
+            {"\"aa11bb22cc33dd44ee55ff6677889900\"",  536_854_528L,                65_536L,          3},
+            {"\"d41d8cd98f00b204e9800998ecf8427e-7\"", 1L,                         1L,               42},
+            // -- SHELF-16: row-group ordinal variants --
+            // Same (etag, offset, length), three distinct rg ordinals.
+            {"\"rg-ordinal-sweep\"",                  4_096L,                      131_072L,         0},
+            {"\"rg-ordinal-sweep\"",                  4_096L,                      131_072L,         1},
+            {"\"rg-ordinal-sweep\"",                  4_096L,                      131_072L,         7},
+            // Offset = u64::MAX / 2 = Long.MAX_VALUE = 9_223_372_036_854_775_807.
+            {"\"big-offset\"",                        Long.MAX_VALUE,              16L,              0},
+            {"\"big-offset\"",                        Long.MAX_VALUE,              16L,              255},
+            // Length = 1 byte, ordinal = u16 ceiling.
+            {"\"single-byte\"",                       0L,                          1L,               65_535},
+            // Length = 16 MiB, ordinal = 4_096.
+            {"\"row-group-xl\"",                      0L,                          (long) 16 * 1024 * 1024, 4_096},
+            // Multipart-form ETag with ordinals 0 and 2.
+            {"\"\"-multipart\"",                    0L,                          4_096L,           0},
+            {"\"\"-multipart\"",                    0L,                          4_096L,           2},
+            // ASCII-only 8-byte ETag (no outer quotes — exactly 8 bytes),
+            // every ordinal in 0..=3.
+            {"shelf16b",                                  2_048L,                      8_192L,           0},
+            {"shelf16b",                                  2_048L,                      8_192L,           1},
+            {"shelf16b",                                  2_048L,                      8_192L,           2},
+            {"shelf16b",                                  2_048L,                      8_192L,           3},
     };
 
     @Test
@@ -84,6 +113,28 @@ class KeyTest
         Key a = Key.fromTuple("etag", 0L, 1L, 0);
         Key b = Key.fromTuple("etag", 0L, 1L, 1);
         assertThat(a).isNotEqualTo(b);
+    }
+
+    /**
+     * SHELF-16 acceptance line (verbatim from
+     * {@code agents/out/03-plan.md}):
+     * "Unit test: (file X, rg 2) and (file X, rg 3) produce distinct
+     * keys". This test pins that acceptance against a concrete
+     * {@code (offset, length)} — the same row-group byte range viewed
+     * through two different ordinals must hash differently, because
+     * {@code rg_ordinal} is part of the SHA-256 preimage.
+     */
+    @Test
+    void keysDifferByRowGroupOrdinal()
+    {
+        String etag = "\"file-X\"";
+        long offset = 1_000L;
+        long length = 1_024L;
+        Key rg2 = Key.fromTuple(etag, offset, length, 2);
+        Key rg3 = Key.fromTuple(etag, offset, length, 3);
+        assertThat(rg2)
+                .as("(file X, rg 2) and (file X, rg 3) must produce distinct keys")
+                .isNotEqualTo(rg3);
     }
 
     @Test

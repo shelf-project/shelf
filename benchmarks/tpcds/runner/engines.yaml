@@ -1,0 +1,53 @@
+# F2 — engine connection matrix consumed by run.py.
+#
+# Each top-level key is an engine name accepted by `--engine`; the
+# nested map becomes the factory kwargs. Secrets MUST come from
+# environment variables (`${VAR}` expansion is done by run.py's
+# caller, not the YAML loader) so this file can live in the repo
+# without exposing credentials.
+#
+# Hardware budget assumption (see README.md): all four engines run
+# at identical 192 vCPU / 768 GiB. Network + storage classes
+# documented in `cost/hardware.yaml`.
+
+shelf:
+  url: https://trino.cache.svc.cluster.local:8443
+  user: bench-runner
+  catalog: shelf_bench
+  schema: tpcds_sf1000
+  extra_session:
+    iceberg.split_size: 128MB
+    iceberg.max_initial_splits: "200"
+    iceberg.metadata_cache_ttl: "1h"
+    iceberg.materialized_views_enabled: "true"
+  shelf_admin_urls:
+    - http://shelf-0.shelf-headless.cache.svc.cluster.local:9090
+    - http://shelf-1.shelf-headless.cache.svc.cluster.local:9090
+    - http://shelf-2.shelf-headless.cache.svc.cluster.local:9090
+    - http://shelf-3.shelf-headless.cache.svc.cluster.local:9090
+
+alluxio:
+  url: https://trino-alluxio.cache.svc.cluster.local:8443
+  user: bench-runner
+  catalog: iceberg_alluxio
+  schema: tpcds_sf1000
+  alluxio_master_url: http://alluxio-master.cache.svc.cluster.local:19999
+
+warpspeed:
+  # Populate against a Starburst Enterprise 458+ cluster that has
+  # Warp Speed enabled; bench-runner must have `SELECT ANALYZE`
+  # grants on the whole `tpcds_sf1000` schema so auto-warmup runs
+  # complete.
+  url: https://starburst.bench.corp:8443
+  user: bench-runner
+  catalog: warpspeed
+  schema: tpcds_sf1000
+  extra_session:
+    hive.warp_speed_enabled: "true"
+
+firebolt:
+  account: shelf-bench
+  engine: tpcds-bench-engine
+  database: tpcds_sf1000
+  client_id: ${FIREBOLT_CLIENT_ID}
+  client_secret: ${FIREBOLT_CLIENT_SECRET}

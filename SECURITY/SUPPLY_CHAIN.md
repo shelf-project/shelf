@@ -175,7 +175,7 @@ Runs in `.github/workflows/security.yml`:
   job with `id-token: write` — Sigstore's keyless signing backed by
   the workflow's OIDC identity.
 - Verification: `cosign verify --certificate-identity-regexp
-  "^https://github.com/penpencil-oss/shelf/\.github/workflows/release\.yml@.*$"
+  "^https://github.com/shelf-project/shelf/\.github/workflows/release\.yml@.*$"
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
   <registry>/shelfd:<tag>`.
 - Helm chart deployment (`charts/shelf/`) has a pre-install hook

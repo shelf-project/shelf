@@ -102,6 +102,8 @@ pub fn test_config() -> (OriginConfig, PoolsConfig, AdmissionConfig) {
             dram_bytes: 16 * 1024 * 1024,
             nvme_dir: PathBuf::from("/tmp/it_unused"),
             nvme_bytes: 0,
+            eviction_policy: shelfd::config::EvictionPolicy::default(),
+            disk_cache: Default::default(),
         },
     };
     let admission = AdmissionConfig {
@@ -164,4 +166,53 @@ pub async fn spawn_server(state: Arc<ServerState>) -> (SocketAddr, CancellationT
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     (addr, cancel)
+}
+
+/// Spawn the native router **and** the SHELF-22 S3-compat shim on
+/// two independent ephemeral ports. Returns `(native_addr, shim_addr,
+/// cancel)`; cancel drops both listeners.
+pub async fn spawn_server_with_shim(
+    state: std::sync::Arc<ServerState>,
+) -> (SocketAddr, SocketAddr, CancellationToken) {
+    let native_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind native");
+    let shim_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind shim");
+    let native_addr = native_listener.local_addr().unwrap();
+    let shim_addr = shim_listener.local_addr().unwrap();
+
+    let cancel = CancellationToken::new();
+
+    let native_app = http::build_router(state.clone());
+    let shim_app = http::build_s3_shim_router(state.clone());
+
+    let cancel_native = cancel.clone();
+    tokio::spawn(async move {
+        axum::serve(native_listener, native_app)
+            .with_graceful_shutdown(async move { cancel_native.cancelled().await })
+            .await
+            .expect("axum native");
+    });
+    let cancel_shim = cancel.clone();
+    tokio::spawn(async move {
+        axum::serve(shim_listener, shim_app)
+            .with_graceful_shutdown(async move { cancel_shim.cancelled().await })
+            .await
+            .expect("axum shim");
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (native_addr, shim_addr, cancel)
+}
+
+/// Build a full `ServerState` and override the SHELF-22 unbounded-GET
+/// cap in one call. Tests use this to force the 501 path without
+/// allocating a GiB-scale fixture.
+pub async fn build_state_with_shim_cap(pod_id: &str, cap: u64) -> std::sync::Arc<ServerState> {
+    let state = build_state_with_pod_id(pod_id).await;
+    state
+        .s3_shim_max_full_object_bytes
+        .store(cap, std::sync::atomic::Ordering::Relaxed);
+    state
 }
