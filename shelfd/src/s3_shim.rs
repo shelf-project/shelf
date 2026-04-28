@@ -202,7 +202,10 @@ pub(crate) fn pool_for(key: &str) -> Pool {
 /// (rare in the wild but defensible per the SigV4 spec) still gets
 /// correct decoding instead of corrupted bytes.
 fn is_aws_chunked(headers: &HeaderMap) -> bool {
-    if let Some(enc) = headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()) {
+    if let Some(enc) = headers
+        .get(header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+    {
         for token in enc.split(',') {
             if token.trim().eq_ignore_ascii_case("aws-chunked") {
                 return true;
@@ -1082,7 +1085,14 @@ async fn handle_upload_part_aws_chunked(
     let result = state
         .origin
         .as_ref()
-        .upload_part(bucket, key, upload_id, part_number, body_stream, decoded_len)
+        .upload_part(
+            bucket,
+            key,
+            upload_id,
+            part_number,
+            body_stream,
+            decoded_len,
+        )
         .await;
     match result {
         Ok(etag) => {
