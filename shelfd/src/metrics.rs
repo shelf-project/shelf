@@ -745,9 +745,7 @@ mod tests {
             .with_label_values(&["metadata", "other"])
             .inc_by(0);
         LODC_DROPS_TOTAL.with_label_values(&["rowgroup"]).inc_by(0);
-        LODC_INFLIGHT_BYTES
-            .with_label_values(&["rowgroup"])
-            .set(0);
+        LODC_INFLIGHT_BYTES.with_label_values(&["rowgroup"]).set(0);
         LODC_QUEUE_DEPTH.with_label_values(&["rowgroup"]).set(0);
 
         let families = REGISTRY.gather();

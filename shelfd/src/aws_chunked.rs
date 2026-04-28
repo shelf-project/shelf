@@ -124,12 +124,11 @@ pub fn decode_aws_chunked(bytes: &[u8]) -> Result<Bytes, AwsChunkedError> {
             None => header,
         };
 
-        let size_token = std::str::from_utf8(size_bytes).map_err(|_| {
-            AwsChunkedError::InvalidHexSize {
+        let size_token =
+            std::str::from_utf8(size_bytes).map_err(|_| AwsChunkedError::InvalidHexSize {
                 offset: header_start,
                 token: format!("{:?}", size_bytes),
-            }
-        })?;
+            })?;
 
         if size_token.is_empty() {
             return Err(AwsChunkedError::InvalidHexSize {
@@ -144,12 +143,11 @@ pub fn decode_aws_chunked(bytes: &[u8]) -> Result<Bytes, AwsChunkedError> {
                 token: size_token.to_owned(),
             });
         }
-        let size = usize::from_str_radix(size_token, 16).map_err(|_| {
-            AwsChunkedError::InvalidHexSize {
+        let size =
+            usize::from_str_radix(size_token, 16).map_err(|_| AwsChunkedError::InvalidHexSize {
                 offset: header_start,
                 token: size_token.to_owned(),
-            }
-        })?;
+            })?;
 
         if size == 0 {
             // Terminating chunk. Per RFC 7230 §4.1.2 / AWS streaming
@@ -160,14 +158,13 @@ pub fn decode_aws_chunked(bytes: &[u8]) -> Result<Bytes, AwsChunkedError> {
         }
 
         let body_start = cursor;
-        let body_end =
-            body_start
-                .checked_add(size)
-                .ok_or(AwsChunkedError::BodyTooShort {
-                    offset: header_start,
-                    declared: size,
-                    missing: usize::MAX,
-                })?;
+        let body_end = body_start
+            .checked_add(size)
+            .ok_or(AwsChunkedError::BodyTooShort {
+                offset: header_start,
+                declared: size,
+                missing: usize::MAX,
+            })?;
 
         if body_end > bytes.len() {
             return Err(AwsChunkedError::BodyTooShort {
@@ -311,7 +308,10 @@ mod tests {
     fn malformed_hex_size_rejected() {
         let wire = b"zzzz;chunk-signature=abc\r\nbody\r\n0;chunk-signature=abc\r\n\r\n";
         let err = decode_aws_chunked(wire).expect_err("must reject");
-        assert!(matches!(err, AwsChunkedError::InvalidHexSize { .. }), "got {err:?}");
+        assert!(
+            matches!(err, AwsChunkedError::InvalidHexSize { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -320,7 +320,10 @@ mod tests {
         // signers have produced this; refuse to interpret as 0.
         let wire = b";chunk-signature=abc\r\n\r\n";
         let err = decode_aws_chunked(wire).expect_err("must reject");
-        assert!(matches!(err, AwsChunkedError::InvalidHexSize { .. }), "got {err:?}");
+        assert!(
+            matches!(err, AwsChunkedError::InvalidHexSize { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -343,7 +346,10 @@ mod tests {
         wire.extend_from_slice(&body);
         wire.extend_from_slice(b"\r\n0;chunk-signature=abc\r\n\r\n");
         let err = decode_aws_chunked(&wire).expect_err("must reject");
-        assert!(matches!(err, AwsChunkedError::BodyTooShort { .. }), "got {err:?}");
+        assert!(
+            matches!(err, AwsChunkedError::BodyTooShort { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -354,7 +360,10 @@ mod tests {
         wire.extend_from_slice(b"abcd"); // 4 bytes, no CRLF
         wire.extend_from_slice(b"0;chunk-signature=abc\r\n\r\n");
         let err = decode_aws_chunked(&wire).expect_err("must reject");
-        assert!(matches!(err, AwsChunkedError::MissingBodyCrlf { .. }), "got {err:?}");
+        assert!(
+            matches!(err, AwsChunkedError::MissingBodyCrlf { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -400,7 +409,10 @@ mod tests {
         let wire = build_multi_chunk(&[&chunk1], SIG);
         // The wire form *must* contain the `20000;` prefix the RCA
         // forensic hex dump captured.
-        assert!(wire.starts_with(b"20000;chunk-signature="), "wire prefix mismatch");
+        assert!(
+            wire.starts_with(b"20000;chunk-signature="),
+            "wire prefix mismatch"
+        );
         let decoded = decode_aws_chunked(&wire).expect("decode");
         assert_eq!(decoded.len(), chunk1_size);
         assert!(decoded.starts_with(json));
@@ -408,9 +420,7 @@ mod tests {
         // chunk-signature= literal.
         let needle = b"chunk-signature=";
         assert!(
-            !decoded
-                .windows(needle.len())
-                .any(|w| w == needle),
+            !decoded.windows(needle.len()).any(|w| w == needle),
             "decoded body must not retain envelope bytes"
         );
     }

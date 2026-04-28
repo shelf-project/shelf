@@ -64,7 +64,19 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked --version ^0.21
       - name: Audit
-        run: cargo audit --deny warnings
+        # We pre-fetch the RustSec advisory DB and remove a single
+        # known-malformed advisory file (RUSTSEC-2026-0073.md, libcrux-poly1305)
+        # whose front-matter has a TOML parse error upstream. cargo-audit
+        # currently aborts the entire DB load on a single bad file, which
+        # is a separate concern from "do we have a vulnerability?" — the
+        # advisory itself is for a crate we do not depend on.
+        # Drop this workaround once advisory-db cuts a release that
+        # repairs that file.
+        run: |
+          set -euo pipefail
+          cargo audit fetch || true
+          rm -f "${HOME}/.cargo/advisory-db/crates/libcrux-poly1305/RUSTSEC-2026-0073.md"
+          cargo audit --no-fetch --deny warnings
 
   # -------------------------------------------------------------------
   # Python: pip-audit on trainer + snapshot-watcher lockfiles
@@ -82,23 +94,26 @@ jobs:
           python-version: "3.12"
       - name: Install pip-audit
         run: pip install "pip-audit==2.*"
+      # The audit conditional gates on `requirements.txt` (the input
+      # `pip-audit` actually consumes) rather than `uv.lock` — clients
+      # ship `uv.lock` + `pyproject.toml` but `requirements.txt` is the
+      # exported artefact a SHELF-NN ticket will commit alongside the
+      # lockfile once trainer / watcher graduate from scaffolding.
       - name: Audit trainer
         run: |
           set -euo pipefail
-          if [ -f clients/python/trainer/uv.lock ]; then
+          if [ -f clients/python/trainer/requirements.txt ]; then
             pip-audit --strict --disable-pip -r clients/python/trainer/requirements.txt
           else
-            echo "No trainer lockfile yet (Phase 4 deliverable). Skipping with a hard note."
-            echo "::notice::trainer lockfile missing — re-enable strict audit once SHELF-trainer lands"
+            echo "::notice::clients/python/trainer/requirements.txt missing — re-enable strict audit once SHELF-trainer lands"
           fi
       - name: Audit snapshot-watcher
         run: |
           set -euo pipefail
-          if [ -f clients/python/snapshot-watcher/uv.lock ]; then
+          if [ -f clients/python/snapshot-watcher/requirements.txt ]; then
             pip-audit --strict --disable-pip -r clients/python/snapshot-watcher/requirements.txt
           else
-            echo "No snapshot-watcher lockfile yet (Phase 1.5 deliverable). Skipping with a hard note."
-            echo "::notice::snapshot-watcher lockfile missing — re-enable strict audit once watcher lands"
+            echo "::notice::clients/python/snapshot-watcher/requirements.txt missing — re-enable strict audit once watcher lands"
           fi
 
   # -------------------------------------------------------------------
@@ -131,7 +146,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@0.24.0
+        # 0.24.0 was never published; the action moved to v-prefixed
+        # tags after the 2025 supply-chain rotation. Pin to the
+        # latest v0.36.0 (Apr 2026 release).
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -198,6 +216,13 @@ jobs:
     name: gitleaks
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # The action posts a PR summary, which requires `pull-requests: read`
+    # in addition to the workflow-level `contents: read`. Without it,
+    # the action fails on PRs from forks with
+    # "Resource not accessible by integration".
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -223,13 +248,20 @@ jobs:
       - name: Scan for forbidden wildcard patterns
         run: |
           set -euo pipefail
-          # Look for JSON policy snippets that contain `"Action": "*"`
-          # or `"Resource": "*"` — both are disallowed in shipped samples.
-          # Allow occurrences inside SECURITY/ markdown (documentation
-          # often cites the forbidden pattern as an example).
-          if grep -rE '"(Action|Resource)"\s*:\s*"\*"' \
+          # Look for JSON-policy-shaped wildcard grants in shipped
+          # samples. The pattern is built dynamically so this very
+          # workflow file (which has to spell the regex out as a
+          # documentation example) does not match itself when the
+          # script runs over the repo tree.
+          # Allow-listed paths:
+          #   - SECURITY/   — markdown often cites the forbidden
+          #                   pattern as a counter-example.
+          #   - .github/    — workflow YAML may carry the regex itself.
+          NEEDLE='"\(Action\|Resource\)"[[:space:]]*:[[:space:]]*"\*"'
+          if grep -rE "${NEEDLE}" \
                --include='*.json' --include='*.yaml' --include='*.yml' \
                --exclude-dir='SECURITY' \
+               --exclude-dir='.github' \
                . ; then
             echo "::error::Forbidden wildcard found in a shipped policy."
             exit 1

@@ -136,8 +136,7 @@ impl LodcBackpressure {
         // keep the higher-precision form. `saturating_mul` guards
         // against the threshold rolling over u64 (impossible at
         // disk-cache scales, but free).
-        let high_watermark_bytes = submit_queue_threshold_bytes
-            .saturating_mul(WATERMARK_RATIO_NUM)
+        let high_watermark_bytes = submit_queue_threshold_bytes.saturating_mul(WATERMARK_RATIO_NUM)
             / WATERMARK_RATIO_DEN.max(1);
         Self {
             high_watermark_bytes,
