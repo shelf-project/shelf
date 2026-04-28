@@ -56,7 +56,7 @@ foyer = "0.12"
 # Control plane — SHELF-23 admin surface. Phase 0 ships an HTTP stub;
 # tonic is wired in as an optional dep for when SHELF-23 lands.
 tonic = { version = "0.12", features = ["tls", "gzip"] }
-prost = "0.13"
+prost = "0.14"
 # Integration-test helper (S3 via MinIO) — see tests/README.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
 # Bench deps
