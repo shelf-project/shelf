@@ -45,7 +45,7 @@ shenanigans).
    sign-off (Year 1) on the bump PR.
 4. **Tag.** After merge, push the annotated tag `vX.Y.Z` on the release
    branch. Tag pushes trigger `.github/workflows/release.yml` (shipped
-   on a sibling PR — `aamir306/shelf#2`), which produces all release
+   on a sibling PR — `shelf-project/shelf#2`), which produces all release
    artefacts described below.
 5. **Announce.** Update GitHub Releases with the changelog excerpt and
    any operational notes (upgrade caveats, deprecations).
@@ -91,6 +91,6 @@ Patch releases follow the same cut process on the relevant
 
 - The plumbing of `release.yml` itself. That is owned by the release
   pipeline and lives at `.github/workflows/release.yml` (sibling PR
-  `aamir306/shelf#2`); changes there are reviewed there.
+  `shelf-project/shelf#2`); changes there are reviewed there.
 - Internal compute or registry costs. Operational details live in
   `runbooks/` and `docs/`.
