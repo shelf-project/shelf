@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import OpsTab from "./tabs/OpsTab";
+import StoryTab from "./tabs/StoryTab";
+import LiveTab from "./tabs/LiveTab";
+import HotTablesTab from "./tabs/HotTablesTab";
+import LabTab from "./tabs/LabTab";
 import AdminTab from "./tabs/AdminTab";
-import ShowcaseTab from "./tabs/ShowcaseTab";
 import ErrorBoundary from "./components/ErrorBoundary";
 import HelpOverlay from "./components/HelpOverlay";
 import CommandPalette, { type Command } from "./components/CommandPalette";
@@ -17,16 +19,35 @@ import { usePolled, usePolling } from "./polling";
 import { useShortcut } from "./shortcuts";
 import { useTheme } from "./theme";
 
-type TabId = "ops" | "admin" | "showcase";
+type TabId = "story" | "live" | "hot" | "lab" | "admin";
 
-const TABS: { id: TabId; label: string; hint: string }[] = [
-  { id: "ops", label: "Ops", hint: "Hit rate, capacity, fallback" },
-  { id: "admin", label: "Admin", hint: "Ring, pin/unpin/evict, reload" },
-  { id: "showcase", label: "Showcase", hint: "What this cache is" },
+type TabDef = { id: TabId; label: string; hint: string };
+
+const FULL_TABS: TabDef[] = [
+  { id: "story", label: "Story", hint: "What this cache earned" },
+  { id: "live", label: "Live", hint: "Hit rate, latency, capacity, incidents" },
+  { id: "hot", label: "Hot tables", hint: "Per-table leaderboard" },
+  { id: "lab", label: "Lab", hint: "Admission, eviction, peer, heat-strip" },
 ];
 
+/** Public exposure switch — set the URL fragment to `#public` (or
+ * `#story?...cost knobs...`) and only the stakeholder-facing Story
+ * tab is rendered. Live + Lab leak operational detail (pod IDs, error
+ * kinds, ring members) so they should never be visible to anyone
+ * outside the cluster. The flag is URL-only on purpose: it requires
+ * zero backend coordination, mirrors how operators already use
+ * `#story` / `#live` to deep-link, and can be enforced by an ingress
+ * rewriting the path to `/ui#public/...`. */
+function isPublicMode(): boolean {
+  if (typeof window === "undefined") return false;
+  const h = window.location.hash.replace(/^#/, "");
+  return h === "public" || h.startsWith("public?") || h.startsWith("public/");
+}
+
 export default function App() {
-  const [tab, setTab] = useState<TabId>(initialTab());
+  const publicOnly = isPublicMode();
+  const visibleTabs = publicOnly ? FULL_TABS.slice(0, 1) : FULL_TABS;
+  const [tab, setTab] = useState<TabId>(initialTab(publicOnly));
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
@@ -38,19 +59,25 @@ export default function App() {
   const theme = useTheme();
 
   useEffect(() => {
-    window.history.replaceState(null, "", `#${tab}`);
-  }, [tab]);
+    // Preserve any post-`?` query string the URL hash may carry (e.g.
+    // `#story?get_per_1k=0.0004&gb=0.023` for the Story cost panel)
+    // when we sync the active tab back to `location.hash`.
+    const existing = window.location.hash.replace(/^#/, "");
+    const query = existing.includes("?") ? "?" + existing.split("?", 2)[1] : "";
+    if (publicOnly) return;
+    window.history.replaceState(null, "", `#${tab}${query}`);
+  }, [tab, publicOnly]);
 
-  // Freshness counter — tick once a second for the "Xs ago" label.
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
 
-  // Global shortcuts.
-  useShortcut("1", () => setTab("ops"));
-  useShortcut("2", () => setTab("admin"));
-  useShortcut("3", () => setTab("showcase"));
+  useShortcut("1", () => setTab("story"));
+  useShortcut("2", () => !publicOnly && setTab("live"));
+  useShortcut("3", () => !publicOnly && setTab("hot"));
+  useShortcut("4", () => !publicOnly && setTab("lab"));
+  useShortcut("5", () => !publicOnly && setTab("admin"));
   useShortcut("p", () => togglePaused());
   useShortcut("t", () => theme.cycle());
   useShortcut("?", () => setHelpOpen((v) => !v));
@@ -73,61 +100,51 @@ export default function App() {
     }
   };
 
-  const commands = useMemo<Command[]>(
-    () => [
-      { id: "tab-ops", group: "Navigate", label: "Go to Ops", keys: "1", run: () => setTab("ops") },
-      { id: "tab-admin", group: "Navigate", label: "Go to Admin", keys: "2", run: () => setTab("admin") },
-      { id: "tab-showcase", group: "Navigate", label: "Go to Showcase", keys: "3", run: () => setTab("showcase") },
+  const commands = useMemo<Command[]>(() => {
+    const base: Command[] = [
+      { id: "tab-story", group: "Navigate", label: "Go to Story", keys: "1", run: () => setTab("story") },
+    ];
+    if (!publicOnly) {
+      base.push(
+        { id: "tab-live", group: "Navigate", label: "Go to Live", keys: "2", run: () => setTab("live") },
+        { id: "tab-hot", group: "Navigate", label: "Go to Hot tables", keys: "3", run: () => setTab("hot") },
+        { id: "tab-lab", group: "Navigate", label: "Go to Lab", keys: "4", run: () => setTab("lab") },
+        { id: "tab-admin", group: "Navigate", label: "Go to Admin (pin / evict / ring)", keys: "5", run: () => setTab("admin") },
+      );
+    }
+    base.push(
       { id: "refresh", group: "Live", label: "Refresh now", keys: "r", run: () => tickNow() },
       { id: "pause", group: "Live", label: paused ? "Resume polling" : "Pause polling", keys: "p", run: () => togglePaused() },
       { id: "theme", group: "Appearance", label: `Theme: ${theme.mode} (cycle)`, keys: "t", run: () => theme.cycle() },
-      { id: "reload-pins", group: "Admin", label: "Reload pin-list (POST /admin/reload)", run: () => void runReload() },
-      {
-        id: "copy-pod",
-        group: "Admin",
-        label: stats ? `Copy pod_id: ${stats.pod_id}` : "Copy pod_id",
-        run: async () => {
-          if (!stats) return;
-          try { await navigator.clipboard.writeText(stats.pod_id); } catch { /* ignore */ }
+    );
+    if (!publicOnly) {
+      base.push(
+        { id: "reload-pins", group: "Admin", label: "Reload pin-list (POST /admin/reload)", run: () => void runReload() },
+        {
+          id: "copy-pod",
+          group: "Admin",
+          label: stats ? `Copy pod_id: ${stats.pod_id}` : "Copy pod_id",
+          run: async () => {
+            if (!stats) return;
+            try { await navigator.clipboard.writeText(stats.pod_id); } catch { /* ignore */ }
+          },
         },
-      },
-      {
-        id: "open-metrics",
-        group: "Raw",
-        label: "Open /metrics in a new tab",
-        run: () => {
-          window.open("/metrics", "_blank");
-        },
-      },
-      {
-        id: "open-stats",
-        group: "Raw",
-        label: "Open /stats in a new tab",
-        run: () => {
-          window.open("/stats", "_blank");
-        },
-      },
-      {
-        id: "open-ring",
-        group: "Raw",
-        label: "Open /admin/ring in a new tab",
-        run: () => {
-          window.open("/admin/ring", "_blank");
-        },
-      },
-      { id: "help", group: "Help", label: "Show keyboard shortcuts", keys: "?", run: () => setHelpOpen(true) },
-    ],
-    [paused, theme.mode, tickNow, togglePaused, theme, stats],
-  );
+        { id: "open-metrics", group: "Raw", label: "Open /metrics", run: () => { window.open("/metrics", "_blank"); } },
+        { id: "open-stats", group: "Raw", label: "Open /stats", run: () => { window.open("/stats", "_blank"); } },
+        { id: "open-ring", group: "Raw", label: "Open /admin/ring", run: () => { window.open("/admin/ring", "_blank"); } },
+      );
+    }
+    base.push({ id: "help", group: "Help", label: "Show keyboard shortcuts", keys: "?", run: () => setHelpOpen(true) });
+    return base;
+  }, [paused, theme.mode, tickNow, togglePaused, theme, stats, publicOnly]);
 
-  const activeIdx = TABS.findIndex((t) => t.id === tab);
+  const activeIdx = visibleTabs.findIndex((t) => t.id === tab);
   const connectionLabel = error ? "offline" : stats ? "connected" : "connecting…";
   const connectionClass = error ? "status-err" : stats ? "status-ok" : "status-pending";
-
   const freshness = lastSuccess ? Math.max(0, Math.round((now - lastSuccess) / 1000)) : null;
 
   return (
-    <div className="app">
+    <div className={"app" + (publicOnly ? " app-public" : "")}>
       <header className="app-header">
         <div className="brand">
           <span className="brand-mark" aria-hidden>▌</span>
@@ -135,15 +152,13 @@ export default function App() {
           <span className="brand-sub">row-group cache for Trino</span>
         </div>
         <div className="identity">
-          <HealthDots healthz={healthz} readyz={readyz} />
-          {stats ? (
+          {!publicOnly ? <HealthDots healthz={healthz} readyz={readyz} /> : null}
+          {stats && !publicOnly ? (
             <span className="pod-id-wrap" title="Pod identity">
               <span className="pod-id">{stats.pod_id}</span>
               <CopyButton text={stats.pod_id} label="Copy pod_id" compact />
             </span>
-          ) : (
-            <span className="pod-id" title="Pod identity">…</span>
-          )}
+          ) : null}
           <span className={"status " + connectionClass} title={error ?? undefined}>
             {connectionLabel}
           </span>
@@ -162,67 +177,86 @@ export default function App() {
           >
             <ThemeIcon mode={theme.mode} />
           </button>
-          <button
-            className="icon-btn icon-btn-palette"
-            onClick={() => setPaletteOpen(true)}
-            aria-label="Open command palette"
-            title="Command palette (⌘K)"
-          >
-            <kbd className="kbd">⌘K</kbd>
-          </button>
+          {!publicOnly ? (
+            <button
+              className="icon-btn icon-btn-palette"
+              onClick={() => setPaletteOpen(true)}
+              aria-label="Open command palette"
+              title="Command palette (⌘K)"
+            >
+              <kbd className="kbd">⌘K</kbd>
+            </button>
+          ) : null}
         </div>
       </header>
-      <nav className="tabs" role="tablist" aria-label="Sections">
-        <div
-          className="tab-indicator"
-          style={{
-            width: `calc((100% - 16px) / ${TABS.length})`,
-            transform: `translateX(calc((100% + 8px) * ${activeIdx}))`,
-          }}
-          aria-hidden
-        />
-        {TABS.map((t, i) => (
-          <button
-            key={t.id}
-            role="tab"
-            aria-selected={tab === t.id}
-            className={"tab" + (tab === t.id ? " tab-active" : "")}
-            onClick={() => setTab(t.id)}
-          >
-            <span className="tab-key" aria-hidden>{i + 1}</span>
-            <span className="tab-label">{t.label}</span>
-            <span className="tab-hint">{t.hint}</span>
-          </button>
-        ))}
-      </nav>
+      {!publicOnly ? (
+        <nav className="tabs" role="tablist" aria-label="Sections">
+          <div
+            className="tab-indicator"
+            style={{
+              width: `calc((100% - 16px) / ${visibleTabs.length})`,
+              transform: `translateX(calc((100% + 8px) * ${Math.max(0, activeIdx)}))`,
+            }}
+            aria-hidden
+          />
+          {visibleTabs.map((t, i) => (
+            <button
+              key={t.id}
+              role="tab"
+              aria-selected={tab === t.id}
+              className={"tab" + (tab === t.id ? " tab-active" : "")}
+              onClick={() => setTab(t.id)}
+            >
+              <span className="tab-key" aria-hidden>{i + 1}</span>
+              <span className="tab-label">{t.label}</span>
+              <span className="tab-hint">{t.hint}</span>
+            </button>
+          ))}
+        </nav>
+      ) : null}
       <main className="content" role="tabpanel">
         <ErrorBoundary>
-          {tab === "ops" && <OpsTab stats={stats} />}
-          {tab === "admin" && <AdminTab stats={stats} />}
-          {tab === "showcase" && <ShowcaseTab />}
+          {tab === "story" && <StoryTab />}
+          {!publicOnly && tab === "live" && <LiveTab stats={stats} />}
+          {!publicOnly && tab === "hot" && <HotTablesTab />}
+          {!publicOnly && tab === "lab" && <LabTab />}
+          {!publicOnly && tab === "admin" && <AdminTab stats={stats} />}
         </ErrorBoundary>
       </main>
-      <footer className="app-footer">
-        <span>Same contract as <code>shelfctl</code>. No new APIs.</span>
-        <a href="/metrics" target="_blank" rel="noreferrer">raw /metrics</a>
-        <a href="/stats" target="_blank" rel="noreferrer">raw /stats</a>
-        <span className="foot-hint">press <kbd className="kbd">?</kbd> for shortcuts</span>
-      </footer>
+      {!publicOnly ? (
+        <footer className="app-footer">
+          <span>Same contract as <code>shelfctl</code>. No new APIs.</span>
+          <a href="/metrics" target="_blank" rel="noreferrer">raw /metrics</a>
+          <a href="/stats" target="_blank" rel="noreferrer">raw /stats</a>
+          <span className="foot-hint">press <kbd className="kbd">?</kbd> for shortcuts</span>
+        </footer>
+      ) : (
+        <footer className="app-footer app-footer-public">
+          <span>Public view · operational detail hidden</span>
+        </footer>
+      )}
 
-      <CommandPalette
-        open={paletteOpen}
-        commands={commands}
-        onClose={() => setPaletteOpen(false)}
-      />
+      {!publicOnly ? (
+        <CommandPalette
+          open={paletteOpen}
+          commands={commands}
+          onClose={() => setPaletteOpen(false)}
+        />
+      ) : null}
       <HelpOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   );
 }
 
-function initialTab(): TabId {
-  const h = window.location.hash.replace(/^#/, "");
-  if (h === "ops" || h === "admin" || h === "showcase") return h;
-  return "ops";
+function initialTab(publicOnly: boolean): TabId {
+  if (publicOnly) return "story";
+  const raw = window.location.hash.replace(/^#/, "").split("?", 1)[0];
+  if (raw === "story" || raw === "live" || raw === "hot" || raw === "lab" || raw === "admin") return raw;
+  // Legacy hashes from the prior 3-tab layout — preserve operator
+  // muscle memory: "ops" lands on Live, "showcase" lands on Story.
+  if (raw === "ops") return "live";
+  if (raw === "showcase") return "story";
+  return "story";
 }
 
 function FreshnessBadge({

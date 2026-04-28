@@ -124,6 +124,63 @@ export function sumMatching(
   return total;
 }
 
+/** Return the raw `[le, count]` bucket array for a histogram metric,
+ * filtered by an arbitrary label predicate. Sorted ascending by `le`,
+ * with `+Inf` mapped to `Number.POSITIVE_INFINITY`. Used by the Lab
+ * tab heat-strip — the panel that catches anomalies like
+ * `hit_disk` p99 pegged at 16.384 s, where the histogram shape itself
+ * is the signal and a single-quantile readout would hide it. */
+export function histogramBuckets(
+  samples: Sample[],
+  metric: string,
+  match: (labels: Record<string, string>) => boolean,
+): { le: number; count: number }[] {
+  const out: { le: number; count: number }[] = [];
+  for (const s of samples) {
+    if (s.name !== `${metric}_bucket`) continue;
+    if (!match(s.labels)) continue;
+    const leStr = s.labels["le"];
+    if (leStr === undefined) continue;
+    const le = leStr === "+Inf" ? Number.POSITIVE_INFINITY : Number(leStr);
+    if (!Number.isFinite(le) && le !== Number.POSITIVE_INFINITY) continue;
+    out.push({ le, count: s.value });
+  }
+  out.sort((a, b) => a.le - b.le);
+  return out;
+}
+
+/** Group all label combinations on a metric, returning one row per
+ * distinct label tuple with the summed counter value. Each row keeps
+ * the original `labels` map so callers can render a per-row sparkline
+ * keyed on whatever dimension makes sense (table, pool, decision, …).
+ * Pairs with [`useTimeseriesByKey`](../hooks/useTimeseries.ts) on the
+ * leaderboard. */
+export function listSeries(
+  samples: Sample[],
+  name: string,
+): Array<{ key: string; labels: Record<string, string>; value: number }> {
+  const map = new Map<string, { labels: Record<string, string>; value: number }>();
+  for (const s of samples) {
+    if (s.name !== name) continue;
+    // Stable join: sort label keys so {a,b} and {b,a} fold together.
+    const key = Object.keys(s.labels)
+      .sort()
+      .map((k) => `${k}=${s.labels[k]}`)
+      .join("|");
+    const existing = map.get(key);
+    if (existing) {
+      existing.value += s.value;
+    } else {
+      map.set(key, { labels: s.labels, value: s.value });
+    }
+  }
+  return Array.from(map.entries()).map(([key, v]) => ({
+    key,
+    labels: v.labels,
+    value: v.value,
+  }));
+}
+
 /** Approximate a percentile from a Prom histogram by linear
  * interpolation inside the bucket that first reaches the target
  * cumulative count. Not exact, but good enough for a single-value

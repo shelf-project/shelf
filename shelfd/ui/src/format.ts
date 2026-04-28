@@ -37,3 +37,61 @@ export function formatCount(n: number): string {
   if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   return `${(n / 1_000_000_000).toFixed(1)}B`;
 }
+
+/** Stripe / Linear / Vercel pattern: "82% ↑ 3.2% vs 5m ago".
+ *
+ * Computes a directional delta between `now` and `then`, returns a
+ * tone (`ok` / `warn` / `err`) that respects whether the metric is
+ * higher-is-better or lower-is-better, and a tiny glyph that pairs
+ * with colour for accessibility (never colour-only, per the AGENTS.md
+ * design rules).
+ *
+ * Threshold for a "flat" verdict is the bigger of an absolute floor
+ * (1e-6) and a relative band (0.5% of `then`). That's wide enough to
+ * absorb single-poll counter jitter without flipping tones, narrow
+ * enough that meaningful trends register on the next poll. */
+export type DeltaTone = "ok" | "warn" | "err" | "pending";
+export type DeltaDirection = "higher-is-better" | "lower-is-better";
+
+export type DeltaReadout = {
+  glyph: "↑" | "↓" | "→";
+  text: string;
+  tone: DeltaTone;
+};
+
+export function formatDelta(
+  now: number | null | undefined,
+  then: number | null | undefined,
+  direction: DeltaDirection = "higher-is-better",
+  unit: "percent" | "absolute" = "percent",
+): DeltaReadout {
+  if (
+    now == null ||
+    then == null ||
+    !Number.isFinite(now) ||
+    !Number.isFinite(then)
+  ) {
+    return { glyph: "→", text: "—", tone: "pending" };
+  }
+  const diff = now - then;
+  const flatBand = Math.max(1e-6, Math.abs(then) * 0.005);
+  const flat = Math.abs(diff) < flatBand;
+  const better =
+    direction === "higher-is-better" ? diff > 0 : diff < 0;
+  const tone: DeltaTone = flat ? "warn" : better ? "ok" : "err";
+  const glyph: DeltaReadout["glyph"] = flat ? "→" : diff > 0 ? "↑" : "↓";
+  let text: string;
+  if (unit === "percent") {
+    if (Math.abs(then) < 1e-6) {
+      text = flat ? "no change" : "first sample";
+    } else {
+      text = `${(Math.abs(diff / then) * 100).toFixed(1)}%`;
+    }
+  } else {
+    text =
+      Math.abs(diff) < 1
+        ? `${diff.toFixed(2)}`
+        : `${diff > 0 ? "+" : ""}${diff.toFixed(0)}`;
+  }
+  return { glyph, text, tone };
+}

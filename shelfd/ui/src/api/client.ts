@@ -23,6 +23,10 @@ export type Stats = {
   rowgroup_pool: PoolStats;
   pinned_bytes: number;
   pinned_count: number;
+  /** SHELF-20 lameduck flag from `/stats`. Optional in the wire
+   * format (`#[serde(default)]` on the Rust side) so older daemons
+   * stay compatible. Live tab's row-1 peer health tile reads this. */
+  draining?: boolean;
 };
 
 export type RingRow = {
