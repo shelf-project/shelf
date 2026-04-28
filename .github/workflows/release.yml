@@ -192,7 +192,13 @@ jobs:
     name: build + push image
     needs: preflight
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    # 45 min was insufficient: QEMU-emulated linux/arm64 + Rust release build
+    # of shelfd's full dep set (foyer, AWS SDK, axum, opentelemetry, …) on the
+    # rc.0 attempt hit the wall at ~45 min still compiling crates. Bumped to 90.
+    # Follow-up to consider: split into a native arm64 matrix slot using the
+    # free `ubuntu-22.04-arm` runner that GitHub now provides for public repos,
+    # then a final `docker buildx imagetools create` to stitch the manifest.
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
