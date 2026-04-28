@@ -479,6 +479,71 @@ pub static PEER_ERROR_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("register peer_error_total")
 });
 
+/// SHELF-23 — origin agreed our cached ETag is still current; we
+/// served from the local cache without a body transfer. This is the
+/// happy path for the cross-pod write-coherence check: a 5 ms
+/// network round-trip in exchange for snapshot-correct reads.
+pub static CONDITIONAL_NOT_MODIFIED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_conditional_not_modified_total",
+        "Local cache hits where the ETag-conditional GET to origin \
+         returned 304 Not Modified; bytes were served from cache.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register conditional_not_modified_total")
+});
+
+/// SHELF-23 — origin reported a different ETag than the one in our
+/// local cache (a cross-pod PUT, an out-of-band rewrite, or first
+/// observation of a key after restart). We invalidated the local
+/// entry and served the fresh body. A high rate here means writers
+/// are racing readers; investigate whether the freshness window
+/// is appropriate for the workload.
+pub static CONDITIONAL_MODIFIED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_conditional_modified_total",
+        "Local cache hits where the ETag-conditional GET to origin \
+         returned 200 OK with a new ETag; cache was invalidated and \
+         the fresh body was served.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register conditional_modified_total")
+});
+
+/// SHELF-23 — local cache hits where the freshness-window
+/// optimisation (≥ N consecutive 304s within the trust window) let
+/// the shim skip the conditional GET entirely. Steady-state on a
+/// hot, stable working set, this counter dominates by 1–2 orders of
+/// magnitude over `shelf_conditional_not_modified_total`.
+pub static CONDITIONAL_SKIPPED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_conditional_skipped_total",
+        "Local cache hits where the freshness window let the shim \
+         skip the ETag-conditional GET round-trip.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register conditional_skipped_total")
+});
+
+/// SHELF-23 — the conditional GET itself failed (origin error,
+/// timeout, or a malformed 304 the client couldn't classify). The
+/// shim falls back to serving the cached bytes — the prior
+/// content-addressed key is still valid until proven otherwise.
+pub static CONDITIONAL_ERROR_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_conditional_error_total",
+        "Local cache hits where the ETag-conditional GET to origin \
+         returned an error or timed out; cached bytes were served \
+         as a fallback.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register conditional_error_total")
+});
+
 /// Track G-10 — Foyer / pool engine resets that wiped in-memory or
 /// on-disk state without a process restart. The post-cutover snapshot
 /// 2026-04-27 caught `shelf_hits_total` rolling back to 0 multiple
@@ -654,6 +719,11 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_peer_miss_total",
     "shelf_peer_timeout_total",
     "shelf_peer_error_total",
+    // SHELF-23 — ETag-conditional GET outcome counters.
+    "shelf_conditional_not_modified_total",
+    "shelf_conditional_modified_total",
+    "shelf_conditional_skipped_total",
+    "shelf_conditional_error_total",
 ];
 
 #[cfg(test)]
@@ -722,6 +792,10 @@ mod tests {
             PEER_MISS_TOTAL.desc(),
             PEER_TIMEOUT_TOTAL.desc(),
             PEER_ERROR_TOTAL.desc(),
+            CONDITIONAL_NOT_MODIFIED_TOTAL.desc(),
+            CONDITIONAL_MODIFIED_TOTAL.desc(),
+            CONDITIONAL_SKIPPED_TOTAL.desc(),
+            CONDITIONAL_ERROR_TOTAL.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -824,6 +898,18 @@ mod tests {
             .inc_by(0);
         PEER_ERROR_TOTAL
             .with_label_values(&["metadata", "network"])
+            .inc_by(0);
+        CONDITIONAL_NOT_MODIFIED_TOTAL
+            .with_label_values(&["metadata"])
+            .inc_by(0);
+        CONDITIONAL_MODIFIED_TOTAL
+            .with_label_values(&["metadata"])
+            .inc_by(0);
+        CONDITIONAL_SKIPPED_TOTAL
+            .with_label_values(&["metadata"])
+            .inc_by(0);
+        CONDITIONAL_ERROR_TOTAL
+            .with_label_values(&["metadata"])
             .inc_by(0);
 
         let families = REGISTRY.gather();

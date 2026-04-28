@@ -43,6 +43,7 @@ pub mod control;
 pub mod error;
 pub mod filter_service;
 pub mod fingerprint;
+pub mod freshness;
 pub mod head_lru;
 pub mod http;
 pub mod lodc_backpressure;

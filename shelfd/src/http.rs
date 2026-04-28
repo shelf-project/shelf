@@ -118,6 +118,19 @@ pub struct ServerState {
     /// out of the data plane in an incident. The s3_shim hot path
     /// reads this via `Ordering::Relaxed` once per request.
     pub peer_fetch_enabled: AtomicBool,
+    /// SHELF-23 — per-(bucket, key) freshness tracker for the
+    /// ETag-conditional GET path. Counts consecutive 304s and gates
+    /// whether the s3_shim hot path can skip the conditional round-
+    /// trip on a local cache hit. Sized at `2 × head_lru.capacity()`
+    /// in `with_head_lru_and_pod_id` because the cardinality model
+    /// is the same as the HEAD-LRU.
+    pub freshness: Arc<crate::freshness::FreshnessTracker>,
+    /// SHELF-23 — runtime kill-switch for ETag-conditional GET on
+    /// local cache hits. Defaults to `true`. When false, every read
+    /// behaves exactly as the pre-SHELF-23 path: cache hit returns
+    /// stored bytes without re-validating origin. Useful as a
+    /// fast-revert lever if conditional GETs reveal a hot-bug.
+    pub conditional_get_enabled: AtomicBool,
 }
 
 impl ServerState {
@@ -178,6 +191,14 @@ impl ServerState {
             // `config.membership.stats_port` before traffic arrives.
             peer_stats_port: crate::membership::DEFAULT_STATS_PORT,
             peer_fetch_enabled: AtomicBool::new(true),
+            // Match the head_lru capacity (passed in above) so the
+            // freshness tracker has the same population window. We
+            // can't read `head_lru.capacity()` here without losing
+            // ownership semantics, so default to 2 × the SHELF-07
+            // default. `main` does not override this — it's a small
+            // foyer cache and self-evicts.
+            freshness: Arc::new(crate::freshness::FreshnessTracker::new(20_000)),
+            conditional_get_enabled: AtomicBool::new(true),
         }
     }
 
@@ -204,6 +225,21 @@ impl ServerState {
     /// SHELF-23 — read the peer-fetch toggle on the hot path.
     pub fn is_peer_fetch_enabled(&self) -> bool {
         self.peer_fetch_enabled.load(Ordering::Relaxed)
+    }
+
+    /// SHELF-23 — toggle ETag-conditional GET on local cache hits at
+    /// runtime. Returns the previous value. Mirrors
+    /// [`Self::set_peer_fetch_enabled`]; off means the s3_shim hot
+    /// path returns cached bytes without re-validating origin (the
+    /// pre-SHELF-23 behaviour).
+    pub fn set_conditional_get_enabled(&self, enabled: bool) -> bool {
+        self.conditional_get_enabled
+            .swap(enabled, Ordering::Release)
+    }
+
+    /// SHELF-23 — read the conditional-GET toggle on the hot path.
+    pub fn is_conditional_get_enabled(&self) -> bool {
+        self.conditional_get_enabled.load(Ordering::Relaxed)
     }
 
     /// SHELF-G4 builder hook: install a `ShelfFilterService`. Kept

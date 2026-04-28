@@ -57,9 +57,9 @@ use bytes::Bytes;
 use crate::aws_chunked::{decode_aws_chunked, AwsChunkedError};
 use crate::head_lru::HeadMeta;
 use crate::http::ServerState;
-use crate::origin::Origin;
+use crate::origin::{ConditionalGet, Origin};
 use crate::peer_fetch::peer_or_origin_fetch;
-use crate::store::{key_from_tuple, Pool, ReadOutcome};
+use crate::store::{key_from_tuple, Pool, ReadOutcome, Store};
 
 mod xml;
 use xml::{
@@ -612,6 +612,182 @@ pub async fn handle_head_object(
     response
 }
 
+/// SHELF-23 — outcome of the ETag-conditional GET path. `None` means
+/// the conditional path declined to handle this request (e.g. origin
+/// errored on the conditional GET) and the caller should fall through
+/// to the normal `get_or_fetch` path.
+enum ConditionalServe {
+    /// Cache validated against origin (304 or freshness-skip). Serve
+    /// the cached bytes as a hit.
+    HitCached(Bytes, &'static str),
+    /// Origin returned 200 with new bytes; cache was invalidated and
+    /// repopulated under the new content-addressed key. Serve the
+    /// fresh bytes; report as a miss for hit-rate accounting parity
+    /// with the existing path (a "miss" here meant "we fetched from
+    /// origin", which is exactly what happened).
+    Refreshed(Bytes),
+}
+
+/// SHELF-23 — run the ETag-conditional GET against origin and decide
+/// whether to serve the cached body, refresh it, or punt to the
+/// normal fetch path.
+///
+/// Returns `Some(...)` only when the conditional path produces a
+/// definitive answer; `None` means the caller should fall through to
+/// `get_or_fetch` (the conditional GET errored, and it is safer to
+/// take the normal path than to serve potentially-stale bytes).
+#[allow(clippy::too_many_arguments)]
+async fn run_conditional_get(
+    state: &Arc<ServerState>,
+    bucket: &str,
+    key: &str,
+    pool: Pool,
+    pool_label: &'static str,
+    offset: u64,
+    length: u64,
+    etag: &str,
+    cached: &Bytes,
+) -> Option<ConditionalServe> {
+    if state.freshness.can_skip(bucket, key) {
+        crate::metrics::CONDITIONAL_SKIPPED_TOTAL
+            .with_label_values(&[pool_label])
+            .inc();
+        return Some(ConditionalServe::HitCached(cached.clone(), "hit"));
+    }
+
+    let outcome = state
+        .origin
+        .as_ref()
+        .get_range_conditional(bucket, key, offset, length, etag)
+        .await;
+    match outcome {
+        Ok(ConditionalGet::NotModified) => {
+            state.freshness.record_not_modified(bucket, key);
+            crate::metrics::CONDITIONAL_NOT_MODIFIED_TOTAL
+                .with_label_values(&[pool_label])
+                .inc();
+            Some(ConditionalServe::HitCached(cached.clone(), "hit"))
+        }
+        Ok(ConditionalGet::Modified {
+            bytes,
+            etag: new_etag,
+        }) => {
+            // The cached bytes are stale: invalidate the HEAD-LRU and
+            // freshness state so the next request observes the new
+            // ETag. We do NOT explicitly evict the old Foyer entry —
+            // the new content-addressed key derived from `new_etag`
+            // is a different slot, so the stale slot is unreachable
+            // and S3FIFO/LRU evicts it naturally.
+            state.head_lru.invalidate(bucket, key);
+            state.freshness.record_modified(bucket, key);
+            crate::metrics::CONDITIONAL_MODIFIED_TOTAL
+                .with_label_values(&[pool_label])
+                .inc();
+
+            // Repopulate the cache under the new content-addressed
+            // key so the *next* request lands on a hit. Best-effort:
+            // a failed insert (admission reject, store error) does
+            // not affect correctness — we still serve `bytes` to the
+            // caller. The closure-based `get_or_fetch` is the only
+            // public ingress that runs admission consistently.
+            if let Some(new_etag) = new_etag.as_deref() {
+                if let Ok(new_key) = key_from_tuple(new_etag.as_bytes(), offset, length, 0) {
+                    let bytes_for_cache = bytes.clone();
+                    let _ = state
+                        .store
+                        .get_or_fetch(pool, new_key, state.admission.as_ref(), async move {
+                            Ok(bytes_for_cache)
+                        })
+                        .await;
+                }
+            }
+            Some(ConditionalServe::Refreshed(bytes))
+        }
+        Err(e) => {
+            crate::metrics::CONDITIONAL_ERROR_TOTAL
+                .with_label_values(&[pool_label])
+                .inc();
+            tracing::warn!(
+                bucket = %bucket,
+                key = %key,
+                etag = %etag,
+                error = %e,
+                "conditional GET failed; falling through to normal fetch path",
+            );
+            None
+        }
+    }
+}
+
+/// SHELF-23 — package the response after the conditional path produced
+/// a definitive answer. Mirrors the bookkeeping in the main
+/// `handle_get_object` happy path so the two routes cannot drift on
+/// what counts as a hit / miss / partial response.
+#[allow(clippy::too_many_arguments)]
+fn finish_get_response(
+    state: &Arc<ServerState>,
+    meta: &HeadMeta,
+    total_size: u64,
+    offset: u64,
+    length: u64,
+    is_partial: bool,
+    pool_label: &'static str,
+    table_label: &str,
+    serve: ConditionalServe,
+    start: std::time::Instant,
+) -> Response {
+    let (bytes, shim_outcome) = match serve {
+        ConditionalServe::HitCached(b, label) => {
+            state
+                .metrics
+                .hits_total
+                .with_label_values(&[pool_label])
+                .inc();
+            crate::metrics::HITS_BY_TABLE_TOTAL
+                .with_label_values(&[pool_label, table_label])
+                .inc();
+            (b, label)
+        }
+        ConditionalServe::Refreshed(b) => {
+            state
+                .metrics
+                .misses_total
+                .with_label_values(&[pool_label])
+                .inc();
+            crate::metrics::MISSES_BY_TABLE_TOTAL
+                .with_label_values(&[pool_label, table_label])
+                .inc();
+            (b, "miss")
+        }
+    };
+    crate::metrics::S3_SHIM_RESPONSE_BYTES_TOTAL
+        .with_label_values(&["get_object", shim_outcome])
+        .inc_by(bytes.len() as u64);
+
+    let mut headers = HeaderMap::new();
+    stamp_common_headers(&mut headers, meta);
+    headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&length.to_string()).expect("u64 is ASCII"),
+    );
+    let status = if is_partial {
+        let last = offset.saturating_add(length).saturating_sub(1);
+        let cr = format!("bytes {}-{}/{}", offset, last, total_size);
+        if let Ok(v) = HeaderValue::from_str(&cr) {
+            headers.insert(header::CONTENT_RANGE, v);
+        }
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    record_get_latency(
+        state,
+        start,
+        shim_outcome,
+        (status, headers, bytes).into_response(),
+    )
+}
+
 /// `GET /:bucket/*key` — S3 `GetObject` (honours `Range:` if set).
 pub async fn handle_get_object(
     State(state): State<Arc<ServerState>>,
@@ -698,6 +874,54 @@ pub async fn handle_get_object(
     };
 
     let pool = pool_for(&key);
+    let pool_label_early = match pool {
+        Pool::Metadata => "metadata",
+        Pool::RowGroup => "rowgroup",
+    };
+
+    // SHELF-23 — ETag-conditional GET on a local cache hit.
+    //
+    // If the cache key is already resident *and* we have an ETag to
+    // condition on, validate the cache against origin before serving.
+    // The freshness tracker amortises this: after N consecutive 304s
+    // within a short window, we trust the cache and skip the round-
+    // trip. The whole block is gated by `is_conditional_get_enabled`
+    // so an operator can flip it off in an incident; when off, this
+    // is a no-op and the original `get_or_fetch` path runs unchanged.
+    if state.is_conditional_get_enabled() {
+        if let Some(etag_str) = meta.etag.as_deref() {
+            if let Ok(Some(cached)) = state.store.get(pool, &key_obj).await {
+                let conditional_outcome = run_conditional_get(
+                    &state,
+                    &bucket,
+                    &key,
+                    pool,
+                    pool_label_early,
+                    offset,
+                    length,
+                    etag_str,
+                    &cached,
+                )
+                .await;
+                if let Some(resp) = conditional_outcome {
+                    let table_label_cow = table_label(&key);
+                    return finish_get_response(
+                        &state,
+                        &meta,
+                        total_size,
+                        offset,
+                        length,
+                        is_partial,
+                        pool_label_early,
+                        table_label_cow.as_ref(),
+                        resp,
+                        start,
+                    );
+                }
+            }
+        }
+    }
+
     let origin = state.origin.clone();
     let bucket_for_fetch = bucket.clone();
     let key_for_fetch = key.clone();

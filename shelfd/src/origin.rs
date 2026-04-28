@@ -26,6 +26,19 @@ use bytes::Bytes;
 use std::fmt::Debug;
 use tracing::{field, Instrument};
 
+/// SHELF-23 — outcome of a conditional GET ([`Origin::get_range_conditional`]).
+///
+/// `NotModified` is the cheap path: the cached ETag still matches and
+/// the caller can serve the local body without a transfer. `Modified`
+/// carries the fresh bytes and the new ETag the caller should record;
+/// the new ETag is `None` when origin does not return one (rare; some
+/// MinIO error paths).
+#[derive(Debug, Clone)]
+pub enum ConditionalGet {
+    NotModified,
+    Modified { bytes: Bytes, etag: Option<String> },
+}
+
 /// Origin for remote byte-range reads. Today: S3. Tomorrow (when we
 /// add Spark / DuckDB): possibly an abstraction over multiple
 /// object-store backends.
@@ -37,6 +50,35 @@ pub trait Origin: Send + Sync + Debug + 'static {
         offset: u64,
         length: u64,
     ) -> impl std::future::Future<Output = crate::Result<Bytes>> + Send;
+
+    /// SHELF-23 — conditional `GET` against `if_none_match` (S3 ETag,
+    /// quoted form expected — exactly what `HeadMeta::etag` stores).
+    ///
+    /// On a 304 from origin, returns [`ConditionalGet::NotModified`]
+    /// (no body transfer) so the shim can serve from its local cache
+    /// without a refetch. On a 200, returns [`ConditionalGet::Modified`]
+    /// with the fresh bytes and the new ETag the caller should record
+    /// to supersede its (now-stale) entry.
+    ///
+    /// Default impl falls through to an unconditional [`get_range`],
+    /// which is correct (just expensive) for backends that don't model
+    /// `If-None-Match`. The S3 implementation overrides this so the
+    /// 304 fast-path actually saves a body round-trip.
+    ///
+    /// [`get_range`]: Origin::get_range
+    fn get_range_conditional(
+        &self,
+        bucket: &str,
+        key: &str,
+        offset: u64,
+        length: u64,
+        _if_none_match: &str,
+    ) -> impl std::future::Future<Output = crate::Result<ConditionalGet>> + Send {
+        async move {
+            let bytes = self.get_range(bucket, key, offset, length).await?;
+            Ok(ConditionalGet::Modified { bytes, etag: None })
+        }
+    }
 
     /// `HEAD` the origin object. `Ok(None)` is the canonical signal
     /// for "object does not exist" (S3 404 / `NoSuchKey`); all other
@@ -413,6 +455,113 @@ impl Origin for S3Origin {
                 record_origin(bucket, "get_range", "timeout", 0, elapsed);
                 Err(crate::Error::Origin(format!(
                     "GetObject {bucket}/{key} timed out after {:?}",
+                    self.request_timeout
+                )))
+            }
+        }
+    }
+
+    async fn get_range_conditional(
+        &self,
+        bucket: &str,
+        key: &str,
+        offset: u64,
+        length: u64,
+        if_none_match: &str,
+    ) -> crate::Result<ConditionalGet> {
+        if length == 0 {
+            return Err(crate::Error::Origin(
+                "get_range_conditional: length must be > 0".into(),
+            ));
+        }
+        let start = std::time::Instant::now();
+        let end = offset
+            .checked_add(length)
+            .and_then(|sum| sum.checked_sub(1))
+            .ok_or_else(|| {
+                crate::Error::Origin(format!(
+                    "get_range_conditional: offset={offset} + length={length} overflows u64"
+                ))
+            })?;
+        let range = format!("bytes={}-{}", offset, end);
+        // SHELF-23 — `s3.get_object_conditional` so the
+        // /metrics dashboard can split conditional vs. unconditional
+        // GETs. The Tempo span name is parallel to `s3.get_object`.
+        let span = tracing::info_span!(
+            "s3.get_object_conditional",
+            otel.kind = "client",
+            bucket = %bucket,
+            key = %key,
+            range = %range,
+            if_none_match = %if_none_match,
+            aws.request_id = field::Empty,
+        );
+        let fut = async {
+            let resp = self
+                .client
+                .get_object()
+                .bucket(bucket)
+                .key(key)
+                .range(range)
+                .if_none_match(if_none_match)
+                .send()
+                .await;
+            match resp {
+                Ok(resp) => {
+                    if let Some(rid) = resp.request_id() {
+                        tracing::Span::current().record("aws.request_id", rid);
+                        tracing::debug!(request_id = rid, "s3 request-id");
+                    }
+                    let new_etag = resp.e_tag().map(|s| s.to_owned());
+                    let collected = resp
+                        .body
+                        .collect()
+                        .await
+                        .map_err(|e| crate::Error::Origin(format!("collect body: {e}")))?;
+                    Ok::<_, crate::Error>(ConditionalGet::Modified {
+                        bytes: collected.into_bytes(),
+                        etag: new_etag,
+                    })
+                }
+                // S3 SDK surfaces 304 as a service error path. Detect
+                // it via the HTTP status on the raw response so we
+                // don't need to depend on a specific operation-error
+                // variant — `PreconditionFailed` is for `If-Match`,
+                // and there is no first-class `NotModified` variant
+                // in `GetObjectError` today.
+                Err(e) => {
+                    let status = e.raw_response().map(|r| r.status().as_u16());
+                    if status == Some(304) {
+                        Ok::<_, crate::Error>(ConditionalGet::NotModified)
+                    } else {
+                        Err(crate::Error::Origin(format!(
+                            "GetObject(if-none-match) {bucket}/{key}: {e}"
+                        )))
+                    }
+                }
+            }
+        }
+        .instrument(span);
+
+        let res = tokio::time::timeout(self.request_timeout, fut).await;
+        let elapsed = start.elapsed().as_secs_f64();
+        match res {
+            Ok(Ok(out)) => {
+                let (outcome, bytes) = match &out {
+                    ConditionalGet::NotModified => ("not_modified", 0),
+                    ConditionalGet::Modified { bytes, .. } => ("ok", bytes.len() as u64),
+                };
+                record_origin(bucket, "get_range_conditional", outcome, bytes, elapsed);
+                Ok(out)
+            }
+            Ok(Err(e)) => {
+                record_origin(bucket, "get_range_conditional", "error", 0, elapsed);
+                Err(e)
+            }
+            Err(_) => {
+                record_origin(bucket, "get_range_conditional", "timeout", 0, elapsed);
+                Err(crate::Error::Origin(format!(
+                    "GetObject(if-none-match) {bucket}/{key} timed out after {:?}",
                     self.request_timeout
                 )))
             }
