@@ -3569,7 +3569,7 @@ dependencies = [
 
 [[package]]
 name = "shelfctl"
-version = "1.0.0-rc.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3584,7 +3584,7 @@ dependencies = [
 
 [[package]]
 name = "shelfd"
-version = "1.0.0-rc.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "anyhow",
  "aws-config",
