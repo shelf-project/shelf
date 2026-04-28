@@ -104,7 +104,7 @@ jobs:
           python3 -m jsonschema -i "$latest" "$schema"
 
       - name: Upload smoke result
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: smoke-${{ matrix.benchmark }}-${{ matrix.backend }}
           path: benchmarks/results/**

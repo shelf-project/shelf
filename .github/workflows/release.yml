@@ -349,7 +349,7 @@ jobs:
           ls -la "${OUT}"
 
       - name: Upload SBOM artefact (for the GH Release job to attach)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: ${{ steps.gen.outputs.sbom_path }}
@@ -378,7 +378,7 @@ jobs:
             "${SBOM}"
 
       - name: Upload SBOM signature + cert
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-sig
           path: |
@@ -500,7 +500,7 @@ jobs:
           cosign sign --yes "${CHART_OCI_REPO}/shelf@${DIGEST}"
 
       - name: Upload chart tarball as workflow artefact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: helm-chart
           path: ${{ steps.pkg.outputs.pkg }}
@@ -617,7 +617,7 @@ jobs:
             "${TARBALL}"
 
       - name: Upload artefacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: shelfctl-${{ matrix.os }}-${{ matrix.arch }}
           path: |
