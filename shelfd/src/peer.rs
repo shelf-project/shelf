@@ -614,6 +614,11 @@ mod tests {
             };
             let (base, _h) = spawn_mock(beh).await;
             let http = http_client();
+            // Origin delay is generous so axum first-request setup
+            // cost (~30-50 ms cold) cannot accidentally race ahead of
+            // the probe under parallel test execution and trip the
+            // OriginRaced branch — that's tested separately in
+            // `fast_origin_wins_race`.
             let outcome = race_peer_or_origin(
                 &http,
                 &base,
@@ -621,8 +626,8 @@ mod tests {
                 KEY_HEX,
                 0,
                 10,
-                origin(Duration::from_millis(20), b"origin-bytes".to_vec()),
-                Duration::from_millis(50),
+                origin(Duration::from_millis(500), b"origin-bytes".to_vec()),
+                Duration::from_millis(200),
             )
             .await;
             match outcome {
@@ -674,8 +679,8 @@ mod tests {
                 KEY_HEX,
                 0,
                 10,
-                origin(Duration::from_millis(20), b"origin-bytes".to_vec()),
-                Duration::from_millis(50),
+                origin(Duration::from_millis(500), b"origin-bytes".to_vec()),
+                Duration::from_millis(200),
             )
             .await;
             match outcome {
@@ -702,8 +707,8 @@ mod tests {
                 KEY_HEX,
                 0,
                 10,
-                origin(Duration::from_millis(50), b"origin-bytes".to_vec()),
-                Duration::from_millis(50),
+                origin(Duration::from_millis(500), b"origin-bytes".to_vec()),
+                Duration::from_millis(200),
             )
             .await;
             match outcome {
@@ -731,8 +736,8 @@ mod tests {
                 KEY_HEX,
                 0,
                 10,
-                origin(Duration::from_millis(40), b"origin-bytes".to_vec()),
-                Duration::from_millis(20),
+                origin(Duration::from_millis(400), b"origin-bytes".to_vec()),
+                Duration::from_millis(50),
             )
             .await;
             // Either Network (refused) or Timeout (probe deadline) is

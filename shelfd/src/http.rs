@@ -95,6 +95,29 @@ pub struct ServerState {
     /// `shelf_hits_total` / `shelf_s3_shim_response_bytes_total`
     /// series (which would blow cardinality).
     pub mv_registry: Arc<crate::mv_registry::MvRegistry>,
+    /// SHELF-23 — shared `reqwest::Client` used for peer-fetch (the
+    /// `POST /cache/contains` probe and the `GET /cache/<pool>/<key>/<range>`
+    /// body fetch on the HRW primary peer). Kept on `ServerState` so
+    /// connections to peer pods stay pooled across requests; the
+    /// alternative (per-call `Client::new()`) would burn a TLS / TCP
+    /// handshake on every cross-pod cache miss. Off-cluster tests
+    /// can substitute a `Client::new()` since this client only has
+    /// to speak plain HTTP/1.1 to in-cluster pods.
+    pub peer_http: reqwest::Client,
+    /// SHELF-23 — port the peer's data plane listens on for
+    /// `/cache/contains` and `/cache/<pool>/<key>/<range>`. The
+    /// `Member::endpoint` carried by `Router` uses
+    /// `ResolverConfig::data_port` (the s3-shim, default 9092), but
+    /// peer-fetch needs the **control-plane** port (default 9090).
+    /// We store it here so the s3_shim hot path can rewrite the
+    /// endpoint port without re-plumbing the membership resolver.
+    pub peer_stats_port: u16,
+    /// SHELF-23 — runtime kill-switch for peer-fetch. Defaults to
+    /// `true`; operator can flip it via env var or admin API
+    /// without rebuilding the binary if the racer has to be cut
+    /// out of the data plane in an incident. The s3_shim hot path
+    /// reads this via `Ordering::Relaxed` once per request.
+    pub peer_fetch_enabled: AtomicBool,
 }
 
 impl ServerState {
@@ -149,7 +172,38 @@ impl ServerState {
             filter_service: None,
             text_index: std::sync::RwLock::new(std::collections::HashMap::new()),
             mv_registry: Arc::new(crate::mv_registry::MvRegistry::new()),
+            peer_http: default_peer_http(),
+            // SHELF-23 default — matches `membership::DEFAULT_STATS_PORT`.
+            // `main` overrides this with the operator-supplied
+            // `config.membership.stats_port` before traffic arrives.
+            peer_stats_port: crate::membership::DEFAULT_STATS_PORT,
+            peer_fetch_enabled: AtomicBool::new(true),
         }
+    }
+
+    /// SHELF-23 builder: install the operator-supplied peer-fetch
+    /// HTTP client and stats port. `main` calls this from the
+    /// post-config hookup path; callers that don't need the peer
+    /// race (most unit tests) inherit the [`default_peer_http`]
+    /// client and the [`crate::membership::DEFAULT_STATS_PORT`]
+    /// fallback set by [`Self::with_head_lru_and_pod_id`].
+    pub fn with_peer_fetch(mut self, http: reqwest::Client, stats_port: u16) -> Self {
+        self.peer_http = http;
+        self.peer_stats_port = stats_port;
+        self
+    }
+
+    /// SHELF-23 — toggle peer-fetch at runtime. Returns the previous
+    /// value. Used by `main` (env var `SHELFD_PEER_FETCH_ENABLED`) and
+    /// by integration tests that need to assert the off-path still
+    /// short-circuits to origin.
+    pub fn set_peer_fetch_enabled(&self, enabled: bool) -> bool {
+        self.peer_fetch_enabled.swap(enabled, Ordering::Release)
+    }
+
+    /// SHELF-23 — read the peer-fetch toggle on the hot path.
+    pub fn is_peer_fetch_enabled(&self) -> bool {
+        self.peer_fetch_enabled.load(Ordering::Relaxed)
     }
 
     /// SHELF-G4 builder hook: install a `ShelfFilterService`. Kept
@@ -189,6 +243,22 @@ impl ServerState {
         self.drain_signal = signal;
         self
     }
+}
+
+/// SHELF-23 — fallback peer-fetch HTTP client. The values mirror the
+/// production-side defaults configured in `main`: a small idle pool
+/// per host (peers are stable; we don't need a large cache), and a
+/// short request timeout so a stuck peer never extends the outer
+/// request deadline. `main` overrides this via
+/// [`ServerState::with_peer_fetch`] with a more thoroughly-tuned
+/// client; this helper exists so unit/integration tests get a
+/// sensible default without needing to construct one themselves.
+fn default_peer_http() -> reqwest::Client {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(2)
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .expect("default peer-fetch reqwest::Client")
 }
 
 /// Resolve the effective `pod_id` when none was supplied explicitly:
