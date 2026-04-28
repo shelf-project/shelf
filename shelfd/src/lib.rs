@@ -52,6 +52,7 @@ pub mod mv_registry;
 pub mod origin;
 pub mod parquet_meta;
 pub mod peer;
+pub mod peer_fetch;
 pub mod pinlist;
 pub mod router;
 pub mod s3_shim;

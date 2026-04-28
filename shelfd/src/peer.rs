@@ -401,8 +401,13 @@ async fn peer_body_fetch(
         offset,
         end,
     );
+    // SHELF-23 — recursion guard. The receiving pod inspects this
+    // header on its `/cache/<pool>/<key>/<range>` handler and skips
+    // its own peer-fetch wrapping when set, so a peer hop never
+    // bounces off a third pod. See `peer_fetch::PEER_FETCH_HEADER`.
     let resp = http
         .get(&url)
+        .header(crate::peer_fetch::PEER_FETCH_HEADER, "1")
         .send()
         .await
         .map_err(|_| PeerErrorKind::Network)?;

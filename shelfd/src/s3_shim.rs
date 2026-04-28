@@ -58,8 +58,8 @@ use crate::aws_chunked::{decode_aws_chunked, AwsChunkedError};
 use crate::head_lru::HeadMeta;
 use crate::http::ServerState;
 use crate::origin::Origin;
-use crate::peer::{race_peer_or_origin, RaceOutcome};
-use crate::store::{key_from_tuple, Key, Pool, ReadOutcome};
+use crate::peer_fetch::peer_or_origin_fetch;
+use crate::store::{key_from_tuple, Pool, ReadOutcome};
 
 mod xml;
 use xml::{
@@ -610,147 +610,6 @@ pub async fn handle_head_object(
         .with_label_values(&["/s3/head_object", outcome])
         .observe(start.elapsed().as_secs_f64());
     response
-}
-
-/// SHELF-23 — peer-fetch deadline for the `POST /cache/contains` probe.
-///
-/// 10 ms matches the budget documented in
-/// [`crate::peer::race_peer_or_origin`]: same-AZ k8s pod-to-pod p99
-/// HTTP probe latency is < 2 ms per the SHELF-08 jitter data, so 10 ms
-/// absorbs a GC pause without letting a slow peer delay the S3
-/// fallback.
-const PEER_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_millis(10);
-
-/// SHELF-23 — convert a `router::Member` endpoint (which carries
-/// the `data_port` per `membership::build_members`, default 9092)
-/// into the **control-plane** base URL the peer's
-/// `/cache/contains` and `/cache/<pool>/<key>/<range>` handlers
-/// listen on (default 9090). We rebuild the URL from `(ip, port)`
-/// rather than string-splitting the endpoint so IPv6 literals stay
-/// well-formed (`[::1]:9092` would otherwise be a foot-gun).
-fn peer_base_url(member_endpoint: &str, stats_port: u16) -> Option<String> {
-    let host = match member_endpoint.rsplit_once(':') {
-        // IPv6 literal: `[<v6>]:<port>` — keep the bracketed host.
-        Some((host, _port)) => host.to_owned(),
-        None => return None,
-    };
-    Some(format!("http://{host}:{stats_port}"))
-}
-
-/// SHELF-23 — pool label as used in metric `pool` and HTTP path
-/// segments alike. Kept tiny + inlined; `s3_shim` already has a
-/// near-identical match arm in `handle_get_object`.
-fn pool_str(pool: Pool) -> &'static str {
-    match pool {
-        Pool::Metadata => "metadata",
-        Pool::RowGroup => "rowgroup",
-    }
-}
-
-/// SHELF-23 — single-flight body fetch that races the HRW primary
-/// peer against origin S3 on a local cache miss.
-///
-/// Wraps [`crate::peer::race_peer_or_origin`] with the metric bumps
-/// and the local-vs-self short-circuit, returning the same `Bytes`
-/// shape `Origin::get_range` would have. On any non-`PeerHit`
-/// outcome the origin future's resolved value is the source of
-/// truth; this function preserves the existing s3_shim contract
-/// (a cache miss without peer help still returns origin bytes
-/// unchanged).
-///
-/// This function is fail-open: if the router has no members yet
-/// (early startup), or peer-fetch has been disabled at runtime,
-/// it returns `origin_fut.await` directly without touching any
-/// peer counter, exactly as the pre-SHELF-23 hot path did.
-async fn peer_or_origin_fetch<F>(
-    state: &Arc<ServerState>,
-    pool: Pool,
-    key: &Key,
-    offset: u64,
-    length: u64,
-    origin_fut: F,
-) -> crate::Result<bytes::Bytes>
-where
-    F: std::future::Future<Output = crate::Result<bytes::Bytes>> + Send,
-{
-    if !state.is_peer_fetch_enabled() {
-        return origin_fut.await;
-    }
-
-    // `Router::owner` panics on an empty ring (membership has not
-    // produced its first snapshot yet). We deliberately bail to
-    // origin-only in that window so a startup race never turns
-    // into a 500 — `is_local_owner` returns false for empty rings,
-    // so we mirror its safe-default.
-    let view = state.router.view();
-    if view.members().is_empty() {
-        return origin_fut.await;
-    }
-    let owner = state.router.owner(key.as_bytes());
-    if owner.id.as_str() == &*state.pod_id {
-        // We are the HRW primary — no peer benefit.
-        return origin_fut.await;
-    }
-
-    let Some(peer_url) = peer_base_url(&owner.endpoint, state.peer_stats_port) else {
-        // Endpoint shape we don't recognise; bail rather than
-        // construct a malformed URL.
-        return origin_fut.await;
-    };
-
-    let pool_label = pool_str(pool);
-    let key_hex = key.to_hex();
-
-    let outcome = race_peer_or_origin(
-        &state.peer_http,
-        &peer_url,
-        pool_label,
-        &key_hex,
-        offset,
-        length,
-        origin_fut,
-        PEER_PROBE_DEADLINE,
-    )
-    .await;
-
-    match outcome {
-        RaceOutcome::PeerHit(b) => {
-            crate::metrics::PEER_HIT_TOTAL
-                .with_label_values(&[pool_label])
-                .inc();
-            Ok(b)
-        }
-        // Peer was reachable but said "Miss" → origin is the answer.
-        RaceOutcome::PeerMiss(o) => {
-            crate::metrics::PEER_MISS_TOTAL
-                .with_label_values(&[pool_label])
-                .inc();
-            o
-        }
-        // Origin completed before the probe could return — peer was
-        // strictly slower than a full S3 GET on this request. From
-        // the operator-dashboard "did peer help?" perspective this
-        // is a miss, so we share the counter rather than introducing
-        // a fifth dimension only this branch would touch.
-        RaceOutcome::OriginRaced(o) => {
-            crate::metrics::PEER_MISS_TOTAL
-                .with_label_values(&[pool_label])
-                .inc();
-            o
-        }
-        RaceOutcome::PeerTimeout(o) => {
-            crate::metrics::PEER_TIMEOUT_TOTAL
-                .with_label_values(&[pool_label])
-                .inc();
-            o
-        }
-        RaceOutcome::PeerError(kind, o) => {
-            crate::metrics::PEER_ERROR_TOTAL
-                .with_label_values(&[pool_label, kind.metric_label()])
-                .inc();
-            o
-        }
-    }
 }
 
 /// `GET /:bucket/*key` — S3 `GetObject` (honours `Range:` if set).

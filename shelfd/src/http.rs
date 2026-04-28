@@ -434,20 +434,27 @@ pub mod handlers {
     pub async fn get_cache(
         State(state): State<Arc<ServerState>>,
         Path((pool_str, key_hex, range_str)): Path<(String, String, String)>,
+        headers: axum::http::HeaderMap,
     ) -> Response {
         // SHELF-08: wrap the whole handler in a named span so a
         // Tempo trace resolves `http.get_cache → s3.get_object`.
         // `pool` / `status` / `outcome` are recorded as the handler
         // resolves them.
+        //
+        // SHELF-23: `is_peer_hop` short-circuits the peer-fetch wrapping
+        // below when the request itself is an inbound peer-fetch, so we
+        // don't bounce off a third pod. See `peer_fetch::PEER_FETCH_HEADER`.
+        let is_peer_hop = headers.get(crate::peer_fetch::PEER_FETCH_HEADER).is_some();
         let span = tracing::info_span!(
             "http.get_cache",
             otel.kind = "server",
             route = "/cache/:pool/:key/:range",
             pool = %pool_str,
+            peer_hop = is_peer_hop,
             status = field::Empty,
             outcome = field::Empty,
         );
-        async move { get_cache_inner(state, pool_str, key_hex, range_str).await }
+        async move { get_cache_inner(state, pool_str, key_hex, range_str, is_peer_hop).await }
             .instrument(span)
             .await
     }
@@ -457,6 +464,7 @@ pub mod handlers {
         pool_str: String,
         key_hex: String,
         range_str: String,
+        is_peer_hop: bool,
     ) -> Response {
         let start = std::time::Instant::now();
         let pool = match parse_pool(&pool_str) {
@@ -542,12 +550,34 @@ pub mod handlers {
         let admission = state.admission.clone();
         let bucket = origin.bucket().to_owned();
         let object_key = key_hex.clone();
-        let fetcher = async move {
+        let origin_fut = async move {
             use crate::origin::Origin;
             origin
                 .as_ref()
                 .get_range(&bucket, &object_key, offset, length)
                 .await
+        };
+
+        // SHELF-23 — race the HRW primary peer against origin on a
+        // local cache miss, *unless* this request is itself a peer
+        // hop (in which case we are the peer being probed and must
+        // not recurse).
+        let state_for_peer = state.clone();
+        let key_for_peer = key.clone();
+        let fetcher = async move {
+            if is_peer_hop {
+                origin_fut.await
+            } else {
+                crate::peer_fetch::peer_or_origin_fetch(
+                    &state_for_peer,
+                    pool,
+                    &key_for_peer,
+                    offset,
+                    length,
+                    origin_fut,
+                )
+                .await
+            }
         };
 
         let outcome = state
