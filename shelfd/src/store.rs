@@ -27,7 +27,7 @@ use std::sync::{Arc, Weak};
 use bytes::Bytes;
 use foyer::{
     DirectFsDeviceOptions, Engine, EvictionConfig, FifoConfig, HybridCache, HybridCacheBuilder,
-    LargeEngineOptions, LfuConfig, LruConfig, RateLimitPicker, S3FifoConfig,
+    LargeEngineOptions, LfuConfig, LruConfig, S3FifoConfig,
 };
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -413,6 +413,14 @@ impl PoolHandle {
 pub struct FoyerStore {
     metadata: PoolHandle,
     rowgroup: PoolHandle,
+    /// SHELF-21e — level-based back-pressure for the rowgroup
+    /// hybrid pool's LODC submit queue. `Some` only when rowgroup
+    /// is wired as a Foyer `HybridCache` (i.e. `nvme_bytes > 0`);
+    /// `None` for DRAM-only deployments where the LODC simply
+    /// doesn't exist. Held outside `PoolHandle::Hybrid` so the
+    /// admission gate can be consulted with a single field access
+    /// rather than a match-on-pool every read.
+    rowgroup_lodc_bp: Option<crate::lodc_backpressure::LodcBackpressure>,
     inflight: InflightMap,
     /// SHELF-24 allowlist. Held separately from the two Foyer caches
     /// so that (1) eviction of the bytes does not also unpin the key
@@ -482,6 +490,32 @@ impl FoyerStore {
             Self::build_hybrid_rowgroup(&config.rowgroup).await?
         };
 
+        // SHELF-21e — wire the LODC back-pressure controller. Only
+        // meaningful for hybrid rowgroup; DRAM-only pools have no
+        // submit queue to bound. Pre-touch the three `shelf_lodc_*`
+        // metric children on the `rowgroup` label so dashboards see
+        // the series even on a freshly booted, idle pod (same
+        // pattern the rest of `open()` uses for the other vec
+        // metrics).
+        let rowgroup_lodc_bp = if config.rowgroup.nvme_bytes == 0 {
+            None
+        } else {
+            let bp = crate::lodc_backpressure::LodcBackpressure::from_disk_cache_config(
+                &config.rowgroup.disk_cache,
+                pool_label(Pool::RowGroup),
+            );
+            crate::metrics::LODC_DROPS_TOTAL
+                .with_label_values(&[pool_label(Pool::RowGroup)])
+                .inc_by(0);
+            crate::metrics::LODC_INFLIGHT_BYTES
+                .with_label_values(&[pool_label(Pool::RowGroup)])
+                .set(0);
+            crate::metrics::LODC_QUEUE_DEPTH
+                .with_label_values(&[pool_label(Pool::RowGroup)])
+                .set(0);
+            Some(bp)
+        };
+
         // Pre-touch every metric family that is otherwise only emitted
         // after a real hit/miss/admit/evict has fired. The post-cutover
         // 2026-04-27 snapshot caught only 6 of the 21 declared families
@@ -497,6 +531,12 @@ impl FoyerStore {
                 .inc_by(0);
             crate::metrics::ADMISSIONS_TOTAL
                 .with_label_values(&[label, "reject_size"])
+                .inc_by(0);
+            // SHELF-21e — the LODC back-pressure label is only
+            // meaningful for `rowgroup`, but pre-touching for both
+            // pools keeps the dashboard panel symmetric.
+            crate::metrics::ADMISSIONS_TOTAL
+                .with_label_values(&[label, "reject_lodc"])
                 .inc_by(0);
             crate::metrics::EVICTIONS_TOTAL
                 .with_label_values(&[label, "capacity"])
@@ -515,9 +555,23 @@ impl FoyerStore {
         Ok(Self {
             metadata,
             rowgroup,
+            rowgroup_lodc_bp,
             inflight: Mutex::new(HashMap::new()),
             pin_set: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// SHELF-21e — Foyer's monotonic "bytes committed to NVMe"
+    /// counter for the rowgroup hybrid pool, used by the LODC
+    /// back-pressure controller to compute `inflight = admitted −
+    /// committed`. Returns `0` for DRAM-only pools (no NVMe, no LODC).
+    fn rowgroup_committed_bytes(&self) -> u64 {
+        match &self.rowgroup {
+            PoolHandle::Dram { .. } => 0,
+            PoolHandle::Hybrid { cache, .. } => {
+                cache.stats().write_bytes.load(Ordering::Relaxed) as u64
+            }
+        }
     }
 
     /// Build the `rowgroup` pool as a Foyer `HybridCache` backed by
@@ -586,21 +640,20 @@ impl FoyerStore {
         if let Some(bytes) = cfg.disk_cache.submit_queue_size_threshold_bytes {
             large_opts = large_opts.with_submit_queue_size_threshold(bytes as usize);
         }
-        // SHELF-21e-v2 — bound the admission *rate* into the LODC
-        // pipeline. The LargeEngineOptions above bound the *size* of
-        // the submit queue + flush buffers, which caps RSS but does
-        // not prevent the overflow when sustained ingress exceeds
-        // the EBS drain rate (Foyer then logs `[lodc] submit queue
-        // overflow, new entry ignored`). Foyer 0.12 ships a built-in
-        // `RateLimitPicker` that returns `true` from `pick()` only
-        // when the bytes-per-second token bucket has room, so
-        // admissions self-throttle to whatever the disk can actually
-        // absorb. DRAM stays hot regardless (this picker gates only
-        // the disk admission seam).
-        //
-        // When `admission_bytes_per_sec` is `None` we leave Foyer's
-        // default `AdmitAllPicker` in place (pre-preview-8 behaviour).
-        let builder = HybridCacheBuilder::new()
+        // SHELF-21e — back-pressure now lives in
+        // [`crate::lodc_backpressure::LodcBackpressure`] (a level-based,
+        // shelfd-side gate at the `get_or_fetch` admission seam),
+        // NOT in a Foyer admission picker. The previous Foyer-side
+        // `RateLimitPicker` (preview-8) added latency to every write
+        // even when the queue was empty because the token bucket
+        // fills purely on time, not on observed drain rate; reverted
+        // in preview-9 / helm rev-22. The LODC submit-queue *size*
+        // is still bounded by Foyer's
+        // `submit_queue_size_threshold` configured in
+        // `LargeEngineOptions` above; the new gate adds a soft
+        // watermark in front of that hard cap so the drop event is
+        // observable via `shelf_lodc_drops_total{pool}`.
+        let cache: HybridCache<Key, Bytes> = HybridCacheBuilder::new()
             .with_name("shelfd.rowgroup")
             .with_event_listener(Arc::new(CapacityEvictionListener {
                 pool_label: pool_label(Pool::RowGroup),
@@ -610,13 +663,7 @@ impl FoyerStore {
             .with_eviction_config(eviction)
             .storage(Engine::Large)
             .with_device_options(device)
-            .with_large_object_disk_cache_options(large_opts);
-        let builder = if let Some(bps) = cfg.disk_cache.admission_bytes_per_sec {
-            builder.with_admission_picker(Arc::new(RateLimitPicker::<Key>::new(bps as usize)))
-        } else {
-            builder
-        };
-        let cache: HybridCache<Key, Bytes> = builder
+            .with_large_object_disk_cache_options(large_opts)
             .build()
             .await
             .map_err(|e| crate::Error::Store(format!("pool.rowgroup NVMe init failed: {e}")))?;
@@ -780,9 +827,33 @@ impl FoyerStore {
         // module could return a richer enum later without breaking
         // the metric name.
         let decision = admission.decide(&ctx);
-        let admit = decision == crate::admission::AdmissionDecision::Admit;
+        let policy_admit = decision == crate::admission::AdmissionDecision::Admit;
+
+        // SHELF-21e — second admission gate: even when the
+        // size-threshold policy says admit, drop the insert if the
+        // hybrid pool's LODC submit queue is backed up. Only
+        // applies to the rowgroup hybrid pool; metadata is DRAM
+        // only and has no LODC. Non-blocking: two atomic loads.
+        let lodc_admit = if policy_admit && pool == Pool::RowGroup {
+            match &self.rowgroup_lodc_bp {
+                Some(bp) => bp.should_admit(bytes.len() as u64, self.rowgroup_committed_bytes()),
+                None => true,
+            }
+        } else {
+            true
+        };
+
+        let admit = policy_admit && lodc_admit;
         let decision_label = if admit {
             "admit"
+        } else if !lodc_admit {
+            // SHELF-21e — the policy said admit but back-pressure
+            // dropped the insert. Keep this label distinct from
+            // `reject_size` / `reject_other` so dashboards can
+            // tell "policy rejected" apart from "back-pressure
+            // dropped"; the latter is an ops signal that NVMe
+            // drain is falling behind ingress.
+            "reject_lodc"
         } else if ctx.pinned {
             "reject_other"
         } else {

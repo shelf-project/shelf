@@ -470,6 +470,61 @@ pub static WARM_THRESHOLD_CROSSED_SECONDS: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("register warm_threshold_crossed_seconds")
 });
 
+/// SHELF-21e — counter of LODC submit-queue admissions dropped by
+/// shelfd's level-based back-pressure (see [`crate::lodc_backpressure`]).
+/// Increments **once per dropped admission**, scoped to the pool
+/// (only `rowgroup` is hybrid in v1; the label is kept for forward
+/// compatibility with future hybrid pools). A non-zero rate over a
+/// 5-min window is the operator signal that NVMe drain is falling
+/// behind ingress; a sustained non-zero rate over 30 min is a
+/// paging-grade alert because it means the cache is doing less
+/// work than it could.
+pub static LODC_DROPS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_lodc_drops_total",
+        "Hybrid-pool admissions dropped by shelfd's LODC back-pressure \
+         (see SHELF-21e). Increments once per dropped admission. Sustained \
+         non-zero rate ⇒ NVMe drain is falling behind ingress.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register lodc_drops_total")
+});
+
+/// SHELF-21e — current in-flight bytes the back-pressure controller
+/// observes per pool. Computed as `admitted_bytes − cache_write_bytes`
+/// (both monotonic). Zero in steady state; climbs toward the
+/// watermark under burst. The companion metric to
+/// [`LODC_DROPS_TOTAL`]: drops fire when this gauge crosses ~80%
+/// of the configured submit-queue threshold.
+pub static LODC_INFLIGHT_BYTES: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_lodc_inflight_bytes",
+        "Approximate bytes admitted to the hybrid pool but not yet \
+         committed to NVMe. Updated on every admission decision.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register lodc_inflight_bytes")
+});
+
+/// SHELF-21e — estimated submit-queue depth in entries. Computed as
+/// `inflight_bytes / avg_admitted_entry_size` so dashboards can
+/// graph "how many entries are stacked behind the flushers"
+/// alongside the byte-level [`LODC_INFLIGHT_BYTES`] gauge. Strictly
+/// informational; the admission decision uses bytes, not depth.
+pub static LODC_QUEUE_DEPTH: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_lodc_queue_depth",
+        "Estimated count of entries admitted to the hybrid pool but \
+         not yet committed to NVMe. Derived from the byte-level \
+         shelf_lodc_inflight_bytes; informational only.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register lodc_queue_depth")
+});
+
 /// Track G-11 companion — current rolling hit ratio per pool, in
 /// basis points (0–10_000). Sampled by the same `warm_sampler`
 /// task that flips `WARM_THRESHOLD_CROSSED_SECONDS`. Exposed as
@@ -529,6 +584,10 @@ pub const EXPOSED_SERIES: &[&str] = &[
     // Track G-4 — per-table hit / miss counters.
     "shelf_hits_by_table_total",
     "shelf_misses_by_table_total",
+    // SHELF-21e — LODC back-pressure observability.
+    "shelf_lodc_drops_total",
+    "shelf_lodc_inflight_bytes",
+    "shelf_lodc_queue_depth",
 ];
 
 #[cfg(test)]
@@ -590,6 +649,9 @@ mod tests {
             ROLLING_HIT_RATIO_BPS.desc(),
             HITS_BY_TABLE_TOTAL.desc(),
             MISSES_BY_TABLE_TOTAL.desc(),
+            LODC_DROPS_TOTAL.desc(),
+            LODC_INFLIGHT_BYTES.desc(),
+            LODC_QUEUE_DEPTH.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -682,6 +744,11 @@ mod tests {
         MISSES_BY_TABLE_TOTAL
             .with_label_values(&["metadata", "other"])
             .inc_by(0);
+        LODC_DROPS_TOTAL.with_label_values(&["rowgroup"]).inc_by(0);
+        LODC_INFLIGHT_BYTES
+            .with_label_values(&["rowgroup"])
+            .set(0);
+        LODC_QUEUE_DEPTH.with_label_values(&["rowgroup"]).set(0);
 
         let families = REGISTRY.gather();
         let names: HashSet<String> = families.iter().map(|f| f.get_name().to_owned()).collect();
