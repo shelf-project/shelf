@@ -45,6 +45,7 @@ pub mod filter_service;
 pub mod fingerprint;
 pub mod head_lru;
 pub mod http;
+pub mod lodc_backpressure;
 pub mod membership;
 pub mod metrics;
 pub mod mv_registry;
