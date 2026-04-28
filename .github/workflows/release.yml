@@ -9,9 +9,9 @@ name: release
 #                                 no Sigstore writes, no GH Release)
 #
 # What this workflow ships, per playbook:
-#   1. Multi-arch shelfd image  →  ghcr.io/aamir306/shelfd:<tag> (+ :latest on stable)
+#   1. Multi-arch shelfd image  →  ghcr.io/shelf-project/shelfd:<tag> (+ :latest on stable)
 #                                  for linux/amd64 + linux/arm64
-#   2. Helm chart (OCI)         →  ghcr.io/aamir306/charts/shelf:<tag>
+#   2. Helm chart (OCI)         →  ghcr.io/shelf-project/charts/shelf:<tag>
 #   3. shelfctl static binaries →  linux/{amd64,arm64} (musl), darwin/{amd64,arm64}
 #                                  attached to the GitHub Release
 #   4. CycloneDX SBOM (syft)    →  attached to the image as a cosign attestation
@@ -53,8 +53,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE_NAME: ghcr.io/aamir306/shelfd
-  CHART_OCI_REPO: ghcr.io/aamir306/charts
+  IMAGE_NAME: ghcr.io/shelf-project/shelfd
+  CHART_OCI_REPO: ghcr.io/shelf-project/charts
   REGISTRY: ghcr.io
   COSIGN_VERSION: v2.4.1
   SYFT_VERSION: v1.18.1
@@ -412,7 +412,7 @@ jobs:
       contents: read
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
     with:
-      image: ghcr.io/aamir306/shelfd
+      image: ghcr.io/shelf-project/shelfd
       digest: ${{ needs.build-image.outputs.digest }}
       registry-username: ${{ github.actor }}
     secrets:

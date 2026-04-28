@@ -13,7 +13,7 @@ notification load that comes with it.
 
 | Role | Handle      | Email                       |
 |------|-------------|-----------------------------|
-| BDFL | `@aamir306` | `aamir.siddiqui@pw.live`    |
+| BDFL | `@aamir306` | `oncall@shelf-project.dev`    |
 
 The BDFL:
 
