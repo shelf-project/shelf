@@ -87,6 +87,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Strip penpencil-cluster overlay from publish surface
+        run: |
+          set -euo pipefail
+          if [ -d "infra/penpencil" ]; then
+            git rm -rf --cached infra/penpencil/
+            rm -rf infra/penpencil/
+          fi
+          # Sanity check: zero penpencil identifiers anywhere in the publish tree
+          if rg -q -e 'penpencil' -e 'pw-data-cdp' -e '539436019547' -e 'alluxio.svc.cluster.local' \
+                  --glob '!agents/**' --glob '!docs/rollout-v1/**' --glob '!.git/**' .; then
+            echo "::error::Penpencil identifier leaked into publish surface — aborting release"
+            rg -n -e 'penpencil' -e 'pw-data-cdp' -e '539436019547' -e 'alluxio.svc.cluster.local' \
+               --glob '!agents/**' --glob '!docs/rollout-v1/**' --glob '!.git/**' .
+            exit 1
+          fi
+          echo "::notice::Publish surface clean of penpencil identifiers"
+
       - name: Resolve release tag + flags
         id: resolve
         env:
