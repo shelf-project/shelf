@@ -1,0 +1,48 @@
+# shelfd config for the Polars + Shelf example.
+#
+# DRAM-first cache pointed at an in-network MinIO bucket. Single
+# pod, no peers; pin list disabled. The S3 read shim binds on
+# 0.0.0.0:9092 by default (see shelfd config defaults), which is the
+# endpoint pl.scan_iceberg(...) talks to via storage_options.
+
+node:
+  id: shelf-polars-0
+
+http:
+  listen: 0.0.0.0:9090
+  request_timeout: 30s
+
+control:
+  listen: 0.0.0.0:9091
+
+origin:
+  bucket: warehouse
+  endpoint_url: http://minio:9000
+  region: us-east-1
+  max_inflight: 64
+
+pools:
+  metadata:
+    dram_bytes: 268435456        # 256 MiB
+  rowgroup:
+    dram_bytes: 268435456        # 256 MiB
+    nvme_dir: /tmp/shelf-nvme    # ephemeral; rowgroup pool can spill here
+    nvme_bytes: 536870912        # 512 MiB
+
+admission:
+  size_threshold_bytes: 1073741824   # 1 GiB per ADR-0003
+  pinned_bypass: true
+
+membership:
+  headless_service: shelf-polars-shelfd
+  dns_refresh: 5s
+
+pin_list:
+  bucket: warehouse
+  key: pin_list.json
+  refresh_period: 15m
+  enabled: false
+
+head_lru_entries: 4096
+
+observability: {}

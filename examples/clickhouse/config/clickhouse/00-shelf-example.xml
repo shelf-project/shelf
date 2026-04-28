@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse overrides for the shelf example.
+
+  Notes:
+    * The iceberg() / icebergS3() table function takes the S3 endpoint
+      inline as the first argument, so no <s3> or <storage_configuration>
+      block is required to point at shelfd.
+    * Path-style addressing is auto-detected by ClickHouse's S3 client
+      whenever the URL host does not match the AWS virtual-hosted regex
+      (i.e. anything that is not "<bucket>.s3.<region>.amazonaws.com").
+      `http://shelfd:9092/warehouse/...` therefore becomes path-style
+      automatically — no `s3_use_path_style` query setting exists in
+      24.x; the equivalent for storage-disk configs is the
+      <use_path_style_url>true</use_path_style_url> XML element, which
+      is unnecessary here.
+    * We disable the iceberg metadata cache so cold-vs-warm timing in
+      run.sh actually exercises the shim (otherwise warm reads of
+      manifest list / manifests are served from CH process memory and
+      shelfd never sees them).
+-->
+<clickhouse>
+    <!--
+      The compose bind mount replaces /etc/clickhouse-server/config.d/ in
+      its entirety, which means the image's own docker_related_config.xml
+      (and its <listen_host>::</listen_host>) is no longer present. Without
+      this override ClickHouse falls back to the stock config.xml defaults
+      (127.0.0.1 + ::1 only) and cross-container traffic from clickhouse-
+      client and probes from the host both fail with "Empty reply from
+      server" / "Could not connect".
+    -->
+    <listen_host>0.0.0.0</listen_host>
+    <listen_try>1</listen_try>
+
+    <profiles>
+        <default>
+            <use_iceberg_metadata_files_cache>0</use_iceberg_metadata_files_cache>
+            <use_iceberg_partition_pruning>1</use_iceberg_partition_pruning>
+            <input_format_parquet_use_native_reader>1</input_format_parquet_use_native_reader>
+        </default>
+    </profiles>
+</clickhouse>

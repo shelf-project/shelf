@@ -1,0 +1,10 @@
+# PyIceberg reference example.
+#
+# pyiceberg 0.7+ honors the s3.* catalog properties end-to-end: PyArrow's
+# S3FileSystem is constructed from `s3.endpoint`, `s3.access-key-id`,
+# `s3.secret-access-key`, `s3.region`, and `s3.path-style-access`.
+# (See pyiceberg.io.pyarrow._initialize_fs.) Pinning a known-good range so
+# the example stays reproducible if the upstream API drifts.
+pyiceberg[pyarrow,s3fs]==0.7.1
+pandas==2.2.3
+requests==2.32.3

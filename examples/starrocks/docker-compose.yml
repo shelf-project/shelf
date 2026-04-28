@@ -1,0 +1,190 @@
+# StarRocks-on-Shelf example.
+#
+# Spins up:
+#   - minio          (S3-compat object store, the "real" origin)
+#   - minio-setup    (one-shot: creates the `warehouse` bucket)
+#   - iceberg-rest   (apache/iceberg-rest-fixture, sqlite state — see note below)
+#   - shelfd         (built locally from the repo via benchmarks/smoke/Dockerfile.shelfd)
+#   - starrocks      (starrocks/allin1-ubuntu:3.2.16 — FE+BE in one container)
+#   - seed           (one-shot: PyIceberg writes a partitioned `events` table)
+#
+# Read path that this example demonstrates:
+#
+#   StarRocks BE  --(Iceberg REST)-->  iceberg-rest    (catalog state in sqlite)
+#                 --(S3 GET/HEAD)-->   shelfd:9092   --(GET on miss)----->  minio:9000
+#
+# StarRocks's `aws.s3.endpoint` is pointed at shelfd's signature-agnostic
+# S3-compat shim (port 9092). The shim parses `bucket` from the path-style
+# URL, serves bytes from Foyer DRAM/NVMe on hit, falls through to MinIO on
+# miss. Catalog metadata calls go straight to iceberg-rest — only the
+# S3 byte plane (manifests, manifest lists, Parquet) flows through shelfd.
+#
+# Self-contained: nothing outside `examples/starrocks/` is modified.
+# `shelfd` is built from the repo root using the smoke harness's
+# Dockerfile so this example tracks the workspace's source tree.
+
+name: shelf-starrocks-example
+
+networks:
+  shelf-starrocks:
+    driver: bridge
+
+volumes:
+  minio-data:
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2024-12-13T22-19-12Z
+    container_name: shelf-starrocks-minio
+    networks: [shelf-starrocks]
+    # Host ports re-mapped to a unique range so this example coexists
+    # with the sister duckdb/daft/spark/clickhouse examples (each of
+    # which already binds 9000/9001 on different schemes).
+    ports:
+      - "127.0.0.1:9700:9000"
+      - "127.0.0.1:9701:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    command: ["server", "/data", "--console-address", ":9001"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  minio-setup:
+    image: minio/mc:RELEASE.2024-11-21T17-21-54Z
+    container_name: shelf-starrocks-minio-setup
+    networks: [shelf-starrocks]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      set -eu;
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing local/warehouse;
+      mc mb --ignore-existing local/shelfd-pin-list;
+      echo 'buckets ready';
+      "
+
+  # Apache Iceberg REST catalog reference image. Same image family the
+  # StarRocks 3.2 docs Iceberg tutorial uses
+  # (https://docs.starrocks.io/docs/3.2/data_source/icebergtutorial/).
+  #
+  # Backing store is the bundled sqlite, NOT Postgres. The fixture image
+  # does not ship a Postgres JDBC driver, so wiring it to an external
+  # Postgres requires a custom image or a JAR bind-mount — out of scope
+  # for a 5-minute walkthrough. Sqlite is fine here: the catalog state
+  # is a few rows of namespace + table-pointer metadata, and the demo's
+  # whole point is the *byte* read path through shelfd, not catalog-state
+  # durability. For production, swap in Lakekeeper / Polaris and back
+  # them with Postgres yourself.
+  iceberg-rest:
+    image: apache/iceberg-rest-fixture:1.9.2
+    container_name: shelf-starrocks-iceberg-rest
+    networks: [shelf-starrocks]
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+    ports:
+      - "127.0.0.1:8781:8181"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/8181"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  shelfd:
+    build:
+      context: ../..
+      dockerfile: benchmarks/smoke/Dockerfile.shelfd
+    container_name: shelf-starrocks-shelfd
+    networks: [shelf-starrocks]
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    environment:
+      RUST_LOG: info
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./config/shelfd/shelfd.yaml:/etc/shelfd/shelfd.yaml:ro
+    command: ["--config", "/etc/shelfd/shelfd.yaml"]
+    ports:
+      - "127.0.0.1:9791:9090"  # data plane (/healthz, /metrics, /admin, /stats)
+      - "127.0.0.1:9792:9092"  # S3-compat read+write shim
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9090/healthz || exit 1"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+
+  # StarRocks all-in-one (FE + BE in a single container). Pinned to a
+  # specific 3.2.x patch — `latest` would drift across runs.
+  #
+  # The image is published x86_64 only. On Apple Silicon docker emulates
+  # via QEMU; first boot takes 60–120 s and steady-state queries are 2–3×
+  # slower than native — fine for a demo, not representative of prod
+  # latency.
+  starrocks:
+    image: starrocks/allin1-ubuntu:3.2.16
+    platform: linux/amd64
+    container_name: shelf-starrocks-allin1
+    networks: [shelf-starrocks]
+    depends_on:
+      iceberg-rest:
+        condition: service_healthy
+      shelfd:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8730:8030"   # FE HTTP
+      - "127.0.0.1:9730:9030"   # MySQL protocol (used by run.sh + bench.sql)
+      - "127.0.0.1:8740:8040"   # BE HTTP
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+    healthcheck:
+      test: ["CMD-SHELL", "mysql -uroot -h127.0.0.1 -P9030 -e 'SHOW BACKENDS\\G' | grep -q 'Alive: true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  seed:
+    image: python:3.12-slim
+    container_name: shelf-starrocks-seed
+    networks: [shelf-starrocks]
+    depends_on:
+      iceberg-rest:
+        condition: service_healthy
+    working_dir: /seed
+    volumes:
+      - ./init:/seed:ro
+    environment:
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      WAREHOUSE_BUCKET: warehouse
+      ICEBERG_REST_URI: http://iceberg-rest:8181
+      EVENTS_ROWS: "1000000"
+      EVENTS_DAYS: "30"
+    command: ["bash", "/seed/seed.sh"]
+    profiles: ["seed"]

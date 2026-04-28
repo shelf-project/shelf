@@ -1,0 +1,163 @@
+# Daft + Shelf example.
+#
+# Topology:
+#
+#   runner ──daft.read_iceberg──▶ shelfd:9092 (S3-compat shim) ──▶ minio:9000
+#       │
+#       └────pyiceberg load_table───▶ iceberg-rest:8181 ──▶ minio:9000
+#
+# Daft's native S3 client points at shelfd's shim instead of MinIO. The
+# shim is signature-agnostic, so dummy creds are fine. PyIceberg talks
+# to the REST catalog and to MinIO directly (path-style) — that's only
+# used for catalog ops, not data reads.
+
+name: shelf-daft-example
+
+networks:
+  shelf-daft-example:
+    driver: bridge
+
+volumes:
+  minio-data:
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2024-12-13T22-19-12Z
+    container_name: shelf-daft-minio
+    networks: [shelf-daft-example]
+    ports:
+      - "127.0.0.1:9100:9000"   # API (host 9100 to avoid clashing with stray local minios)
+      - "127.0.0.1:9101:9001"   # Web console
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    command: ["server", "/data", "--console-address", ":9001"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  minio-setup:
+    image: minio/mc:latest
+    container_name: shelf-daft-minio-setup
+    networks: [shelf-daft-example]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      set -eu;
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing local/iceberg-warehouse;
+      echo 'bucket ready';
+      "
+
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.6.0
+    container_name: shelf-daft-iceberg-rest
+    networks: [shelf-daft-example]
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      CATALOG_WAREHOUSE: s3://iceberg-warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+    ports:
+      - "127.0.0.1:8181:8181"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/8181"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  shelfd:
+    build:
+      context: ../..
+      dockerfile: examples/daft/Dockerfile.shelfd
+    container_name: shelf-daft-shelfd
+    networks: [shelf-daft-example]
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    environment:
+      RUST_LOG: info
+      SHELFD_ORIGIN_ENDPOINT: http://minio:9000
+      SHELFD_ORIGIN_BUCKET: iceberg-warehouse
+      SHELFD_ORIGIN_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./config/shelfd.yaml:/etc/shelfd/shelfd.yaml:ro
+    command: ["--config", "/etc/shelfd/shelfd.yaml"]
+    ports:
+      - "127.0.0.1:9090:9090"   # data plane (/healthz, /metrics, /stats)
+      - "127.0.0.1:9092:9092"   # SHELF-22 S3-compat shim
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9090/healthz || exit 1"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+
+  seed:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+    image: shelf-daft-runner
+    container_name: shelf-daft-seed
+    networks: [shelf-daft-example]
+    depends_on:
+      iceberg-rest:
+        condition: service_healthy
+    working_dir: /app
+    volumes:
+      - ./init:/app/init:ro
+    environment:
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      WAREHOUSE_BUCKET: iceberg-warehouse
+      ICEBERG_REST_URI: http://iceberg-rest:8181
+      SEED_ROWS: "${SEED_ROWS:-50000}"
+    entrypoint: ["python", "/app/init/seed.py"]
+
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+    image: shelf-daft-runner
+    container_name: shelf-daft-runner
+    networks: [shelf-daft-example]
+    depends_on:
+      shelfd:
+        condition: service_healthy
+      iceberg-rest:
+        condition: service_healthy
+    working_dir: /app
+    volumes:
+      - ./bench.py:/app/bench.py:ro
+    environment:
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      WAREHOUSE_BUCKET: iceberg-warehouse
+      ICEBERG_REST_URI: http://iceberg-rest:8181
+      SHELFD_HOST: shelfd
+      SHELFD_DATA_PORT: "9090"
+      SHELFD_SHIM_PORT: "9092"
+      TABLE_NAME: default.orders
+    entrypoint: ["python", "/app/bench.py"]

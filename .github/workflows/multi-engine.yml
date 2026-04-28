@@ -1,0 +1,188 @@
+# SHELF-36 — multi-engine examples CI.
+#
+# Exercises every reference example under `examples/` end-to-end on
+# every PR that could plausibly break one. Each engine runs in its
+# own matrix slot so a single broken stack does not mask the others
+# (`fail-fast: false`).
+#
+# Per-engine cold/warm expectations (Wave 1, 2026-04-28). These are
+# the real numbers from the per-example READMEs / VALIDATION_NOTES;
+# CI does not assert on absolute timings (Docker-on-Linux runners
+# are noisier than the dev box the numbers were captured on), but a
+# warm time within 2× of these and a positive cold→warm speedup is
+# the rough sanity floor.
+#
+#   spark:      cold ~2.1s   / warm ~410 ms  / 3.6–5.2x
+#   duckdb:     cold ~790 ms / warm ~125 ms  / 6.4x
+#   polars:     cold ~1.2s   / warm ~250 ms  / 4.88x
+#   daft:       cold ~810 ms / warm ~90 ms   / 8.83x
+#   clickhouse: cold ~610 ms / warm ~390 ms  / 1.56x
+#   pyiceberg:  cold ~57 ms  / warm ~17 ms   / 3.39x
+#   starrocks:  cold ~4.2s   / warm ~1.2s    / pending live validation
+#                                              (see examples/starrocks/VALIDATION_NOTES.md;
+#                                               FE needs 5 GiB free in /data/deploy/starrocks/fe/meta,
+#                                               which is why the "free disk space" step is
+#                                               not optional for this matrix slot)
+
+name: multi-engine
+
+on:
+  pull_request:
+    paths:
+      - "examples/**"
+      - "shelfd/**"
+      - "charts/shelf/**"
+      - ".github/workflows/multi-engine.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  example:
+    name: ${{ matrix.engine }}
+    # Match smoke.yml's runner choice. ubuntu-latest currently resolves
+    # to ubuntu-24.04 on GitHub-hosted runners; if that ever drifts in
+    # a way that breaks docker compose v2 here, pin to ubuntu-22.04 to
+    # match the runner the SHELF-12 smoke job has been green on.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        engine:
+          - spark
+          - duckdb
+          - polars
+          - daft
+          - clickhouse
+          - starrocks
+          - pyiceberg
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # GitHub-hosted runners ship with ~14 GiB free on /, which is
+      # borderline for examples that pull a 5 GiB image (StarRocks)
+      # *and* need 5 GiB free for the FE meta-dir check after extract
+      # (see examples/starrocks/VALIDATION_NOTES.md). The other six
+      # examples are well under the limit but free up unconditionally
+      # so the workflow behaves the same across the matrix.
+      #
+      # `jlumbroso/free-disk-space` is the de-facto action for this on
+      # GitHub Actions; pinned to a SHA in production would be safer,
+      # but @main is what every comparable workflow we cribbed from
+      # uses. If this action ever goes unmaintained, the equivalent
+      # inline is in the `Free disk space (fallback)` step below;
+      # delete this step and uncomment that one.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: false
+
+      # Inline fallback. Keep commented; activate if the action above
+      # is removed/breaks. Reclaims ~10 GiB on a stock ubuntu-latest
+      # runner without depending on a third-party action.
+      #
+      # - name: Free disk space (fallback)
+      #   run: |
+      #     sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+      #                 /opt/hostedtoolcache/CodeQL
+      #     sudo apt-get clean
+      #     docker system prune -af --volumes
+      #     df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # GHCR login is read-only and only needs the workflow's own
+      # GITHUB_TOKEN — no PAT, no org secret. Examples currently pull
+      # only public Docker Hub images (minio, tabulario/*, clickhouse,
+      # starrocks/allin1-ubuntu) and build shelfd locally, but logging
+      # in covers the SHELFD_IMAGE=ghcr.io/... override path documented
+      # in each per-example README without requiring extra plumbing.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Show runner state (pre-run)
+        run: |
+          df -h /
+          docker version
+          docker compose version
+          docker info --format '{{.ServerVersion}}'
+
+      - name: Run example
+        id: run
+        timeout-minutes: 15
+        env:
+          ENGINE: ${{ matrix.engine }}
+        run: |
+          set -o pipefail
+          # Tee the run.sh output so the failure-artifact step has a
+          # log to upload even when the script crashes. The per-engine
+          # run.sh scripts already trap on EXIT and print their own
+          # summaries; `tee` does not change exit codes when paired
+          # with `set -o pipefail`.
+          bash "examples/${ENGINE}/run.sh" 2>&1 \
+            | tee "examples/${ENGINE}/run.log"
+
+      - name: Dump compose logs on failure
+        if: failure()
+        env:
+          ENGINE: ${{ matrix.engine }}
+        run: |
+          # Best-effort. If the compose project never came up, this is
+          # a no-op; if it did, we want every service's last 400 lines
+          # to land in the workflow log so the failure is debuggable
+          # without re-running locally.
+          docker compose -f "examples/${ENGINE}/docker-compose.yml" \
+            ps --all || true
+          docker compose -f "examples/${ENGINE}/docker-compose.yml" \
+            logs --no-color --tail=400 || true
+
+      - name: Upload run log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.engine }}-run-log
+          path: examples/${{ matrix.engine }}/run.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload result directory on failure
+        # Some examples (clickhouse, starrocks) write a `results/`
+        # directory next to run.sh with metrics.* / cold.txt / warm.txt
+        # / summary.txt that's invaluable when triaging a CI flake.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.engine }}-results
+          path: examples/${{ matrix.engine }}/results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Tear down
+        if: always()
+        env:
+          ENGINE: ${{ matrix.engine }}
+        run: |
+          # Always run, even on success, so the runner is left clean
+          # for the next job slot. `--timeout 30` matches the upper
+          # bound of shelfd's graceful-shutdown window in
+          # charts/shelf/values.yaml; --remove-orphans catches the
+          # one-shot seeders (minio-setup, seed) that several
+          # examples leave behind exited.
+          docker compose -f "examples/${ENGINE}/docker-compose.yml" \
+            down -v --timeout 30 --remove-orphans || true

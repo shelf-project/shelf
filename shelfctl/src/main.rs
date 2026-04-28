@@ -20,6 +20,10 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 
+mod bundle;
+mod chaos;
+mod install;
+
 /// Shelf cache daemon operator CLI.
 #[derive(Debug, Parser)]
 #[command(name = "shelfctl", version, about, long_about = None)]
@@ -93,6 +97,16 @@ enum Command {
     /// Trigger an out-of-band pin-list reload. Equivalent to
     /// sending the `shelfd` process a `SIGHUP`.
     Reload,
+    /// SHELF-31 — kill a fraction of shelfd pods to demonstrate
+    /// fail-open behaviour under pod churn.
+    Chaos(chaos::ChaosArgs),
+    /// SHELF-32 — gather a redacted diagnostic bundle (logs, stats,
+    /// metrics, ring view, optional helm values) into a single
+    /// tar.gz.
+    Bundle(bundle::BundleArgs),
+    /// SHELF-33 — auto-detect Trino catalogs, generate values.yaml,
+    /// and `helm upgrade --install` the Shelf chart.
+    Install(install::InstallArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -106,25 +120,40 @@ fn main() -> anyhow::Result<()> {
         .try_init()
         .ok();
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    // The kube-touching subcommands (chaos/bundle/install) drive
+    // multiple async kube clients in parallel; spin them on the
+    // multi-thread runtime. The legacy admin subcommands are happy
+    // here too — single in-flight request each.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(dispatch(&cli))
+    runtime.block_on(dispatch(cli))
 }
 
-async fn dispatch(cli: &Cli) -> anyhow::Result<()> {
+async fn dispatch(cli: Cli) -> anyhow::Result<()> {
+    // Subcommands that need the kube apiserver own their own client
+    // setup (kubeconfig discovery, TLS, etc.) — wire them first so
+    // we don't bother spinning up a reqwest client they wouldn't use.
+    match cli.command {
+        Command::Chaos(args) => return chaos::run(args).await,
+        Command::Bundle(args) => return bundle::run(args).await,
+        Command::Install(args) => return install::run(args).await,
+        _ => {}
+    }
+
     let client = reqwest::Client::builder()
         .user_agent(concat!("shelfctl/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("building HTTP client")?;
 
-    match &cli.command {
+    match cli.command {
         Command::Stats => cmd_stats(&client, &cli.endpoint).await,
         Command::Ring => cmd_ring(&client, &cli.endpoint).await,
-        Command::Pin { key, pool } => cmd_pin(&client, &cli.endpoint, key, *pool).await,
-        Command::Unpin { key } => cmd_unpin(&client, &cli.endpoint, key).await,
-        Command::Evict { key, pool } => cmd_evict(&client, &cli.endpoint, key, *pool).await,
+        Command::Pin { key, pool } => cmd_pin(&client, &cli.endpoint, &key, pool).await,
+        Command::Unpin { key } => cmd_unpin(&client, &cli.endpoint, &key).await,
+        Command::Evict { key, pool } => cmd_evict(&client, &cli.endpoint, &key, pool).await,
         Command::Reload => cmd_reload(&client, &cli.endpoint).await,
+        Command::Chaos(_) | Command::Bundle(_) | Command::Install(_) => unreachable!(),
     }
 }
 

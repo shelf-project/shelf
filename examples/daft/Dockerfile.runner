@@ -1,0 +1,25 @@
+# Runner image for the Daft example.
+#
+# Pre-installs the two Python deps so `docker compose run --rm runner`
+# starts in seconds rather than ~30s of pip resolution on every run.
+# Pinned versions verified against the docs.daft.ai reference (Apr 2026):
+#   - daft >= 0.6 has S3Config(force_virtual_addressing=...)
+#   - pyiceberg's [s3fs] extra is the supported FileIO backend for MinIO
+#     with `s3.path-style-access=true`.
+
+FROM python:3.11-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# `getdaft` was renamed to `daft` on PyPI; the prompt's `pip install
+# getdaft` still works (it just depends on `daft`) but the modern name
+# is what we use here.
+RUN pip install --no-cache-dir \
+      "daft==0.7.5" \
+      "pyiceberg[s3fs]==0.10.0" \
+      "pyarrow>=15,<20" \
+      "requests>=2.31"
+
+WORKDIR /app

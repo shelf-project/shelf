@@ -1,0 +1,51 @@
+# shelfd config for the ClickHouse example.
+#
+# DRAM-only single-pod cache. The example is read-only (ClickHouse only
+# issues GET/HEAD against the iceberg table) so we don't bother
+# provisioning NVMe.
+#
+# The S3 shim on :9092 is signature-agnostic — ClickHouse can pass
+# 'dummy', 'dummy' as access_key / secret and shelfd will still forward
+# the request to MinIO using the credentials in its environment.
+
+node:
+  id: shelf-ch-example-0
+
+http:
+  listen: 0.0.0.0:9090
+  request_timeout: 30s
+
+control:
+  listen: 0.0.0.0:9091
+
+origin:
+  bucket: warehouse
+  endpoint_url: http://minio:9000
+  region: us-east-1
+  max_inflight: 64
+
+pools:
+  metadata:
+    dram_bytes: 268435456        # 256 MiB
+  rowgroup:
+    dram_bytes: 536870912        # 512 MiB
+    nvme_dir: /tmp/shelf-nvme
+    nvme_bytes: 1073741824       # 1 GiB (foyer pool feature gated off — ignored)
+
+admission:
+  size_threshold_bytes: 1073741824
+  pinned_bypass: true
+
+membership:
+  headless_service: shelf-ch-shelfd
+  dns_refresh: 5s
+
+pin_list:
+  enabled: false
+  bucket: warehouse
+  key: pin_list.json
+  refresh_period: 1h
+
+head_lru_entries: 4096
+
+observability: {}

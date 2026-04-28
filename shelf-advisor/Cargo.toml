@@ -1,0 +1,36 @@
+[package]
+name = "shelf-advisor"
+description = "Standalone Iceberg/Trino-event-listener advisor that emits JSON recommendations (bloom filter columns, OPTIMIZE targets, MV candidates). Phase 1 scaffold — no MR opener; downstream CI/CD applies the suggestions."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[[bin]]
+name = "shelf-advisor"
+path = "src/main.rs"
+
+# `lib.rs` exposes the recommender traits + `Recommendation` type so
+# integration tests (and future SHELF-53 plumbing) can drive the
+# pipeline in-process without shelling out to the binary.
+[lib]
+name = "shelf_advisor"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# `assert_cmd` drives the compiled `shelf-advisor` binary from the
+# integration test. Pinned to the same major as the rest of the
+# Cargo ecosystem; no transitive native deps.
+assert_cmd = "2"
+tempfile = "3"
