@@ -418,6 +418,67 @@ pub static MISSES_BY_TABLE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("register misses_by_table_total")
 });
 
+/// SHELF-23 — peer-fetch outcome counters.
+///
+/// On a local cache miss we may race a peer (the HRW primary) against
+/// origin S3. Each request increments exactly one of the four
+/// peer-fetch counters so the operator-facing payoff ratio
+/// `peer_hit_total / sum(peer_*_total)` is well-defined per pool.
+/// Wired in `s3_shim::handle_get_object` and `store::get_or_fetch`.
+pub static PEER_HIT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_peer_hit_total",
+        "Local-miss reads served from a peer pod (HRW primary) instead of origin.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register peer_hit_total")
+});
+
+/// SHELF-23 — peer probe returned `Miss` (peer does not hold the key)
+/// or its body fetch found a stale slot. Caller falls through to the
+/// already-running origin fetch.
+pub static PEER_MISS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_peer_miss_total",
+        "Local-miss reads where the HRW primary peer reported miss; \
+         caller fell through to origin.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register peer_miss_total")
+});
+
+/// SHELF-23 — peer probe deadline elapsed before a verdict. Caller
+/// falls through to origin. A high rate here usually means a peer
+/// is overloaded (probe latency > 10 ms p99 on same-AZ pod network)
+/// rather than unreachable.
+pub static PEER_TIMEOUT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_peer_timeout_total",
+        "Local-miss reads where the peer probe / fetch exceeded the \
+         configured deadline; caller fell through to origin.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register peer_timeout_total")
+});
+
+/// SHELF-23 — peer returned a non-2xx, the body decode failed, or a
+/// network-layer error short-circuited the probe. `kind` lets the
+/// dashboard split transient transport failures (`network`) from
+/// programmer-visible bugs (`decode`, `status_5xx`).
+pub static PEER_ERROR_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_peer_error_total",
+        "Local-miss reads where the peer probe / fetch failed with a \
+         non-timeout error; caller fell through to origin.",
+        &["pool", "kind"],
+        REGISTRY
+    )
+    .expect("register peer_error_total")
+});
+
 /// Track G-10 — Foyer / pool engine resets that wiped in-memory or
 /// on-disk state without a process restart. The post-cutover snapshot
 /// 2026-04-27 caught `shelf_hits_total` rolling back to 0 multiple
@@ -588,6 +649,11 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_lodc_drops_total",
     "shelf_lodc_inflight_bytes",
     "shelf_lodc_queue_depth",
+    // SHELF-23 — peer-fetch outcome counters.
+    "shelf_peer_hit_total",
+    "shelf_peer_miss_total",
+    "shelf_peer_timeout_total",
+    "shelf_peer_error_total",
 ];
 
 #[cfg(test)]
@@ -652,6 +718,10 @@ mod tests {
             LODC_DROPS_TOTAL.desc(),
             LODC_INFLIGHT_BYTES.desc(),
             LODC_QUEUE_DEPTH.desc(),
+            PEER_HIT_TOTAL.desc(),
+            PEER_MISS_TOTAL.desc(),
+            PEER_TIMEOUT_TOTAL.desc(),
+            PEER_ERROR_TOTAL.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -747,6 +817,14 @@ mod tests {
         LODC_DROPS_TOTAL.with_label_values(&["rowgroup"]).inc_by(0);
         LODC_INFLIGHT_BYTES.with_label_values(&["rowgroup"]).set(0);
         LODC_QUEUE_DEPTH.with_label_values(&["rowgroup"]).set(0);
+        PEER_HIT_TOTAL.with_label_values(&["metadata"]).inc_by(0);
+        PEER_MISS_TOTAL.with_label_values(&["metadata"]).inc_by(0);
+        PEER_TIMEOUT_TOTAL
+            .with_label_values(&["metadata"])
+            .inc_by(0);
+        PEER_ERROR_TOTAL
+            .with_label_values(&["metadata", "network"])
+            .inc_by(0);
 
         let families = REGISTRY.gather();
         let names: HashSet<String> = families.iter().map(|f| f.get_name().to_owned()).collect();
