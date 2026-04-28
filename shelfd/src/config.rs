@@ -259,26 +259,24 @@ pub struct RowGroupDiskCacheConfig {
     /// growth from the LODC pipeline. Production target is 1 GiB.
     #[serde(default)]
     pub submit_queue_size_threshold_bytes: Option<u64>,
-    /// SHELF-21e-v2 — admission rate-limit (bytes/sec) into the
-    /// Foyer Large-Object Disk Cache pipeline. When set, shelfd
-    /// installs Foyer's built-in [`foyer::RateLimitPicker`] on the
-    /// `HybridCacheBuilder`, which throttles admissions so the
-    /// sustained write rate into NVMe never exceeds this ceiling.
+    /// **Deprecated (SHELF-21e, preview-10):** rate-based admission
+    /// throttling was removed from the LODC pipeline because the
+    /// underlying Foyer 0.12 [`foyer::RateLimitPicker`] adds latency
+    /// to every write regardless of actual queue pressure (the token
+    /// bucket fills on time, not on observed drain rate). The
+    /// preview-8 attempt pegged `hit_disk` p99 at the histogram max
+    /// during sustained ingress; reverted in preview-9 / helm rev-22.
     ///
-    /// Why this knob exists on top of `flushers` +
-    /// `buffer_pool_size_bytes` + `submit_queue_size_threshold_bytes`:
-    /// those three bound the *size* of the LODC pipeline, but under
-    /// sustained ingress above the EBS drain rate the submit queue
-    /// still overflows (`[lodc] submit queue overflow, new entry
-    /// ignored`). The admission picker bounds the *rate* at the
-    /// admission seam, so DRAM stays hot but NVMe writes cap at a
-    /// value the disk can actually absorb.
+    /// Back-pressure now lives in
+    /// [`crate::lodc_backpressure::LodcBackpressure`] — a level-based
+    /// gate at shelfd's own admission seam, watermarked off
+    /// `submit_queue_size_threshold_bytes`. No new ConfigMap key
+    /// is required; tune the existing
+    /// `submit_queue_size_threshold_bytes` to move the watermark.
     ///
-    /// `None` ⇒ no limiter (pre-preview-8 behaviour; Foyer's
-    /// `AdmitAllPicker` is used). Production recommendation is
-    /// ~200 MB/s (≈ `209_715_200`) based on the EBS gp3 baseline of
-    /// ~250 MiB/s per volume, leaving headroom for the region-reclaim
-    /// read path that shares the disk.
+    /// The field is retained (with `#[serde(default)]`) so existing
+    /// `values.yaml` overlays that still set it continue to parse;
+    /// the value is silently ignored at runtime.
     #[serde(default)]
     pub admission_bytes_per_sec: Option<u64>,
 }
