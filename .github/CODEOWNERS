@@ -1,0 +1,10 @@
+# Default ownership — everything routes to the BDFL until additional
+# maintainers are added (see MAINTAINERS.md).
+*               @aamir306
+
+# Module-level ownership. Entries are in coarse-to-specific order; the
+# last matching pattern wins, so module-specific lines override `*`.
+shelfd/**       @aamir306
+charts/**       @aamir306
+docs/**         @aamir306
+.github/**      @aamir306
