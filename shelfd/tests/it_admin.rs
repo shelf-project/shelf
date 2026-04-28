@@ -43,9 +43,9 @@ fn test_pools() -> PoolsConfig {
 /// - `addr`     — bind address of the spawned axum server.
 /// - `store`    — the live `FoyerStore` so tests can seed / assert.
 /// - `router`   — shared `Arc<Router>` so tests can publish ring
-///                snapshots and observe them via `/admin/ring`.
+///   snapshots and observe them via `/admin/ring`.
 /// - `drain`    — shared `DrainSignal` so tests can flip the
-///                lameduck bit and observe `/stats.draining`.
+///   lameduck bit and observe `/stats.draining`.
 /// - `cancel`   — graceful shutdown trigger.
 struct AdminHarness {
     addr: SocketAddr,
