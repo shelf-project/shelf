@@ -192,13 +192,13 @@ jobs:
     name: build + push image
     needs: preflight
     runs-on: ubuntu-22.04
-    # 45 min was insufficient: QEMU-emulated linux/arm64 + Rust release build
-    # of shelfd's full dep set (foyer, AWS SDK, axum, opentelemetry, …) on the
-    # rc.0 attempt hit the wall at ~45 min still compiling crates. Bumped to 90.
-    # Follow-up to consider: split into a native arm64 matrix slot using the
-    # free `ubuntu-22.04-arm` runner that GitHub now provides for public repos,
-    # then a final `docker buildx imagetools create` to stitch the manifest.
-    timeout-minutes: 90
+    # linux/arm64 disabled for v1.0.0-rc.1 — the v1.0.0-rc.1 attempt cancelled
+    # at the 90-min ceiling while QEMU was still compiling shelfd itself
+    # (~80 min for the dep graph, then ~7 min into the final crate). Native
+    # amd64 build fits comfortably under 60 min. Re-enable arm64 via a parallel
+    # `ubuntu-22.04-arm` matrix slot + `docker buildx imagetools create`
+    # manifest stitch — tracked in SHELF-31.
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
@@ -249,7 +249,8 @@ jobs:
         with:
           context: .
           file: shelfd/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          # linux/arm64 disabled for v1.0.0-rc.1; re-enable when ubuntu-22.04-arm runner access is available — tracked in SHELF-31
+          platforms: linux/amd64
           tags: ${{ steps.tags.outputs.tags }}
           push: ${{ needs.preflight.outputs.should_publish == 'true' }}
           provenance: true
