@@ -7,8 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.0] — 2026-04-28
+
+First release candidate. The 30-day post-`v0.5` calendar soak gate from the
+launch playbook is **explicitly waived by BDFL decision**; substituting the
+following runtime evidence:
+
+- `shelf-2` cut over to `shelfd` (single-line `s3.endpoint=` flip) on 2026-04-27,
+  observed stable on `0.1.0-preview-9` then `0.1.0-preview-10` for ≥24h with
+  hit-ratio ≥ 78 % rowgroup, p99 read ≤ 100 ms, zero `ICEBERG_*` regressions
+  (vs `Alluxio` baseline 366 → 18 infra failures, -95 %).
+- `shelf-1` cut over 2026-04-27, stable on the same image stream.
+- 4-replica `shelf-{0..3}` cluster running on the dedicated `alluxio` Karpenter
+  NodePool with 56 GiB DRAM + 960 GiB NVMe aggregate cache.
+- Critical write-path data-corruption bug (SHELF-25, `Content-Encoding: aws-chunked`
+  decode) shipped in `0.1.0-preview-9` and validated against live Iceberg writers.
+- LODC submit-queue overflow (SHELF-21e) bounded with drop-on-full back-pressure
+  that does not couple write admission to the read path.
+- Zero-downtime rolling-update path validated via `shelf-pool` ClusterIP +
+  `minReadySeconds=30` + `startupProbe` (5-min Foyer NVMe-recovery grace).
+
+`v1.0.0` final follows after the 7-day RC window unless a regression is found.
+
 ### Added
-- _Pending v0.5.0._
+- Tag-driven release pipeline (`.github/workflows/release.yml`) — multi-arch
+  container image to GHCR, Helm chart published OCI, `syft` SBOM, SLSA-v1.0
+  provenance, `cosign sign --keyless` keyless signatures.
+- Penpencil-overlay leak guard in the release workflow + `.gitattributes`
+  `export-ignore` for `infra/penpencil/**`, `agents/out/**`, `docs/rollout-v1/**`.
+- `docs/brand/` — locked tier-ordered primary mark + favicon.
+- OSS hygiene set: `CODE_OF_CONDUCT.md`, `MAINTAINERS.md`, `GOVERNANCE.md`,
+  `ROADMAP.md`, `RELEASING.md`, `CHANGELOG.md`, GitHub issue templates,
+  `dependabot.yml`, `CODEOWNERS`, DCO check workflow.
+
+### Fixed
+- SHELF-25: PUT path now decodes `Content-Encoding: aws-chunked` before
+  uploading to origin S3 — fixes Iceberg metadata corruption that surfaced
+  as `ICEBERG_INVALID_METADATA` on write-capable replicas.
+- SHELF-21e: replaced `RateLimitPicker` (which throttled reads) with a
+  bounded LODC submit-queue + drop-on-full back-pressure.
 
 ## [0.1.0] — 2026-04-28
 

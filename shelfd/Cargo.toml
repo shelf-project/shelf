@@ -1,13 +1,7 @@
 [package]
 name = "shelfd"
 description = "Shelf cache daemon — Iceberg-native, row-group-granular read cache for Trino"
-# SHELF-21e-v2 — preview-8 carries the Foyer LODC admission
-# rate-limiter (bytes/sec) on top of the preview-7 LODC tunables.
-# Override the workspace-level 0.1.0 here because the shelfd binary
-# ships on the `0.1.0-preview-N` Docker tag stream (matches
-# `charts/shelf/Chart.yaml::appVersion`); shelfctl stays on the
-# workspace version.
-version = "0.1.0-preview-10"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
