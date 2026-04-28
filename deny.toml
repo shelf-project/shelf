@@ -76,6 +76,11 @@ allow = [
     "CC0-1.0",
     "MPL-2.0",  # weak copyleft; acceptable per ASF guidance
     "OpenSSL",
+    # CDLA-Permissive-2.0 is the Mozilla CA root cert bundle license
+    # (`webpki-roots`). Linux Foundation data license, permissive in
+    # the same MIT-equivalent spirit as Apache-2.0 for data; safe to
+    # ship inside redistributable software per LF's FAQ.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.93
 exceptions = []
