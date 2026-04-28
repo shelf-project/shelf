@@ -6,11 +6,12 @@
 
 > A row-group-granular, plan-aware, Iceberg-native read cache for Trino. Rust, Apache 2.0, fail-open.
 
-[![CI](https://img.shields.io/badge/CI-pending-lightgrey)](./docs/quickstart/index.md)
-[![Release](https://img.shields.io/badge/release-v0.0.1--pre-blue)](./docs/changelog.md)
+[![CI](https://github.com/shelf-project/shelf/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/shelf-project/shelf/actions/workflows/verify.yml)
+[![Release](https://img.shields.io/github/v/release/shelf-project/shelf?include_prereleases&sort=semver)](https://github.com/shelf-project/shelf/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](./LICENSE)
-[![SBOM](https://img.shields.io/badge/SBOM-pending-lightgrey)](./SECURITY.md)
-[![Stars](https://img.shields.io/badge/stars-0-lightgrey)](./README.md)
+[![Container](https://ghcr-badge.egpl.dev/shelf-project/shelfd/latest_tag?trim=major&label=ghcr.io%2Fshelf-project%2Fshelfd)](https://github.com/shelf-project/shelf/pkgs/container/shelfd)
+[![SBOM](https://img.shields.io/badge/SBOM-syft%20%2B%20cosign-blue)](./SECURITY.md)
+[![Stars](https://img.shields.io/github/stars/shelf-project/shelf?style=flat)](https://github.com/shelf-project/shelf/stargazers)
 
 ## Why Shelf
 

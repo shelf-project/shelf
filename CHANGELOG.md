@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0-rc.1] — 2026-04-28
 
-Re-cut of `1.0.0-rc.0` after release-pipeline first-run bugs:
+Released from the canonical home `github.com/shelf-project/shelf`. Re-cut
+of `1.0.0-rc.0` after release-pipeline first-run bugs:
 
 - `build-image` job timed out at 45 min on QEMU-emulated linux/arm64 Rust
   release build. Bumped to 90 min; GHA layer cache from the rc.0 attempt
@@ -17,8 +18,14 @@ Re-cut of `1.0.0-rc.0` after release-pipeline first-run bugs:
 - `helm-publish` job's cosign sign step failed with `UNAUTHORIZED` because
   it relied on `helm registry login` only — cosign uses its own auth.
   Added `docker/login-action` before the cosign step.
+- CI plumbing stabilized for org migration (gitleaks `pull-requests: read`,
+  helm-template/`kubectl` server-API decoupling via Python YAML parser,
+  `cargo-audit` advisory-DB workaround for the malformed
+  `RUSTSEC-2026-0073.md`, `cargo-deny` advisories ignored under SHELF-30,
+  `aquasecurity/trivy-action` rolled to `v0.36.0`, IAM-wildcard grep
+  excludes its own self-documenting workflow file).
 
-No code changes vs `1.0.0-rc.0`. Same runtime evidence applies.
+No runtime code changes vs `1.0.0-rc.0`. Same runtime evidence applies.
 
 ## [1.0.0-rc.0] — 2026-04-28
 
