@@ -99,21 +99,28 @@ jobs:
         with:
           version: v1.30.3
 
-      - name: Render chart and dry-run apply
+      - name: Render chart and parse-validate
         # --kube-version is required because Chart.yaml pins
         # kubeVersion: ">=1.27.0-0" and helm's built-in Capabilities
         # default is older than that.
-        # --validate=false on kubectl: the runner has no cluster, so
-        # kubectl would otherwise fan out to localhost:8080 to fetch
-        # the OpenAPI schema and fail the dry-run on connect. We are
-        # only checking that the rendered manifests parse as valid
-        # Kubernetes YAML (schema is enforced separately by helm
-        # template + Chart.yaml's kubeVersion predicate).
+        # We do not pipe through `kubectl apply --dry-run=client`:
+        # client-side dry-run still fans out to the API server to
+        # resolve resource kinds and fails with "couldn't get current
+        # server API group list" on a clusterless runner. Confirming
+        # the chart renders to a non-empty, parseable YAML stream is
+        # the actual smoke-check intent.
         run: |
+          set -euo pipefail
+          OUT="$(mktemp)"
           helm template shelf charts/shelf \
             --values charts/shelf/ci/lint-values.yaml \
             --kube-version 1.30.0 \
-          | kubectl apply --dry-run=client --validate=false -f -
+            > "${OUT}"
+          if [[ ! -s "${OUT}" ]]; then
+            echo "::error::helm template produced an empty manifest stream"
+            exit 1
+          fi
+          python3 -c "import sys, yaml; docs=[d for d in yaml.safe_load_all(open(sys.argv[1])) if d is not None]; assert docs, 'no documents rendered'; print(f'helm template rendered {len(docs)} documents OK')" "${OUT}"
 
   docker-build:
     name: docker build (shelfd)
