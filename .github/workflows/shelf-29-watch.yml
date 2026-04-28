@@ -33,7 +33,7 @@ jobs:
     steps:
       - name: Query trinodb/trino#29184 status
         id: pr
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -53,7 +53,7 @@ jobs:
             core.setOutput('url', pr.data.html_url);
 
       - name: Open or update monthly tracking issue
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           PR_STATE: ${{ steps.pr.outputs.state }}
           PR_MERGED: ${{ steps.pr.outputs.merged }}
