@@ -54,6 +54,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use bytes::Bytes;
 
+use crate::aws_chunked::{decode_aws_chunked, AwsChunkedError};
 use crate::head_lru::HeadMeta;
 use crate::http::ServerState;
 use crate::origin::Origin;
@@ -184,6 +185,55 @@ pub(crate) fn pool_for(key: &str) -> Pool {
     } else {
         Pool::RowGroup
     }
+}
+
+/// SHELF-25 — does this PUT/UploadPart request advertise the AWS
+/// SigV4 streaming chunked-transfer envelope?
+///
+/// AWS sets two headers in lock-step on a streaming-signed body, and
+/// real S3 unwraps the envelope when it sees either signal:
+///
+/// - `Content-Encoding: aws-chunked` (may be a comma-separated list,
+///   e.g. `aws-chunked,gzip`; case-insensitive).
+/// - `x-amz-content-sha256: STREAMING-AWS4-HMAC-SHA256-PAYLOAD` (or
+///   any other `STREAMING-*` variant — `…-TRAILER`, `…-V4A`, etc.).
+///
+/// We honour either signal: an SDK that emits one but not the other
+/// (rare in the wild but defensible per the SigV4 spec) still gets
+/// correct decoding instead of corrupted bytes.
+fn is_aws_chunked(headers: &HeaderMap) -> bool {
+    if let Some(enc) = headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()) {
+        for token in enc.split(',') {
+            if token.trim().eq_ignore_ascii_case("aws-chunked") {
+                return true;
+            }
+        }
+    }
+    if let Some(sha) = headers
+        .get(HeaderName::from_static("x-amz-content-sha256"))
+        .and_then(|v| v.to_str().ok())
+    {
+        if sha.starts_with("STREAMING-") || sha.starts_with("streaming-") {
+            return true;
+        }
+    }
+    false
+}
+
+/// SHELF-25 — render a typed [`AwsChunkedError`] as an S3-shaped
+/// 400 `InvalidRequest`. We use the same XML envelope as the rest
+/// of the shim so SDK callers route the failure through their
+/// normal `ClientError` path; the `<Message>` carries the typed
+/// reason verbatim for log-grepability.
+fn aws_chunked_decode_error(err: AwsChunkedError) -> Response {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        s3_error_xml(
+            "InvalidRequest",
+            &format!("aws-chunked decode failed: {err}"),
+        ),
+        None,
+    )
 }
 
 /// Track G-4 — extract a `schema.table` label from an Iceberg-on-S3
@@ -773,7 +823,7 @@ pub async fn handle_put_object(
     // single PUTs are vanishingly rare in Trino's S3 filesystem (it
     // uses multipart above ~16 MiB), and bounding the buffer here
     // keeps a misbehaving client from OOM-ing the daemon.
-    let bytes = match axum::body::to_bytes(body, SHIM_MAX_PUT_BYTES).await {
+    let wire_bytes = match axum::body::to_bytes(body, SHIM_MAX_PUT_BYTES).await {
         Ok(b) => b,
         Err(err) => {
             return record_put_latency(
@@ -796,6 +846,29 @@ pub async fn handle_put_object(
         }
     };
 
+    // SHELF-25 — if the caller advertised AWS SigV4 streaming chunked
+    // transfer encoding, strip the envelope before forwarding. Real S3
+    // does this transparently; the shim re-uploads via the SDK's
+    // regular PutObject (which signs the body bytes we hand it as-is),
+    // so without this decode the chunk-size hex + `chunk-signature=…`
+    // lines get persisted into S3 verbatim — see RCA H4 in
+    // `docs/rollout-v1/rca-stage0bc.md`.
+    let bytes = if is_aws_chunked(&headers) {
+        match decode_aws_chunked(&wire_bytes) {
+            Ok(b) => b,
+            Err(err) => {
+                return record_put_latency(
+                    &state,
+                    start,
+                    "aws_chunked_decode_error",
+                    aws_chunked_decode_error(err),
+                );
+            }
+        }
+    } else {
+        wire_bytes
+    };
+
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -807,6 +880,9 @@ pub async fn handle_put_object(
         .put_object(&bucket, &key, bytes.clone(), content_type.as_deref())
         .await;
 
+    // SHELF-25 — emit the *decoded* size in the metric. Wire size
+    // (`wire_bytes.len()`) was misleading for streaming-signed bodies
+    // because it included the envelope overhead.
     let bytes_len = bytes.len() as u64;
     let response = match result {
         Ok(out) => {
@@ -944,6 +1020,93 @@ async fn handle_initiate_multipart(
 /// 501 ourselves rather than waste a round trip on a doomed PUT.
 const SHIM_MAX_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
+/// SHELF-25 — buffered+decoded `UploadPart` for `aws-chunked` bodies.
+///
+/// Split out from [`handle_upload_part`] because the streaming-into-
+/// `ByteStream::from_body_1_x` fast-path is incompatible with chunked
+/// decoding: the AWS SDK signs whatever bytes we hand it, so the
+/// envelope has to be unwrapped *before* the SDK call. The cap is
+/// the same 256 MiB ceiling as single-shot PUTs — Trino's default
+/// part-size is 16 MiB. Anything bigger returns 501 with a clear
+/// `Use STREAMING-UNSIGNED-PAYLOAD-TRAILER or non-streaming SigV4`
+/// hint so the operator knows the workaround.
+async fn handle_upload_part_aws_chunked(
+    state: Arc<ServerState>,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+    part_number: i32,
+    body: Body,
+) -> Response {
+    let wire_bytes = match axum::body::to_bytes(body, SHIM_MAX_PUT_BYTES).await {
+        Ok(b) => b,
+        Err(err) => {
+            return error_response(
+                StatusCode::NOT_IMPLEMENTED,
+                s3_error_xml(
+                    "EntityTooLarge",
+                    &format!(
+                        "aws-chunked UploadPart capped at {} bytes (the shim has \
+                         to buffer the whole part to strip the chunk envelope \
+                         before re-uploading); for parts above that ceiling, \
+                         disable streaming-signed payloads on the client (e.g. \
+                         set `s3.payload-signing.enabled=false` on the Trino \
+                         catalog or `payload_signing_enabled = false` on the \
+                         AWS SDK request). Upstream error: {err}",
+                        SHIM_MAX_PUT_BYTES
+                    ),
+                ),
+                None,
+            );
+        }
+    };
+    let decoded = match decode_aws_chunked(&wire_bytes) {
+        Ok(b) => b,
+        Err(err) => return aws_chunked_decode_error(err),
+    };
+    let decoded_len = decoded.len() as u64;
+    if decoded_len > SHIM_MAX_PART_BYTES {
+        return error_response(
+            StatusCode::NOT_IMPLEMENTED,
+            s3_error_xml(
+                "EntityTooLarge",
+                &format!(
+                    "decoded part body is {decoded_len} bytes; AWS caps \
+                     UploadPart at {SHIM_MAX_PART_BYTES} bytes per part"
+                ),
+            ),
+            None,
+        );
+    }
+    let body_stream = aws_sdk_s3::primitives::ByteStream::from(decoded);
+    let result = state
+        .origin
+        .as_ref()
+        .upload_part(bucket, key, upload_id, part_number, body_stream, decoded_len)
+        .await;
+    match result {
+        Ok(etag) => {
+            crate::metrics::S3_SHIM_RESPONSE_BYTES_TOTAL
+                .with_label_values(&["upload_part", "ok"])
+                .inc_by(decoded_len);
+            let mut hdrs = HeaderMap::new();
+            if let Ok(v) = HeaderValue::from_str(&etag) {
+                hdrs.insert(header::ETAG, v);
+            }
+            if let Ok(v) = HeaderValue::from_str(&request_id()) {
+                hdrs.insert(HeaderName::from_static("x-amz-request-id"), v);
+            }
+            (StatusCode::OK, hdrs).into_response()
+        }
+        Err(e) => {
+            crate::metrics::S3_SHIM_RESPONSE_BYTES_TOTAL
+                .with_label_values(&["upload_part", "error"])
+                .inc_by(0);
+            s3_internal_error("origin.upload_part", &e.to_string())
+        }
+    }
+}
+
 /// SHELF-21b/c — `PUT /:bucket/*key?partNumber=N&uploadId=...`.
 ///
 /// `partNumber` must parse to `1..=10_000` (S3's bound). SHELF-21c
@@ -951,6 +1114,10 @@ const SHIM_MAX_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 /// [`ByteStream::from_body_1_x`] — no per-part buffering. We
 /// require a `Content-Length` header (Trino's S3 client always
 /// sends one) since SigV4 needs it for the operation hash.
+///
+/// SHELF-25 — `aws-chunked` parts take a separate buffered path
+/// (see [`handle_upload_part_aws_chunked`]) since the streaming
+/// fast-path is incompatible with envelope decoding.
 async fn handle_upload_part(
     state: State<Arc<ServerState>>,
     Path((bucket, key)): Path<(String, String)>,
@@ -978,6 +1145,29 @@ async fn handle_upload_part(
             return resp;
         }
     };
+
+    // SHELF-25 — `aws-chunked` parts must be buffered + decoded before
+    // we hand the bytes to the SDK; we cannot stream-decode in place
+    // because the SDK does its own SigV4 signing over whatever bytes
+    // we pass and the chunk-signature framing has to be off the wire
+    // first. Cap at the same 256 MiB ceiling we use for single-shot
+    // PUTs — Trino's part-size is 16 MiB by default so this is
+    // generous; an oversized chunked part returns 501 with a clear
+    // pointer to non-streaming SigV4 as the workaround.
+    if is_aws_chunked(&headers) {
+        let response = handle_upload_part_aws_chunked(
+            state.clone(),
+            &bucket,
+            &key,
+            &upload_id,
+            part_number,
+            body,
+        )
+        .await;
+        record_path_latency(&state, start, "/s3/upload_part", &response);
+        return response;
+    }
+
     // SigV4 needs the body length up front; HTTP-1.1 requires it on
     // an unsigned-payload PUT. Trino's S3 client sets it; if we ever
     // see a client that doesn't, fail loud rather than silently

@@ -7,7 +7,7 @@ description = "Shelf cache daemon — Iceberg-native, row-group-granular read ca
 # ships on the `0.1.0-preview-N` Docker tag stream (matches
 # `charts/shelf/Chart.yaml::appVersion`); shelfctl stays on the
 # workspace version.
-version = "0.1.0-preview-8"
+version = "0.1.0-preview-9"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
