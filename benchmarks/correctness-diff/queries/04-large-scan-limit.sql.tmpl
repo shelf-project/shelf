@@ -1,0 +1,10 @@
+-- 04-large-scan-limit: large scan terminated by ORDER BY + LIMIT.
+-- Exercises whole-file byte-range reads until the limit is satisfied.
+-- This is the single best correctness check for row-group-pool
+-- admission: an incorrectly-cached row-group would surface as
+-- stale / reordered / duplicated rows at the top of the result.
+SELECT *
+FROM {catalog}.{schema}.{table_events}
+WHERE {partition_column} >= DATE '{partition_value}'
+ORDER BY event_time DESC, event_id
+LIMIT 10000

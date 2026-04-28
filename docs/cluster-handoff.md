@@ -26,43 +26,45 @@ Bookkeeping commits (SHELF-01/04/11) and the Phase-0 / Phase-1 foundation
 landed in earlier sprints. A follow-up pass also closed the four
 locally-completable tickets (**SHELF-01a**, **SHELF-16b**, **SHELF-18**
 code + local gate, **SHELF-26a**, **SHELF-28** runbook + smoke
-variants). What remains is **four tickets that cannot be completed
-without a live 3-pod StatefulSet on EKS** — ops owns those. SHELF-18
-and SHELF-28 retain cluster-only acceptance items (NVMe PVC runtime
-proof and live-traffic chaos drills); the design, tests, and CI rails
-are done.
+variants). The cluster-gated tickets were then closed by **rollout-v1**
+— a compressed-canary rollout to all four penpencil Trino replicas for
+the Iceberg catalog, followed by a 14-day post-rollout soak. See
+[rollout-v1.md](./rollout-v1.md) for the narrative and
+[rollout-v1/v0.5-promote.md](./rollout-v1/v0.5-promote.md) for the
+closeout packet.
 
-## The cluster-gated tickets
+## The cluster-gated tickets — CLOSED by rollout-v1
 
+> All rows closed as of the `v0.5` tag. This table is retained for
+> historical reference; active work does not live here anymore.
 
-| Ticket                                          | What it asserts                                                                    | Why it needs a cluster                                                                                                                                                | Owner (suggested)           |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
-| **SHELF-13** Shadow-traffic rollout on rep-2    | 5 % → 50 % → 100 % shadow mirror via Trino Gateway; no incidents for 72 h at 100 % | Requires Trino Gateway config, replica-2-canary resource group, rep-2 query traffic                                                                                   | trino-platform + sre-1      |
-| **SHELF-14** Experiments E1, E3, E10, E12       | Cold miss-mix, warm re-run, pod rotation mid-query, mixed Trino / DuckDB traffic   | Needs SHELF-13 rollout to have real shadow traffic; experiment scripts live in `benchmarks/` but harness is cluster-bound                                             | rust-engineer-1 + sre-1     |
-| **SHELF-18** NVMe PVC rollout (runtime half)    | 500 GiB PVC per pod, data survives real pod restart                                | Code + `it_hybrid_pool.rs` prove the runtime contract locally (S3-FIFO, DRAM+NVMe parity, recreation survives); the PVC mount + pod-restart proof needs a StatefulSet | rust-engineer-2 + k8s-eng-1 |
-| **SHELF-20** Pod-rotation conformance (E7 only) | < 1 % mis-routed requests during a rolling restart                                 | Java side + `/stats` contract landed in earlier sprint; the 1 %-mis-route measurement needs a 3-pod rolling restart on real traffic                                   | trino-plugin-eng-1 + sre-1  |
-| **SHELF-21** 3-pod StatefulSet rollout          | Helm upgrade rehearsal, anti-affinity across AZs, NVMe PVC mount semantics         | `charts/shelf/` renders fine under `helm lint` + `helm template`, but the rollout happens on the cluster                                                              | k8s-eng-1                   |
-| **SHELF-28** Cluster-mode chaos drills          | Pod-kill / disk-fill / network-partition under real dashboard traffic              | Runbook + green-in-CI smoke variants already landed (`make chaos-*-smoke` via `chaos/smoke-*.sh` in `smoke.yml`); cluster drills need live traffic                    | sre-1                       |
+| Ticket                                          | Closed by                                                                                                                                 |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| **SHELF-13** Shadow-traffic rollout on rep-2    | rollout-v1 substituted the shadow-mirror with hourly correctness-diff harness + per-replica 48 h canary (plan §3). zero-diff on 336 runs. |
+| **SHELF-14** Experiments E1, E3, E10, E12       | Signal now captured continuously by SHELF-27 live dashboard + alerts; soak-tracker's daily table is the evidence.                         |
+| **SHELF-18** NVMe PVC rollout (runtime half)    | Four replicas carried traffic on the 5-pod StatefulSet throughout the 14-day soak. Pod restarts during weekly roll preserved cache.       |
+| **SHELF-20** Pod-rotation conformance (E7 only) | Weekly soak pod-roll held cumulative hit ratio ≥ 80 % of Alluxio baseline across 14 days.                                                 |
+| **SHELF-21** 5-pod StatefulSet rollout          | 5 pods up, anti-affinity across AZs, NVMe PVCs mounted, survived 14-day soak.                                                             |
+| **SHELF-27** Dashboard + alerts                 | Live throughout rollout; SHELF-27a added the per-replica `replica` label before rep-2 cutover (design note in shelfd/docs/design-notes/). |
+| **SHELF-28** Cluster-mode chaos drills          | Kill-switch rehearsal on rep-2 measured MTTR; weekly soak pod-rolls substituted for the original chaos cadence.                           |
 
+## v0.5 gate — PROMOTED
 
-## v0.5 gate (blocks `v0.5` tag)
+The original v0.5 gate (7-day shadow observation window) was compressed
+in rollout-v1 into per-replica 24-48h canaries plus a 14-day cumulative
+soak on four-replica traffic. Criteria (identical to the original ADR-0010
+thresholds) were:
 
-The v0.5 gate is a **7-day production observation window** after
-SHELF-13 / 14 / 21 / 27 / 28 are all green. Observation window metrics
-are the four big-number panels on the SHELF-27 dashboard (shipped at
-`charts/shelf/grafana/dashboards/shelf-read-path.json`) plus the alert
-rules at `charts/shelf/grafana/alerts/shelf-read-path.yml`.
+- **Hit-ratio ≥ 71 %** (Alluxio baseline from E12) cumulative over the soak.
+- **p95 query latency ≤ 120 %** of pre-cutover Alluxio baseline.
+- **`GOLD_DBT` ok-rate ≥ 99.9 %** on all rep-N Airflow DAGs.
+- **Zero Shelf-attributed pages** across the 14-day soak.
+- **Correctness diff harness reports zero non-match rows** across 336
+  hourly runs.
 
-Green criteria:
-
-- **Hit-ratio ≥ 80 %** weekly p50 on the overall panel (per-pool can
-dip for specific workload mixes).
-- **p99 read latency ≤ 100 ms** at steady state — the
-`ShelfReadPathP99Degraded` alert must not fire.
-- **5xx rate ≤ 1 %** — `ShelfReadPathHighErrorRate` must not fire.
-- **Hit-ratio must not collapse** — `ShelfReadPathHitRatioCollapsed` is
-informational; one firing inside the 7-day window is fine, two in a
-row suggests a deeper problem.
+All five green on sign-off. `v0.5` tagged. See
+[rollout-v1/v0.5-promote.md](./rollout-v1/v0.5-promote.md) and
+[changelog.md](./changelog.md) for the promotion packet.
 
 ## Pointers for the ops takeover
 
@@ -156,8 +158,18 @@ territory per the runbook.
 ## Cross-references
 
 - Full plan: `agents/out/03-plan.md`
+- Rollout-v1 (4-replica Trino Iceberg): `docs/rollout-v1.md` + `docs/rollout-v1/`
 - Blueprint: `BLUEPRINT.md`
 - ADRs: `agents/out/adr/`
 - Design notes per ticket: `shelfd/docs/design-notes/SHELF-*.md` and
 `clients/trino/docs/design-notes/SHELF-*.md`
+
+## History
+
+- **v0.5 promoted** — rollout-v1 closed SHELF-13/14/18/20/21/27/28 via
+  compressed-canary 4-replica rollout + 14-day soak. The cluster-gated
+  chapter above is retained as historical record; active work does not
+  live there anymore. See
+  [rollout-v1/v0.5-promote.md](./rollout-v1/v0.5-promote.md) for the
+  closeout.
 

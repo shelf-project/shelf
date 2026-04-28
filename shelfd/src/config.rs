@@ -214,6 +214,73 @@ pub struct RowGroupPoolConfig {
     /// fills in the LRU default.
     #[serde(default)]
     pub eviction_policy: EvictionPolicy,
+    /// Foyer Large-Object Disk Cache (LODC) tunables for the NVMe
+    /// tier. The defaults are deliberately *higher* than Foyer's
+    /// own defaults (`flushers=1`, `buffer_pool_size=16 MiB`,
+    /// `submit_queue_size_threshold=32 MiB`) because shelfd's
+    /// production workload spills 256 in-flight × ~32 MiB Parquet
+    /// rowgroups; Foyer's stock sizing causes
+    /// `[lodc] submit queue overflow` warnings + RSS bloat that
+    /// previously OOM-killed `shelf-1` (2026-04-27). See
+    /// `shelfd/docs/runbooks/2026-04-shelf-1-oom.md`.
+    ///
+    /// Field is `#[serde(default)]` so existing config YAML keeps
+    /// parsing.
+    #[serde(default)]
+    pub disk_cache: RowGroupDiskCacheConfig,
+}
+
+/// Foyer LODC pipeline tunables for the rowgroup hybrid pool.
+///
+/// All fields are optional; an absent value leaves the matching
+/// Foyer 0.12 default in place. The chart's `values.yaml`
+/// surfaces all three under
+/// `cache.pools.rowgroup.diskCache.{flushers,bufferPoolSizeBytes,
+/// submitQueueSizeThresholdBytes}`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RowGroupDiskCacheConfig {
+    /// Concurrent flusher tasks. Default in Foyer 0.12 is `1`,
+    /// which serialises every region write to NVMe and saturates
+    /// trivially under burst. Production target is `4`.
+    #[serde(default)]
+    pub flushers: Option<usize>,
+    /// Total flush buffer pool size in bytes (shared across
+    /// flushers). Foyer 0.12 default is 16 MiB. We bump this to
+    /// 256 MiB in production so a single burst of inflight Parquet
+    /// rowgroups does not immediately fill the submit queue.
+    #[serde(default)]
+    pub buffer_pool_size_bytes: Option<u64>,
+    /// Submit-queue size threshold in bytes. Once the total
+    /// estimated size of entries waiting to be flushed crosses this
+    /// threshold, **further entries are dropped** (Foyer logs
+    /// `[lodc] submit queue overflow`). The Foyer default is
+    /// `buffer_pool_size * 2`; we set this explicitly to bound RSS
+    /// growth from the LODC pipeline. Production target is 1 GiB.
+    #[serde(default)]
+    pub submit_queue_size_threshold_bytes: Option<u64>,
+    /// SHELF-21e-v2 — admission rate-limit (bytes/sec) into the
+    /// Foyer Large-Object Disk Cache pipeline. When set, shelfd
+    /// installs Foyer's built-in [`foyer::RateLimitPicker`] on the
+    /// `HybridCacheBuilder`, which throttles admissions so the
+    /// sustained write rate into NVMe never exceeds this ceiling.
+    ///
+    /// Why this knob exists on top of `flushers` +
+    /// `buffer_pool_size_bytes` + `submit_queue_size_threshold_bytes`:
+    /// those three bound the *size* of the LODC pipeline, but under
+    /// sustained ingress above the EBS drain rate the submit queue
+    /// still overflows (`[lodc] submit queue overflow, new entry
+    /// ignored`). The admission picker bounds the *rate* at the
+    /// admission seam, so DRAM stays hot but NVMe writes cap at a
+    /// value the disk can actually absorb.
+    ///
+    /// `None` ⇒ no limiter (pre-preview-8 behaviour; Foyer's
+    /// `AdmitAllPicker` is used). Production recommendation is
+    /// ~200 MB/s (≈ `209_715_200`) based on the EBS gp3 baseline of
+    /// ~250 MiB/s per volume, leaving headroom for the region-reclaim
+    /// read path that shares the disk.
+    #[serde(default)]
+    pub admission_bytes_per_sec: Option<u64>,
 }
 
 impl RowGroupPoolConfig {
@@ -668,6 +735,36 @@ pin_list:
         assert!(matches!(err, crate::Error::Config(_)));
     }
 
+    // SHELF-21e-v2 — `RowGroupDiskCacheConfig::admission_bytes_per_sec`
+    // plumbing. Verifies the new field is optional (unset YAML keeps
+    // parsing) and that a set value round-trips into the struct, so
+    // `build_rowgroup_pool` can hand it to Foyer's `RateLimitPicker`.
+    #[test]
+    fn rowgroup_disk_cache_admission_defaults_to_none() {
+        let cfg = Config::from_yaml_str(MINIMAL, None).expect("parse");
+        assert!(
+            cfg.pools
+                .rowgroup
+                .disk_cache
+                .admission_bytes_per_sec
+                .is_none(),
+            "default must be unset so pre-preview-8 values.yaml keeps working"
+        );
+    }
+
+    #[test]
+    fn rowgroup_disk_cache_admission_accepts_set_value() {
+        let yaml = MINIMAL.replace(
+            "    nvme_bytes: 0",
+            "    nvme_bytes: 0\n    disk_cache:\n      admission_bytes_per_sec: 209715200",
+        );
+        let cfg = Config::from_yaml_str(&yaml, None).expect("parse");
+        assert_eq!(
+            cfg.pools.rowgroup.disk_cache.admission_bytes_per_sec,
+            Some(209_715_200)
+        );
+    }
+
     // SHELF-18 — `RowGroupPoolConfig::validate_nvme` unit tests.
     //
     // Path handling is intentionally strict at boot (absolute path,
@@ -683,6 +780,7 @@ pin_list:
             nvme_dir: PathBuf::from(""),
             nvme_bytes: 0,
             eviction_policy: EvictionPolicy::default(),
+            disk_cache: RowGroupDiskCacheConfig::default(),
         };
         cfg.validate_nvme().expect("zero nvme bytes must be valid");
     }
@@ -694,6 +792,7 @@ pin_list:
             nvme_dir: PathBuf::from(""),
             nvme_bytes: 1,
             eviction_policy: EvictionPolicy::default(),
+            disk_cache: RowGroupDiskCacheConfig::default(),
         };
         let err = cfg.validate_nvme().unwrap_err();
         assert!(
@@ -708,6 +807,7 @@ pin_list:
             nvme_dir: PathBuf::from("relative/path"),
             nvme_bytes: 1,
             eviction_policy: EvictionPolicy::default(),
+            disk_cache: RowGroupDiskCacheConfig::default(),
         };
         let err = cfg.validate_nvme().unwrap_err();
         assert!(matches!(&err, crate::Error::Config(m) if m.contains("must be absolute")));
@@ -733,6 +833,7 @@ pin_list:
             nvme_dir: dir.clone(),
             nvme_bytes: 1,
             eviction_policy: EvictionPolicy::default(),
+            disk_cache: RowGroupDiskCacheConfig::default(),
         };
         cfg.validate_nvme().expect("creatable dir must validate");
         assert!(dir.is_dir(), "validator must create the missing dir");
@@ -758,6 +859,7 @@ pin_list:
             nvme_dir: path.clone(),
             nvme_bytes: 1,
             eviction_policy: EvictionPolicy::default(),
+            disk_cache: RowGroupDiskCacheConfig::default(),
         };
         let err = cfg.validate_nvme().unwrap_err();
         assert!(matches!(&err, crate::Error::Config(m) if m.contains("not a directory")));

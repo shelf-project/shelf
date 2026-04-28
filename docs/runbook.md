@@ -194,6 +194,82 @@ Shelf bug. Give it 2 h before escalating.
 
 ---
 
+## 5.4 Pin-list replay (cold cache, hit-rate stuck < 50 % after warm-up)
+
+> When a fresh shelfd pod (or a pool that just engine-reset) takes
+> longer than the SHELF-G11 SLI to cross 50 % hit rate. We replay
+> the pin-list against the affected pod so the top-N hot tables
+> earn their cache lines without waiting on organic traffic.
+
+**Pre-condition.** Confirm the pin-list itself is recent. From any
+shelf pod:
+
+```bash
+kubectl -n alluxio exec shelf-2 -- /shelfctl pin status | head
+# look for `entries` ≥ 5 and `last_reload_age_sec` < 1800.
+```
+
+If the loader has not refreshed in ≥ 30 min, regenerate the list
+first — see "Regenerate" below.
+
+**Replay (single pod).**
+
+```bash
+# Replay all pinned keys against shelf-2 only. Backpressure-aware:
+# shelfctl streams the pin-list and lets shelfd's admission picker
+# decide which entries are still worth fetching, so a mid-replay
+# kill is safe.
+kubectl -n alluxio exec shelf-2 -- /shelfctl pin replay --pool=metadata
+kubectl -n alluxio exec shelf-2 -- /shelfctl pin replay --pool=rowgroup
+```
+
+Watch `shelf_admissions_total{pool, decision="admit"}` climb on the
+**Admission & eviction policy** row in
+[Shelf — Cache, Disk and Pods](https://platform-grafana.penpencil.co/d/shelf-overview).
+The replay is healthy when:
+
+- `shelf_origin_request_seconds{op="GetObject"}` p99 stays
+  under 250 ms — Foyer's LODC submit queue is **not** saturated.
+  If you see "lodc submit queue overflow" in `kubectl logs`, stop
+  the replay; raise `pool.rowgroup.flushers` first (see
+  `shelf1-oom-followup`).
+- `shelf_disk_bytes_used{pool="rowgroup"}` increases only when
+  `shelf_admissions_total{decision="admit"}` does — i.e. nothing
+  is sneaking past the size-threshold gate.
+
+**Regenerate (workload mix shifted).**
+
+```bash
+# Live top-50 by SUM(physicalInputBytes) × COUNT(*) over the last 7 days.
+python3 tools/gen_pin_list.py \
+    --trino-url      http://trino-replica-2.trino-db.svc:8080 \
+    --trino-user     dbt_user \
+    --top-n          50 \
+    --output         s3://penpencil-cdp-temp/shelf/pin_list.json
+
+# Emergency replay when Trino is down; uses the frozen TOP_5_PROD_TABLES
+# constant in tools/gen_pin_list.py (refreshed 2026-04-27).
+python3 tools/gen_pin_list.py \
+    --top-5-prod \
+    --output s3://penpencil-cdp-temp/shelf/pin_list.json
+```
+
+The shelfd `PinListLoader` polls every 15 min (configured via
+`values-prod.yaml: cache.pinList.reloadIntervalSeconds`) so the
+replay above runs against the *next* poll cycle. To force an
+immediate reload without waiting, `kill -HUP` the shelfd PID inside
+the pod (the daemon listens for `SIGHUP` on the pin-list channel).
+
+**Cross-pod replay.** HRW routing means each key has exactly one
+owner. Replaying against a single pod warms only its slice — for
+all-pods warm-up issue the same `shelfctl pin replay` against
+`shelf-0`, `shelf-1`, `shelf-2` in serial. Don't parallelise: the
+origin `s3.penpencil.co` shares the same SDK pool, and three
+parallel replays will trip Foyer's submit queue overflow guard
+on at least one pod.
+
+---
+
 ## 6. References
 
 - Plan: `[agents/out/03-plan.md](../agents/out/03-plan.md)` §3 Phase 1, §4 SHELF-28, §6.4.

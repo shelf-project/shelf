@@ -28,6 +28,7 @@ from pathlib import Path
 from . import __version__
 from .aggregate import aggregate_by_day
 from .manifest import ManifestIndex
+from .prewarm import run_prewarm
 from .report import (
     write_per_day_csv,
     write_per_query_csv,
@@ -204,8 +205,63 @@ def main(argv: list[str] | None = None) -> int:
     p_rp.add_argument("--out", required=True)
     p_rp.set_defaults(func=_cmd_replay_rep2_7d)
 
+    p_pw = sub.add_parser(
+        "prewarm",
+        help=(
+            "Online prewarm: issue real range-GETs to a running shelfd "
+            "for every unique row-group byte-range the trace touched. "
+            "Used as a rollout pre-req (see docs/rollout-v1.md §4)."
+        ),
+    )
+    p_pw.add_argument("--trace", required=True, help="Path to per-replica trace file.")
+    p_pw.add_argument("--manifest-dir", required=True, help="Iceberg manifest dir for the trace window.")
+    p_pw.add_argument("--endpoint", required=True, help="shelfd S3 shim URL, e.g. http://shelfd:9092")
+    p_pw.add_argument("--bucket", required=True, help="Iceberg warehouse bucket name.")
+    p_pw.add_argument("--replica", required=True, help="Replica tag for result JSON (rep-0/1/2/3).")
+    p_pw.add_argument("--concurrency", type=int, default=32)
+    p_pw.add_argument("--limit", type=int, default=None, help="Cap issued requests; for dry runs.")
+    p_pw.add_argument("--timeout", type=float, default=10.0, help="Per-request timeout in seconds.")
+    p_pw.add_argument("--out", default=None, help="Optional JSON summary output path.")
+    p_pw.set_defaults(func=_cmd_prewarm)
+
     args = parser.parse_args(argv)
     return int(args.func(args))
+
+
+def _cmd_prewarm(args: argparse.Namespace) -> int:
+    report = run_prewarm(
+        trace_path=args.trace,
+        manifest_dir=args.manifest_dir,
+        endpoint=args.endpoint,
+        bucket=args.bucket,
+        replica=args.replica,
+        concurrency=args.concurrency,
+        limit=args.limit,
+        per_request_timeout=args.timeout,
+    )
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        from dataclasses import asdict
+
+        out_path.write_text(json.dumps(asdict(report), indent=2), encoding="utf-8")
+    if not args.quiet:
+        hr = report.hit_ratio_from_outcomes
+        print(
+            f"[OK] prewarm {report.replica}: "
+            f"{report.successes}/{report.requests_issued} success "
+            f"({report.success_ratio:.1%}); "
+            f"hit-ratio from outcomes = {'n/a' if hr is None else f'{hr:.3f}'}; "
+            f"elapsed {report.elapsed_s:.1f}s"
+        )
+    # Rollout runbook: success_ratio < 0.95 is a warning; < 0.50 is a
+    # "do not proceed with cutover" signal. We surface this via exit
+    # code so the Makefile target can gate on it.
+    if report.success_ratio < 0.50:
+        return 2
+    if report.success_ratio < 0.95:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

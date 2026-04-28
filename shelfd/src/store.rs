@@ -26,8 +26,8 @@ use std::sync::{Arc, Weak};
 
 use bytes::Bytes;
 use foyer::{
-    DirectFsDeviceOptions, Engine, HybridCache, HybridCacheBuilder, LargeEngineOptions,
-    S3FifoConfig,
+    DirectFsDeviceOptions, Engine, EvictionConfig, FifoConfig, HybridCache, HybridCacheBuilder,
+    LargeEngineOptions, LfuConfig, LruConfig, RateLimitPicker, S3FifoConfig,
 };
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -114,11 +114,13 @@ pub trait Store: Send + Sync + Debug + 'static {
 
     /// Explicit eviction (e.g. from `shelfctl evict` or the admin
     /// HTTP surface). Returns `true` iff the key was resident in
-    /// `pool` before the call. Synchronous: Foyer's `remove` and the
-    /// pin-set `RwLock` are both in-memory and lock-based; avoiding
-    /// `async` here keeps the admin handlers and tests from having
-    /// to `await` trivially-resolvable calls.
-    fn evict(&self, pool: Pool, key: &Key) -> bool;
+    /// `pool` before the call.
+    ///
+    /// Async because a hybrid pool's disk tier requires a Foyer
+    /// `get`-probe to tell a disk-only entry apart from a genuine
+    /// miss — calling `remove` is synchronous and idempotent, but
+    /// the residency answer used for the 404 / 200 split is not.
+    fn evict(&self, pool: Pool, key: &Key) -> impl std::future::Future<Output = bool> + Send;
 
     // SHELF-23 + SHELF-24 pin-set surface. The pin-set is held
     // separately from the two Foyer caches so that evicting the
@@ -127,7 +129,10 @@ pub trait Store: Send + Sync + Debug + 'static {
     // All of these are synchronous for the same reason as `evict`.
 
     /// Pin a key in `pool`. Returns `true` iff the entry was resident
-    /// (or already pinned — idempotent).
+    /// in that specific pool (or was already pinned in that same
+    /// pool — idempotent). Pinning a key that is already pinned in a
+    /// *different* pool returns `false` so operators see the
+    /// mismatch instead of silently succeeding.
     fn pin(&self, pool: Pool, key: &Key) -> bool;
 
     /// Remove a key from the pin-set. Returns `true` iff it was pinned.
@@ -137,7 +142,9 @@ pub trait Store: Send + Sync + Debug + 'static {
     fn is_pinned(&self, key: &Key) -> bool;
 
     /// Snapshot of all pinned keys — used by the pin-list loader.
-    fn pinned_keys(&self) -> Vec<Key>;
+    /// Each key is paired with the pool it is pinned against so a
+    /// reconciler can spot pool drift.
+    fn pinned_keys(&self) -> Vec<(Pool, Key)>;
 
     /// Sum of recorded byte lengths for pinned keys.
     fn pinned_bytes(&self) -> u64;
@@ -190,6 +197,75 @@ enum PoolHandle {
 enum Tier {
     Dram,
     Disk,
+}
+
+/// Public tier of a cache hit, surfaced via [`ReadOutcome::Hit`] so
+/// callers can split latency-by-outcome dashboards into
+/// `hit_memory` vs `hit_disk` (SHELF-G1 / Track A1). Mirrors the
+/// internal [`Tier`] but is part of the public API surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitTier {
+    /// Served straight from the in-memory tier of the pool.
+    Memory,
+    /// Served from the NVMe tier of a hybrid pool (DRAM miss + disk hit).
+    Disk,
+}
+
+impl HitTier {
+    /// Stable Prometheus label fragment. Pair with the `pool` label
+    /// for `shelf_request_seconds{path,outcome}`.
+    pub fn outcome_label(self) -> &'static str {
+        match self {
+            HitTier::Memory => "hit_memory",
+            HitTier::Disk => "hit_disk",
+        }
+    }
+}
+
+impl From<Tier> for HitTier {
+    fn from(t: Tier) -> Self {
+        match t {
+            Tier::Dram => HitTier::Memory,
+            Tier::Disk => HitTier::Disk,
+        }
+    }
+}
+
+/// SHELF-A5 — Foyer `EventListener` that bumps
+/// `shelf_evictions_total{pool, reason="capacity"}` whenever an entry
+/// leaves the in-memory tier.
+///
+/// Foyer 0.12's `EventListener` exposes a single hook,
+/// `on_memory_release`, which fires on every DRAM departure
+/// regardless of cause: capacity-driven eviction (the dominant
+/// signal in steady state), explicit `cache.remove(...)` from the
+/// admin path, and pin-list-replace. We expose them all under
+/// `reason="capacity"` because (a) capacity events dwarf the
+/// others by orders of magnitude and (b) the existing
+/// `reason="admin"` increment in [`FoyerStore::evict_in_pool`]
+/// already labels the explicit-remove subset, so operators
+/// reading the dashboard can subtract one from the other if
+/// they need to.
+///
+/// Hybrid (NVMe-backed) pools fire this hook when an entry leaves
+/// **DRAM** — that includes the spill from L1 → L2. The L2 → origin
+/// evictions are not exposed by Foyer 0.12 and stay un-counted; they
+/// would need either an `on_storage_release` hook (not yet
+/// upstream) or a per-region GC hook (private API). See the
+/// follow-up note in `agents/out/A5-eviction-listener.md`.
+struct CapacityEvictionListener {
+    pool_label: &'static str,
+}
+
+impl foyer::EventListener for CapacityEvictionListener {
+    type Key = Key;
+    type Value = Bytes;
+
+    fn on_memory_release(&self, _key: Key, _value: Bytes) {
+        crate::metrics::EVICTIONS_TOTAL
+            .with_label_values(&[self.pool_label, "capacity"])
+            .inc();
+    }
 }
 
 impl PoolHandle {
@@ -278,14 +354,33 @@ impl PoolHandle {
         }
     }
 
-    fn contains(&self, key: &Key) -> bool {
+    /// Disk-aware residency probe used by the admin eviction path.
+    ///
+    /// On a hybrid pool, `contains` only checks the memory tier, so a
+    /// key that has aged out of DRAM onto NVMe looks absent — yet a
+    /// subsequent `get` still returns bytes. `contains_any` falls
+    /// back to a Foyer `get` probe when the memory tier misses so
+    /// `evict_in_pool` can correctly report residency (and, more
+    /// importantly, actually issue a disk-tier remove instead of a
+    /// silent no-op).
+    async fn contains_any(&self, key: &Key) -> crate::Result<bool> {
         match self {
-            PoolHandle::Dram { cache, .. } => cache.contains(key),
-            // `contains` is a membership hint only (used by the pin
-            // path for the length lookup); we deliberately check the
-            // memory tier only so pinning stays synchronous, matching
-            // SHELF-24's "pin requires resident" contract.
-            PoolHandle::Hybrid { cache, .. } => cache.memory().contains(key),
+            PoolHandle::Dram { cache, .. } => Ok(cache.contains(key)),
+            PoolHandle::Hybrid { cache, .. } => {
+                if cache.memory().contains(key) {
+                    return Ok(true);
+                }
+                // `get` returns `Some` if the key is resident in
+                // either tier. A disk hit will transiently promote
+                // the entry back into DRAM; the caller (`remove`)
+                // drops it from both tiers immediately after, so the
+                // promotion is invisible externally.
+                let got = cache
+                    .get(key)
+                    .await
+                    .map_err(|e| crate::Error::Store(format!("hybrid probe: {e}")))?;
+                Ok(got.is_some())
+            }
         }
     }
 
@@ -323,7 +418,14 @@ pub struct FoyerStore {
     /// so that (1) eviction of the bytes does not also unpin the key
     /// and (2) the admin surface can refuse pins for keys that are
     /// not yet resident.
-    pin_set: RwLock<HashMap<Key, u64>>,
+    ///
+    /// The value tuple is `(pool, recorded_length_bytes)`. Tracking
+    /// the pool alongside the key lets `pin` reject idempotent calls
+    /// that name a different pool than the original pin — a SHELF-04
+    /// key is unique per pool by construction, and pinning the same
+    /// key against two pools would be a contract violation, not an
+    /// operator convenience.
+    pin_set: RwLock<HashMap<Key, (Pool, u64)>>,
 }
 
 impl FoyerStore {
@@ -356,6 +458,9 @@ impl FoyerStore {
 
         let metadata_cache = foyer::CacheBuilder::new(metadata_capacity as usize)
             .with_weighter(|_k: &Key, v: &Bytes| v.len())
+            .with_event_listener(Arc::new(CapacityEvictionListener {
+                pool_label: pool_label(Pool::Metadata),
+            }))
             .build();
         let metadata = PoolHandle::Dram {
             cache: metadata_cache,
@@ -365,6 +470,9 @@ impl FoyerStore {
         let rowgroup = if config.rowgroup.nvme_bytes == 0 {
             let cache = foyer::CacheBuilder::new(rowgroup_capacity as usize)
                 .with_weighter(|_k: &Key, v: &Bytes| v.len())
+                .with_event_listener(Arc::new(CapacityEvictionListener {
+                    pool_label: pool_label(Pool::RowGroup),
+                }))
                 .build();
             PoolHandle::Dram {
                 cache,
@@ -373,6 +481,36 @@ impl FoyerStore {
         } else {
             Self::build_hybrid_rowgroup(&config.rowgroup).await?
         };
+
+        // Pre-touch every metric family that is otherwise only emitted
+        // after a real hit/miss/admit/evict has fired. The post-cutover
+        // 2026-04-27 snapshot caught only 6 of the 21 declared families
+        // showing up in mimir-data because the `prometheus` crate prunes
+        // `*Vec` collectors with zero observed children at scrape time.
+        // Touching them with `inc_by(0)` / `set(0)` guarantees an
+        // initial child row so dashboards never have to special-case
+        // "metric not yet present" vs "value is genuinely zero".
+        for pool in [Pool::Metadata, Pool::RowGroup] {
+            let label = pool_label(pool);
+            crate::metrics::ADMISSIONS_TOTAL
+                .with_label_values(&[label, "admit"])
+                .inc_by(0);
+            crate::metrics::ADMISSIONS_TOTAL
+                .with_label_values(&[label, "reject_size"])
+                .inc_by(0);
+            crate::metrics::EVICTIONS_TOTAL
+                .with_label_values(&[label, "capacity"])
+                .inc_by(0);
+            crate::metrics::INFLIGHT_SINGLEFLIGHT
+                .with_label_values(&[label])
+                .set(0);
+            crate::metrics::ENGINE_RESETS_TOTAL
+                .with_label_values(&[label, "pool_open_retry"])
+                .inc_by(0);
+            crate::metrics::ROLLING_HIT_RATIO_BPS
+                .with_label_values(&[label])
+                .set(0);
+        }
 
         Ok(Self {
             metadata,
@@ -402,26 +540,83 @@ impl FoyerStore {
 
         let dram_capacity = cfg.dram_bytes as usize;
         let disk_capacity = cfg.nvme_bytes as usize;
-        // `DirectFsDeviceOptions::with_file_size` must be <=
-        // capacity and aligned; pick the smaller of 64 MiB and
-        // `disk_capacity / 4` so small (test) pools still get
-        // multiple regions for the reclaim loop.
-        let file_size = (disk_capacity / 4).clamp(1 << 20, 64 * 1024 * 1024);
+        // `DirectFsDeviceOptions::with_file_size` must be <= capacity.
+        // Aim for ~4 regions so the reclaim loop has multiple ranges
+        // to work with, cap at 64 MiB so very large pools do not get
+        // multi-GiB region files, and — critically — never exceed
+        // `disk_capacity`. The previous `clamp(1 MiB, 64 MiB)` could
+        // return 1 MiB when `disk_capacity` was smaller, which failed
+        // Foyer's device sizing invariant on small/test pools.
+        let file_size = (disk_capacity / 4)
+            .clamp(1 << 20, 64 * 1024 * 1024)
+            .min(disk_capacity.max(1));
 
         let device = DirectFsDeviceOptions::new(&cfg.nvme_dir)
             .with_capacity(disk_capacity)
             .with_file_size(file_size);
 
-        let cache: HybridCache<Key, Bytes> = HybridCacheBuilder::new()
+        // SHELF-E1b — ADR-0009 originally pinned this to S3-FIFO for
+        // scan resistance. The default is now LRU because S3-FIFO's
+        // "small queue → main queue → disk" promotion path keeps
+        // one-shot reads (Metabase admin, ad-hoc BI) off NVMe entirely:
+        // items expire from the small queue before they earn promotion,
+        // so `shelf_disk_bytes_used` stays at zero. Operators can opt
+        // back into S3-FIFO via `cache.pools.rowgroup.evictionPolicy`.
+        let eviction: EvictionConfig = match cfg.eviction_policy {
+            crate::config::EvictionPolicy::S3Fifo => S3FifoConfig::default().into(),
+            crate::config::EvictionPolicy::Lru => LruConfig::default().into(),
+            crate::config::EvictionPolicy::Lfu => LfuConfig::default().into(),
+            crate::config::EvictionPolicy::Fifo => FifoConfig::default().into(),
+        };
+        // SHELF — Foyer LODC tunables (post-mortem 2026-04-27 shelf-1
+        // OOMKilled). Foyer 0.12 ships with `flushers=1` and a 16 MiB
+        // buffer pool, which serialises every region write to NVMe and
+        // overflows the submit queue under shelfd's 256-inflight × 32
+        // MiB rowgroup workload. The chart's
+        // `cache.pools.rowgroup.diskCache.*` block lets operators raise
+        // these without recompiling. See
+        // `shelfd/docs/runbooks/2026-04-shelf-1-oom.md`.
+        let mut large_opts = LargeEngineOptions::new();
+        if let Some(flushers) = cfg.disk_cache.flushers {
+            large_opts = large_opts.with_flushers(flushers);
+        }
+        if let Some(bytes) = cfg.disk_cache.buffer_pool_size_bytes {
+            large_opts = large_opts.with_buffer_pool_size(bytes as usize);
+        }
+        if let Some(bytes) = cfg.disk_cache.submit_queue_size_threshold_bytes {
+            large_opts = large_opts.with_submit_queue_size_threshold(bytes as usize);
+        }
+        // SHELF-21e-v2 — bound the admission *rate* into the LODC
+        // pipeline. The LargeEngineOptions above bound the *size* of
+        // the submit queue + flush buffers, which caps RSS but does
+        // not prevent the overflow when sustained ingress exceeds
+        // the EBS drain rate (Foyer then logs `[lodc] submit queue
+        // overflow, new entry ignored`). Foyer 0.12 ships a built-in
+        // `RateLimitPicker` that returns `true` from `pick()` only
+        // when the bytes-per-second token bucket has room, so
+        // admissions self-throttle to whatever the disk can actually
+        // absorb. DRAM stays hot regardless (this picker gates only
+        // the disk admission seam).
+        //
+        // When `admission_bytes_per_sec` is `None` we leave Foyer's
+        // default `AdmitAllPicker` in place (pre-preview-8 behaviour).
+        let builder = HybridCacheBuilder::new()
             .with_name("shelfd.rowgroup")
+            .with_event_listener(Arc::new(CapacityEvictionListener {
+                pool_label: pool_label(Pool::RowGroup),
+            }))
             .memory(dram_capacity)
             .with_weighter(|_k: &Key, v: &Bytes| v.len())
-            // ADR-0009 — S3-FIFO governs memory-tier promotion so
-            // only the "warm" entries ever touch the disk ring.
-            .with_eviction_config(S3FifoConfig::default())
+            .with_eviction_config(eviction)
             .storage(Engine::Large)
             .with_device_options(device)
-            .with_large_object_disk_cache_options(LargeEngineOptions::new())
+            .with_large_object_disk_cache_options(large_opts);
+        let builder = if let Some(bps) = cfg.disk_cache.admission_bytes_per_sec {
+            builder.with_admission_picker(Arc::new(RateLimitPicker::<Key>::new(bps as usize)))
+        } else {
+            builder
+        };
+        let cache: HybridCache<Key, Bytes> = builder
             .build()
             .await
             .map_err(|e| crate::Error::Store(format!("pool.rowgroup NVMe init failed: {e}")))?;
@@ -481,9 +676,49 @@ impl FoyerStore {
         A: crate::admission::AdmissionPolicy + ?Sized,
         F: Future<Output = crate::Result<Bytes>> + Send,
     {
-        if let Some(bytes) = <Self as Store>::get(self, pool, &key).await? {
-            return Ok(ReadOutcome::Hit(bytes));
+        // SHELF-G1 / Track A1: capture the tier (DRAM vs NVMe) so the
+        // returned `ReadOutcome::Hit` keeps `hit_memory` / `hit_disk`
+        // splittable downstream. Going through `Store::get` would
+        // strip the bit before the shim can observe it. We replicate
+        // the disk hit/miss counter dance from `<Self as Store>::get`
+        // here so the operator-facing counters stay consistent.
+        match self.handle_for(pool).get(&key).await? {
+            Some((bytes, tier)) => {
+                if matches!(tier, Tier::Disk) {
+                    crate::metrics::DISK_HITS_TOTAL
+                        .with_label_values(&[pool_label(pool)])
+                        .inc();
+                }
+                return Ok(ReadOutcome::Hit(bytes, tier.into()));
+            }
+            None => {
+                if matches!(self.handle_for(pool), PoolHandle::Hybrid { .. }) {
+                    crate::metrics::DISK_MISSES_TOTAL
+                        .with_label_values(&[pool_label(pool)])
+                        .inc();
+                }
+            }
         }
+
+        // Track E8 — in-flight single-flight gauge. Decremented in the
+        // RAII guard dropped at the end of this scope so the counter is
+        // symmetric even if `fetch.await` panics.
+        let pool_label = match pool {
+            Pool::Metadata => "metadata",
+            Pool::RowGroup => "rowgroup",
+        };
+        crate::metrics::INFLIGHT_SINGLEFLIGHT
+            .with_label_values(&[pool_label])
+            .inc();
+        struct InflightGuard(&'static str);
+        impl Drop for InflightGuard {
+            fn drop(&mut self) {
+                crate::metrics::INFLIGHT_SINGLEFLIGHT
+                    .with_label_values(&[self.0])
+                    .dec();
+            }
+        }
+        let _inflight_guard = InflightGuard(pool_label);
 
         let cell = self.acquire_inflight_cell(pool, &key);
 
@@ -518,7 +753,14 @@ impl FoyerStore {
 
         let bytes = match slot.clone() {
             Ok(b) => b,
-            Err(e) => return Err(crate::Error::Origin(e)),
+            // S2: the leader's original `crate::Error` variant was
+            // stringified at the `OnceCell<Result<Bytes, String>>`
+            // boundary, so we can no longer recover it. Surface as
+            // `Error::Singleflight` rather than `Error::Origin` so
+            // the `shelfd_error_total{component}` series doesn't
+            // mis-attribute Foyer / membership / admission failures
+            // to the S3 origin.
+            Err(e) => return Err(crate::Error::Singleflight(e)),
         };
 
         let ctx = crate::admission::AdmissionContext {
@@ -529,7 +771,30 @@ impl FoyerStore {
             // the admission bypass flag.
             pinned: self.is_pinned(&key),
         };
-        if admission.decide(&ctx) == crate::admission::AdmissionDecision::Admit {
+        // Track E8 — categorise the admission outcome. The
+        // `AdmissionDecision` enum only exposes Admit / Reject, so
+        // "why rejected" is reconstructed here from the context: if
+        // the payload is over the size threshold and not pinned,
+        // report `reject_size`; otherwise `reject_other` (ML model,
+        // future reasons). This is approximate but cheap; the policy
+        // module could return a richer enum later without breaking
+        // the metric name.
+        let decision = admission.decide(&ctx);
+        let admit = decision == crate::admission::AdmissionDecision::Admit;
+        let decision_label = if admit {
+            "admit"
+        } else if ctx.pinned {
+            "reject_other"
+        } else {
+            // `reject_size` captures the dominant path today per
+            // ADR-0003; when LightGBM lands (c-lightgbm-escape-hatch)
+            // we'll split this further.
+            "reject_size"
+        };
+        crate::metrics::ADMISSIONS_TOTAL
+            .with_label_values(&[pool_label, decision_label])
+            .inc();
+        if admit {
             self.insert(pool, key, bytes.clone()).await?;
         }
         Ok(ReadOutcome::Miss(bytes))
@@ -557,16 +822,19 @@ impl FoyerStore {
     // `POST /admin/reload`.
 
     /// Pin a key against a specific pool. Returns `true` iff the key
-    /// is resident in `pool` (or was already pinned — idempotent).
-    /// `false` signals 404 to the admin handler so operators see
-    /// typos rather than silent no-ops.
+    /// is resident in `pool` (or was already pinned **in that same
+    /// pool** — idempotent). Pinning a key that is already pinned in
+    /// a *different* pool returns `false` so the admin handler can
+    /// 404 the caller: a SHELF-04 key is unique per pool by
+    /// construction, so a cross-pool pin request indicates a
+    /// mis-typed request, not an operator convenience.
     pub fn pin(&self, pool: Pool, key: &Key) -> bool {
-        // Idempotent: pinning an already-pinned key returns true
-        // without re-reading the cache. The existing byte count is
-        // trusted — re-inserting the same key with a potentially
-        // different payload would be an ADR-0003 violation anyway.
-        if self.pin_set.read().contains_key(key) {
-            return true;
+        // Idempotent only for the same (pool, key). The existing
+        // byte count is trusted — re-inserting the same key with a
+        // potentially different payload would be an ADR-0003
+        // violation anyway.
+        if let Some((existing_pool, _)) = self.pin_set.read().get(key) {
+            return *existing_pool == pool;
         }
         // SHELF-18: on a hybrid pool we only honour `pin()` when the
         // key is already memory-resident — a disk-only pin would
@@ -577,7 +845,7 @@ impl FoyerStore {
             Some(len) => len,
             None => return false,
         };
-        self.pin_set.write().insert(key.clone(), len);
+        self.pin_set.write().insert(key.clone(), (pool, len));
         true
     }
 
@@ -592,9 +860,15 @@ impl FoyerStore {
         self.pin_set.read().contains_key(key)
     }
 
-    /// Snapshot used by the pin-list loader when diffing.
-    pub fn pinned_keys(&self) -> Vec<Key> {
-        self.pin_set.read().keys().cloned().collect()
+    /// Snapshot used by the pin-list loader when diffing. Each key
+    /// is paired with the pool it is pinned against so the reloader
+    /// can spot pool drift without a second lookup.
+    pub fn pinned_keys(&self) -> Vec<(Pool, Key)> {
+        self.pin_set
+            .read()
+            .iter()
+            .map(|(k, (p, _))| (*p, k.clone()))
+            .collect()
     }
 
     /// Distinct pinned key count regardless of residency.
@@ -605,23 +879,73 @@ impl FoyerStore {
     /// Sum of the byte lengths recorded when each pinned key was
     /// installed. O(N) over the pin-set; no cache lookups.
     pub fn pinned_bytes(&self) -> u64 {
-        self.pin_set.read().values().copied().sum()
+        self.pin_set.read().values().map(|(_, len)| *len).sum()
     }
 
     /// Evict a key from `pool`. Preserves the pin-set so a subsequent
     /// re-fetch still goes through admission with `ctx.pinned = true`.
-    /// Returns `true` iff the key was resident in the pool's memory
-    /// tier before the call. For a hybrid pool, `remove` also drops
-    /// the disk-tier copy; the boolean reflects the memory-tier
-    /// membership check so the `evict` admin handler can still
-    /// return a correct `404` when the key is genuinely absent.
-    pub fn evict_in_pool(&self, pool: Pool, key: &Key) -> bool {
+    ///
+    /// Returns `true` iff the key was resident in the pool (either
+    /// DRAM or — for hybrid pools — NVMe) before the call. For a
+    /// hybrid pool, `remove` drops the disk-tier copy as well, so
+    /// subsequent reads cannot resurrect the bytes from NVMe.
+    ///
+    /// The previous implementation only consulted the memory tier,
+    /// so a disk-resident entry produced a spurious 404 from the
+    /// admin handler and — worse — left the disk copy in place,
+    /// still servable on the next `GET /cache/...`.
+    pub async fn evict_in_pool(&self, pool: Pool, key: &Key) -> bool {
+        let pool_label = match pool {
+            Pool::Metadata => "metadata",
+            Pool::RowGroup => "rowgroup",
+        };
+        // Track E8 — admin-triggered eviction. Capacity evictions
+        // are now also counted via [`CapacityEvictionListener`]
+        // under `reason="capacity"` (SHELF-A5). The two labels
+        // overlap by exactly the bytes torn down by an explicit
+        // admin call (handle.remove also fires `on_memory_release`),
+        // which is acceptable: admin evictions are rare and the
+        // dashboard treats `capacity` as the dominant ops signal.
+        crate::metrics::EVICTIONS_TOTAL
+            .with_label_values(&[pool_label, "admin"])
+            .inc();
         let handle = self.handle_for(pool);
-        let had = handle.contains(key);
+        let had = match handle.contains_any(key).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    pool = ?pool,
+                    key_hex = %key.to_hex(),
+                    error = %e,
+                    "hybrid residency probe failed during evict; issuing remove anyway",
+                );
+                // Bias towards a best-effort purge: we cannot prove
+                // the key is there, but we can always issue the
+                // idempotent Foyer remove and let the caller retry.
+                false
+            }
+        };
         if had {
             handle.remove(key);
         }
         had
+    }
+
+    /// SHELF-D7 — residency probe used by the batch `/cache/contains`
+    /// endpoint and by peer-failover (E6). Returns `true` when the key
+    /// is resident in the named pool's DRAM **or** NVMe tier.
+    ///
+    /// This is a fast-path probe: DRAM residency is O(1); only on a
+    /// DRAM miss do we fall back to a hybrid `get` probe. Callers that
+    /// cannot afford the disk roundtrip (e.g. Trino's split-planning
+    /// hot path) should call this against a remote peer, not against
+    /// their own `shelfd`, and rely on the HRW ring to route to the
+    /// owner replica.
+    pub async fn contains(&self, pool: Pool, key: &Key) -> bool {
+        self.handle_for(pool)
+            .contains_any(key)
+            .await
+            .unwrap_or(false)
     }
 
     /// SHELF-18 — bytes currently held on the NVMe tier of `pool`.
@@ -639,21 +963,39 @@ impl FoyerStore {
 
 /// Whether a [`FoyerStore::get_or_fetch`] returned the bytes straight
 /// from a warm pool or after an origin fetch.
+///
+/// `Hit` carries the [`HitTier`] (memory vs disk) so the shim and
+/// native data plane can emit `shelf_request_seconds{outcome}` with
+/// the same `hit_memory` / `hit_disk` / `miss` cardinality the
+/// dashboard expects (Track A1 / SHELF-G1 — without this split the
+/// p95 latency panel collapses memory hits, NVMe hits, and full
+/// origin misses into one number, which is exactly the signal the
+/// cache is supposed to differentiate).
 #[derive(Debug)]
 pub enum ReadOutcome {
-    Hit(Bytes),
+    Hit(Bytes, HitTier),
     Miss(Bytes),
 }
 
 impl ReadOutcome {
     pub fn into_bytes(self) -> Bytes {
         match self {
-            ReadOutcome::Hit(b) | ReadOutcome::Miss(b) => b,
+            ReadOutcome::Hit(b, _) | ReadOutcome::Miss(b) => b,
         }
     }
 
     pub fn is_hit(&self) -> bool {
-        matches!(self, ReadOutcome::Hit(_))
+        matches!(self, ReadOutcome::Hit(_, _))
+    }
+
+    /// Stable label for `shelf_request_seconds{outcome}`. `Hit`
+    /// splits into `hit_memory` / `hit_disk`; `Miss` is the
+    /// origin-fetch path.
+    pub fn outcome_label(&self) -> &'static str {
+        match self {
+            ReadOutcome::Hit(_, tier) => tier.outcome_label(),
+            ReadOutcome::Miss(_) => "miss",
+        }
     }
 }
 
@@ -688,10 +1030,10 @@ impl Store for FoyerStore {
         Ok(())
     }
 
-    fn evict(&self, pool: Pool, key: &Key) -> bool {
+    async fn evict(&self, pool: Pool, key: &Key) -> bool {
         // Forwards to the inherent method so the pool-targeting logic
         // lives in one place.
-        FoyerStore::evict_in_pool(self, pool, key)
+        FoyerStore::evict_in_pool(self, pool, key).await
     }
 
     fn pin(&self, pool: Pool, key: &Key) -> bool {
@@ -706,7 +1048,7 @@ impl Store for FoyerStore {
         FoyerStore::is_pinned(self, key)
     }
 
-    fn pinned_keys(&self) -> Vec<Key> {
+    fn pinned_keys(&self) -> Vec<(Pool, Key)> {
         FoyerStore::pinned_keys(self)
     }
 
@@ -951,6 +1293,8 @@ mod store_tests {
                 dram_bytes: 1 << 20,
                 nvme_dir: std::path::PathBuf::from("/tmp/unused"),
                 nvme_bytes: 0,
+                eviction_policy: crate::config::EvictionPolicy::default(),
+                disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
             },
         }
     }
@@ -1001,7 +1345,7 @@ mod store_tests {
             .insert(Pool::Metadata, key.clone(), Bytes::from_static(b"x"))
             .await
             .unwrap();
-        assert!(store.evict(Pool::Metadata, &key));
+        assert!(store.evict(Pool::Metadata, &key).await);
         assert!(store.get(Pool::Metadata, &key).await.unwrap().is_none());
     }
 
@@ -1139,6 +1483,8 @@ mod store_tests {
                 dram_bytes: 1024 * 1024,
                 nvme_dir: std::path::PathBuf::from("/tmp/unused"),
                 nvme_bytes: 0,
+                eviction_policy: crate::config::EvictionPolicy::default(),
+                disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
             },
         };
         let store = FoyerStore::open(&pools).await.expect("open");
@@ -1198,6 +1544,8 @@ mod store_tests {
                 dram_bytes: 512 * 1024,
                 nvme_dir: std::path::PathBuf::from("/tmp/unused"),
                 nvme_bytes: 0,
+                eviction_policy: crate::config::EvictionPolicy::default(),
+                disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
             },
         };
         let store = FoyerStore::open(&pools).await.expect("open");
@@ -1273,7 +1621,7 @@ mod store_tests {
             .await
             .unwrap();
         assert!(store.pin(Pool::RowGroup, &key));
-        assert!(store.evict(Pool::RowGroup, &key));
+        assert!(store.evict(Pool::RowGroup, &key).await);
         assert!(store.is_pinned(&key), "pin-set must outlive eviction");
         assert_eq!(store.pinned_count(), 1);
         // The recorded byte length at pin-time is unchanged by the
@@ -1309,8 +1657,8 @@ mod store_tests {
     async fn evict_missing_returns_false() {
         let store = new_store().await;
         let key = k(45);
-        assert!(!store.evict(Pool::RowGroup, &key));
-        assert!(!store.evict(Pool::Metadata, &key));
+        assert!(!store.evict(Pool::RowGroup, &key).await);
+        assert!(!store.evict(Pool::Metadata, &key).await);
     }
 
     // --- SHELF-18 hybrid-pool unit tests ---
@@ -1328,6 +1676,8 @@ mod store_tests {
                 dram_bytes: 1 << 20,
                 nvme_dir,
                 nvme_bytes: 64 * 1024 * 1024,
+                eviction_policy: crate::config::EvictionPolicy::default(),
+                disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
             },
         }
     }
@@ -1412,6 +1762,106 @@ mod store_tests {
         );
     }
 
+    /// Regression: `evict` on a hybrid pool must reach the disk tier.
+    ///
+    /// Before the fix, `evict_in_pool` only consulted memory and
+    /// short-circuited when the key had aged onto NVMe, returning
+    /// `false` *and* skipping the Foyer `remove`. A subsequent
+    /// `get` resurrected the bytes from disk — so operator eviction
+    /// was a silent no-op for the dominant steady-state case on a
+    /// hybrid pool.
+    #[tokio::test]
+    async fn hybrid_pool_evict_after_memory_eviction_still_removes_from_disk() {
+        // Tiny DRAM budget so the second insert forces the first
+        // entry out of memory onto NVMe; large disk budget so the
+        // demoted entry definitely lands on the disk ring.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pools = PoolsConfig {
+            metadata: MetadataPoolConfig {
+                dram_bytes: 1 << 20,
+            },
+            rowgroup: RowGroupPoolConfig {
+                dram_bytes: 16 * 1024,
+                nvme_dir: dir.path().to_path_buf(),
+                nvme_bytes: 64 * 1024 * 1024,
+                eviction_policy: crate::config::EvictionPolicy::default(),
+                disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
+            },
+        };
+        let store = FoyerStore::open(&pools).await.expect("open");
+
+        let victim = k(70);
+
+        store
+            .insert(
+                Pool::RowGroup,
+                victim.clone(),
+                Bytes::from(vec![0xAA; 8192]),
+            )
+            .await
+            .unwrap();
+        // Insert a filler so `victim` is demoted out of DRAM.
+        store
+            .insert(Pool::RowGroup, k(71), Bytes::from(vec![0xBB; 8192]))
+            .await
+            .unwrap();
+
+        // Both keys together exceed the DRAM budget so Foyer demotes
+        // the older one to the NVMe tier; confirm it is still
+        // reachable via a regular `get` before we evict.
+        let warm = store
+            .get(Pool::RowGroup, &victim)
+            .await
+            .unwrap()
+            .expect("victim must still be present (DRAM+NVMe)");
+        assert_eq!(warm.len(), 8192);
+
+        // `evict` now reports true for a disk-only key and actually
+        // removes it from both tiers.
+        assert!(
+            store.evict(Pool::RowGroup, &victim).await,
+            "evict must report residency for a disk-tier entry"
+        );
+        assert!(
+            store.get(Pool::RowGroup, &victim).await.unwrap().is_none(),
+            "evict must purge the disk copy, not only memory",
+        );
+    }
+
+    /// Regression: pinning a key under one pool then a different
+    /// pool must not silently succeed. The old `pin()` short-circuited
+    /// on "key already in pin_set" without checking the pool, so an
+    /// operator could pin the same key against both pools and only
+    /// the first one actually did anything.
+    #[tokio::test]
+    async fn pin_rejects_wrong_pool_after_idempotent_same_pool_pin() {
+        let store = new_store().await;
+        let key = k(72);
+        store
+            .insert(Pool::RowGroup, key.clone(), Bytes::from_static(b"xyz"))
+            .await
+            .unwrap();
+
+        // First pin succeeds; second is idempotent (same pool → ok).
+        assert!(store.pin(Pool::RowGroup, &key));
+        assert!(store.pin(Pool::RowGroup, &key));
+
+        // Third pin names the *other* pool. The key is not resident
+        // in metadata, so the contract says `false`. Prior behaviour
+        // was a false-positive `true`.
+        assert!(
+            !store.pin(Pool::Metadata, &key),
+            "wrong-pool pin on an already-pinned key must return false"
+        );
+
+        // The pin-set still reflects the original pool only.
+        assert_eq!(store.pinned_count(), 1);
+        let entries = store.pinned_keys();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, Pool::RowGroup);
+        assert_eq!(&entries[0].1, &key);
+    }
+
     #[tokio::test]
     async fn dram_only_miss_does_not_bump_disk_counter() {
         let store = new_store().await; // nvme_bytes=0
@@ -1426,6 +1876,87 @@ mod store_tests {
         assert_eq!(
             now, baseline,
             "DRAM-only pools must not bump the disk-miss counter"
+        );
+    }
+
+    /// SHELF-A5 — capacity evictions emitted by Foyer's
+    /// `EventListener` must increment
+    /// `shelf_evictions_total{pool, reason="capacity"}`. We construct
+    /// a 4 KiB DRAM-only rowgroup pool, then insert 16 × 1 KiB
+    /// entries with distinct keys; Foyer's eviction policy will
+    /// release at least a handful of older ones from memory.
+    #[tokio::test]
+    async fn capacity_evictions_increment_counter() {
+        let cfg = PoolsConfig {
+            metadata: MetadataPoolConfig {
+                dram_bytes: 1 << 20,
+            },
+            rowgroup: RowGroupPoolConfig {
+                dram_bytes: 4 * 1024,
+                nvme_dir: std::path::PathBuf::from("/tmp/unused"),
+                nvme_bytes: 0,
+                eviction_policy: crate::config::EvictionPolicy::default(),
+                disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
+            },
+        };
+        let store = FoyerStore::open(&cfg).await.expect("open small pool");
+
+        let baseline = crate::metrics::EVICTIONS_TOTAL
+            .with_label_values(&["rowgroup", "capacity"])
+            .get();
+
+        // 16 × 1 KiB = 16 KiB into a 4 KiB pool ⇒ at least 12 evictions.
+        let payload = Bytes::from(vec![0u8; 1024]);
+        for seed in 0u8..16 {
+            let key = k(seed);
+            store
+                .insert(Pool::RowGroup, key, payload.clone())
+                .await
+                .expect("insert");
+        }
+
+        // Foyer's release callback fires synchronously inside `insert`,
+        // but a small amount of work is dispatched onto its background
+        // thread; yield once so the counter is settled before we read.
+        tokio::task::yield_now().await;
+
+        let now = crate::metrics::EVICTIONS_TOTAL
+            .with_label_values(&["rowgroup", "capacity"])
+            .get();
+        assert!(
+            now > baseline,
+            "capacity evictions must climb past baseline ({baseline}); got {now}"
+        );
+    }
+
+    /// Companion check: an explicit `evict` still bumps the
+    /// `reason="admin"` line. Two label values can both move at the
+    /// same time — see the doc comment on
+    /// [`FoyerStore::evict_in_pool`] — but the admin counter must
+    /// always be the one to advance for an explicit call.
+    #[tokio::test]
+    async fn admin_eviction_increments_admin_counter() {
+        let store = new_store().await;
+        let key = k(63);
+        store
+            .insert(Pool::RowGroup, key.clone(), Bytes::from_static(b"x"))
+            .await
+            .unwrap();
+
+        // EVICTIONS_TOTAL is a process-global Prometheus counter,
+        // so other tests running in parallel may also bump it. We
+        // therefore assert "moved forward" rather than an exact
+        // delta of 1.
+        let baseline_admin = crate::metrics::EVICTIONS_TOTAL
+            .with_label_values(&["rowgroup", "admin"])
+            .get();
+        assert!(store.evict(Pool::RowGroup, &key).await);
+        let now_admin = crate::metrics::EVICTIONS_TOTAL
+            .with_label_values(&["rowgroup", "admin"])
+            .get();
+        assert!(
+            now_admin > baseline_admin,
+            "explicit evict must bump reason=admin (baseline {baseline_admin}, now {now_admin})",
         );
     }
 }

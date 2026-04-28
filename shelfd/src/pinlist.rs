@@ -210,7 +210,16 @@ impl PinListLoader {
             };
             match Key::from_hex(&entry.key_hex) {
                 Ok(key) => {
-                    desired.insert(key, pool);
+                    if let Some(prev) = desired.insert(key.clone(), pool) {
+                        if prev != pool {
+                            tracing::warn!(
+                                key_hex = %entry.key_hex,
+                                previous_pool = ?prev,
+                                replacing_with = ?pool,
+                                "pin-list has duplicate key_hex with conflicting pool — last entry wins",
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -222,21 +231,38 @@ impl PinListLoader {
             }
         }
 
-        // Diff against the current in-memory pin-set.
-        let current: std::collections::HashSet<Key> =
+        // Diff against the current in-memory pin-set. The store's
+        // `pinned_keys()` now returns `(Pool, Key)` pairs so we can
+        // spot pool-drift (same key, different pool) as an unpin +
+        // re-pin rather than a silent no-op.
+        let current: std::collections::HashSet<(Pool, Key)> =
             self.store.pinned_keys().into_iter().collect();
-        let desired_keys: std::collections::HashSet<Key> = desired.keys().cloned().collect();
+        let desired_set: std::collections::HashSet<(Pool, Key)> = desired
+            .iter()
+            .map(|(key, pool)| (*pool, key.clone()))
+            .collect();
 
         let mut removed = 0usize;
-        for gone in current.difference(&desired_keys) {
+        for (pool, gone) in current.difference(&desired_set) {
+            // `unpin` is pool-agnostic: a SHELF-04 key is unique per
+            // pool, so there is at most one entry to drop.
             if self.store.unpin(gone) {
                 removed += 1;
+                // Track E8 — reload-driven unpin is a distinct
+                // reason from admin-evict or capacity-evict.
+                let pool_label = match pool {
+                    Pool::Metadata => "metadata",
+                    Pool::RowGroup => "rowgroup",
+                };
+                crate::metrics::EVICTIONS_TOTAL
+                    .with_label_values(&[pool_label, "reload"])
+                    .inc();
             }
         }
         let mut added = 0usize;
         let mut skipped_missing = 0usize;
         for (key, pool) in &desired {
-            if current.contains(key) {
+            if current.contains(&(*pool, key.clone())) {
                 continue;
             }
             if self.store.pin(*pool, key) {
@@ -440,6 +466,8 @@ mod tests {
                 dram_bytes: 1 << 20,
                 nvme_dir: std::path::PathBuf::from("/tmp/unused"),
                 nvme_bytes: 0,
+                eviction_policy: crate::config::EvictionPolicy::default(),
+                disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
             },
         }
     }

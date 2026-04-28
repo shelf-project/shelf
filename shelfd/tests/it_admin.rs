@@ -32,6 +32,7 @@ fn test_pools() -> PoolsConfig {
             nvme_dir: std::path::PathBuf::from("/tmp/shelf_admin_unused"),
             nvme_bytes: 0,
             eviction_policy: shelfd::config::EvictionPolicy::default(),
+            disk_cache: shelfd::config::RowGroupDiskCacheConfig::default(),
         },
     }
 }
@@ -95,14 +96,8 @@ async fn spawn_admin_server() -> AdminHarness {
     }));
     let drain = DrainSignal::new();
     let state = Arc::new(
-        ServerState::new(
-            store.clone(),
-            origin,
-            router.clone(),
-            admission,
-            metrics,
-        )
-        .with_drain_signal(drain.clone()),
+        ServerState::new(store.clone(), origin, router.clone(), admission, metrics)
+            .with_drain_signal(drain.clone()),
     );
     state.mark_ready();
 

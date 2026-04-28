@@ -71,6 +71,30 @@ pub struct ServerState {
     /// rebuilding `ServerState`. Defaults to 256 MiB; `main` seeds it
     /// from `config.s3_shim.max_full_object_bytes` at startup.
     pub s3_shim_max_full_object_bytes: AtomicU64,
+    /// SHELF-G4 — optional `ShelfFilterService`. `None` means
+    /// `POST /filter/probe` responds with `fail_open: true` for
+    /// every request (the safe default when no signal providers
+    /// have been wired in). `main` installs one once D3 and G2
+    /// have landed their providers.
+    pub filter_service: Option<Arc<crate::filter_service::ShelfFilterService>>,
+    /// SHELF-G6 — optional text-index lookup. Keyed by
+    /// `(table_fqn, column)`; `None` anywhere along the chain
+    /// makes `POST /textindex/probe` fail open. Guarded by a
+    /// `RwLock` so operators can hot-swap indexes via admin RPCs
+    /// without a restart.
+    pub text_index: std::sync::RwLock<
+        std::collections::HashMap<(String, String), crate::text_index::KeywordIndex>,
+    >,
+    /// Track H5 — registry of content-addressed keys that belong to
+    /// a pinned Iceberg materialized view. Written by the H3
+    /// mv-pin-watcher via `POST /admin/pin` (when the body carries
+    /// an `mv_name` field) and read on every served
+    /// `GET /cache/:pool/:key` response so the shim can bump the
+    /// `shelf_mv_hits_total{mv_name}` + `shelf_mv_bytes_served_total`
+    /// counters without adding a dimension to the existing
+    /// `shelf_hits_total` / `shelf_s3_shim_response_bytes_total`
+    /// series (which would blow cardinality).
+    pub mv_registry: Arc<crate::mv_registry::MvRegistry>,
 }
 
 impl ServerState {
@@ -122,7 +146,21 @@ impl ServerState {
             // SHELF-22 default cap: 256 MiB. `main` overwrites
             // this from config before any traffic arrives.
             s3_shim_max_full_object_bytes: AtomicU64::new(256 * 1024 * 1024),
+            filter_service: None,
+            text_index: std::sync::RwLock::new(std::collections::HashMap::new()),
+            mv_registry: Arc::new(crate::mv_registry::MvRegistry::new()),
         }
+    }
+
+    /// SHELF-G4 builder hook: install a `ShelfFilterService`. Kept
+    /// separate so callers that don't need predicate pushdown
+    /// (most unit tests, the E6 peer-failover path) pay no cost.
+    pub fn with_filter_service(
+        mut self,
+        svc: Arc<crate::filter_service::ShelfFilterService>,
+    ) -> Self {
+        self.filter_service = Some(svc);
+        self
     }
 
     pub fn mark_ready(&self) {
@@ -183,12 +221,20 @@ fn default_pod_id() -> Arc<str> {
 ///   future `HEAD /cache/:pool/:key` by content-addressed hash, which
 ///   the plugin cannot issue until it has already learned the size.
 pub fn build_router(state: Arc<ServerState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/healthz", get(handlers::healthz))
         .route("/readyz", get(handlers::readyz))
         .route("/metrics", get(handlers::metrics))
         .route("/stats", get(handlers::stats))
         .route("/cache/:pool/:key/:range", get(handlers::get_cache))
+        .route("/cache/contains", post(handlers::cache_contains))
+        // SHELF-G4 — predicate → maybe_match row groups. Returns
+        // `fail_open: true` when shelf has no signal for the
+        // (file, column) and the engine must scan everything.
+        .route("/filter/probe", post(handlers::filter_probe))
+        // SHELF-G6 — Lucene-style text-index probe. Fails open
+        // until an index is wired via `with_text_index`.
+        .route("/textindex/probe", post(handlers::textindex_probe))
         .route(
             "/cache/:pool/origin/:bucket/*s3_key",
             head(handlers::head_cache),
@@ -201,8 +247,18 @@ pub fn build_router(state: Arc<ServerState>) -> Router {
         .route("/admin/pin", post(handlers::admin_pin))
         .route("/admin/unpin", post(handlers::admin_unpin))
         .route("/admin/evict", post(handlers::admin_evict))
-        .route("/admin/reload", post(handlers::admin_reload))
-        .with_state(state)
+        .route("/admin/reload", post(handlers::admin_reload));
+
+    // Embedded admin UI. Same-origin SPA at `/ui` consuming the same
+    // JSON contract `shelfctl` uses. Behind a non-default feature so
+    // the stock binary stays unchanged.
+    #[cfg(feature = "ui")]
+    let router = router
+        .route("/ui", get(crate::ui::index))
+        .route("/ui/", get(crate::ui::index))
+        .route("/ui/*path", get(crate::ui::asset));
+
+    router.with_state(state)
 }
 
 /// Bind a TCP listener and serve the data plane until `shutdown`
@@ -379,6 +435,12 @@ pub mod handlers {
                     .hits_total
                     .with_label_values(&[pool_label])
                     .inc();
+                // Track H5 — if this key was pinned on behalf of an
+                // MV, bump the per-MV counters. `record_hit` is
+                // O(1) and a no-op for non-MV keys, so it stays on
+                // the hot path.
+                let served_bytes = slice_len(&bytes, offset, length);
+                state.mv_registry.record_hit(&key_hex, served_bytes);
                 return record_cache_outcome(
                     &state,
                     start,
@@ -424,17 +486,19 @@ pub mod handlers {
             .await;
 
         match outcome {
-            Ok(ReadOutcome::Hit(bytes)) => {
+            Ok(ReadOutcome::Hit(bytes, tier)) => {
                 // Rare: raced the fastpath `get` above. Still a hit.
                 state
                     .metrics
                     .hits_total
                     .with_label_values(&[pool_label])
                     .inc();
+                let served_bytes = slice_len(&bytes, offset, length);
+                state.mv_registry.record_hit(&key_hex, served_bytes);
                 record_cache_outcome(
                     &state,
                     start,
-                    "hit",
+                    tier.outcome_label(),
                     StatusCode::OK,
                     ok_range(bytes, offset, length),
                 )
@@ -753,7 +817,18 @@ pub mod handlers {
         if end < offset {
             return Err((StatusCode::BAD_REQUEST, "end must be >= offset".to_owned()));
         }
-        let length = end - offset + 1;
+        // `end - offset + 1` can overflow `u64` at the edges (e.g.
+        // `offset = 0, end = u64::MAX`). Route that to a clean 400
+        // instead of panicking in debug / wrapping to 0 in release.
+        let length = match end.checked_sub(offset).and_then(|d| d.checked_add(1)) {
+            Some(n) => n,
+            None => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "range length overflows u64".to_owned(),
+                ))
+            }
+        };
         Ok((offset, length))
     }
 
@@ -789,13 +864,32 @@ pub mod handlers {
         (StatusCode::OK, headers).into_response()
     }
 
+    /// Number of bytes `ok_range` will send in its response body for
+    /// `(offset, length)` against `bytes`. Pulled out so the H5
+    /// MV-hit accounting can charge the per-MV byte counter with
+    /// the exact count the client will see.
+    fn slice_len(bytes: &Bytes, _offset: u64, length: u64) -> u64 {
+        (length as usize).min(bytes.len()) as u64
+    }
+
     fn ok_range(bytes: Bytes, offset: u64, length: u64) -> Response {
+        // The body must match the `Content-Range` we advertise —
+        // otherwise `Content-Length` (implicit from the body) will
+        // disagree with `Content-Range` and the response is invalid
+        // HTTP. Previously `ok_range` returned the full cached
+        // `bytes` regardless of `length`, so a client requesting the
+        // same cache key with a different `<offset>-<end>` on the
+        // URL could receive more bytes than the range declared.
+        //
+        // `length` is in bytes and capped at `bytes.len()` so we
+        // never slice past the end on a short cache entry.
+        let take = (length as usize).min(bytes.len());
+        let sliced = bytes.slice(0..take);
+        let effective_length = sliced.len() as u64;
+
         let mut headers = HeaderMap::new();
-        let content_range = format!(
-            "bytes {}-{}/*",
-            offset,
-            offset.saturating_add(length).saturating_sub(1)
-        );
+        let last_byte = offset.saturating_add(effective_length).saturating_sub(1);
+        let content_range = format!("bytes {}-{}/*", offset, last_byte);
         if let Ok(v) = HeaderValue::from_str(&content_range) {
             headers.insert(HeaderName::from_static("content-range"), v);
         }
@@ -803,7 +897,7 @@ pub mod handlers {
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/octet-stream"),
         );
-        (StatusCode::OK, headers, bytes).into_response()
+        (StatusCode::OK, headers, sliced).into_response()
     }
 
     fn client_error(status: StatusCode, kind: &str, detail: &str) -> Response {
@@ -835,6 +929,14 @@ pub mod handlers {
     pub struct PinEvictBody {
         pub key_hex: String,
         pub pool: String,
+        /// Track H5 — optional fully-qualified materialized view
+        /// name the key belongs to (`schema.table`). When present,
+        /// `/admin/pin` writes to the [`crate::mv_registry`] so the
+        /// read path can bump per-MV counters on each hit.
+        /// Unused by `/admin/evict`; extra fields are ignored by
+        /// design because serde's default skips unknown fields.
+        #[serde(default)]
+        pub mv_name: Option<String>,
     }
 
     /// Request body for `/admin/unpin`. No `pool` field: unpin is
@@ -948,6 +1050,16 @@ pub mod handlers {
                 "key is not resident in the requested pool — pin refused",
             );
         }
+        // Track H5 — the H3 mv-pin-watcher passes `mv_name` on every
+        // pin it performs. Registering here keeps the "which MV does
+        // this key belong to" lookup table in the same shelfd process
+        // that serves the key, which is what the hit-accounting path
+        // needs to bump per-MV counters without a second hop.
+        if let Some(mv_name) = body.mv_name.as_deref() {
+            if !mv_name.is_empty() {
+                state.mv_registry.pin(&body.key_hex, mv_name);
+            }
+        }
         (
             StatusCode::OK,
             axum::Json(serde_json::json!({
@@ -955,6 +1067,7 @@ pub mod handlers {
                 "pool": body.pool,
                 "pinned_bytes": state.store.pinned_bytes(),
                 "pinned_count": state.store.pinned_count(),
+                "mv_name": body.mv_name,
             })),
         )
             .into_response()
@@ -972,6 +1085,12 @@ pub mod handlers {
         if !state.store.unpin(&key) {
             return client_error(StatusCode::NOT_FOUND, "not_pinned", "key was not pinned");
         }
+        // Track H5 — keep the MV registry in sync with the store so
+        // an evicted MV file doesn't continue to bump per-MV counters
+        // after a later, unrelated admission reuses its content hash
+        // (extremely unlikely, but SHA-256 collisions *must* fail
+        // safe).
+        state.mv_registry.unpin(&body.key_hex);
         (
             StatusCode::OK,
             axum::Json(serde_json::json!({
@@ -996,7 +1115,7 @@ pub mod handlers {
             Ok(p) => p,
             Err(r) => return r,
         };
-        if !state.store.evict(pool, &key) {
+        if !state.store.evict(pool, &key).await {
             return client_error(
                 StatusCode::NOT_FOUND,
                 "not_resident",
@@ -1047,6 +1166,156 @@ pub mod handlers {
                 .into_response(),
             Err(e) => upstream_error("reload_failed", &e.to_string()),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // SHELF-D7 — batch residency probe.
+    //
+    // `POST /cache/contains` is the wire primitive that lets a peer
+    // replica (SHELF-E6) or the Trino event-listener plugin
+    // (SHELF-G5) ask "of these N keys, which are you already holding?"
+    // in a single round-trip. The response is a dense bitmap — one
+    // bit per input key, LSB-first, packed into little-endian bytes —
+    // so the payload is O(N/8) rather than O(N) JSON booleans.
+    //
+    // The endpoint is deliberately `POST` (not `GET`) because the
+    // key list can run into the thousands for whole-query planning
+    // and comfortably overflows URL-length budgets on common load
+    // balancers (8 KiB on ALB, 4 KiB on some NGINX defaults).
+    // -----------------------------------------------------------------
+
+    /// Request body for `POST /cache/contains`.
+    ///
+    /// `pool` is applied uniformly to every entry in `keys` — the
+    /// caller almost always batches by pool because rowgroup and
+    /// metadata probes are issued in different phases of the Trino
+    /// planner. Mixing would force the callee to parse a pool per
+    /// entry, which adds more CPU than it saves bytes.
+    #[derive(Debug, serde::Serialize, serde::Deserialize)]
+    pub struct ContainsBody {
+        pub pool: String,
+        pub keys: Vec<String>,
+    }
+
+    /// `POST /cache/contains {"pool":"rowgroup","keys":["<hex>", ...]}`.
+    ///
+    /// Response shape:
+    ///
+    /// ```json
+    /// {
+    ///   "pool": "rowgroup",
+    ///   "count": 1024,
+    ///   "hits": 873,
+    ///   "bitmap_b64": "<base64 of a count-bit bitmap, LSB-first>"
+    /// }
+    /// ```
+    ///
+    /// A key that fails hex-parse is counted as a miss (bit 0) rather
+    /// than aborting the whole batch — the Trino planner would
+    /// otherwise have to re-issue the probe for N-1 keys just because
+    /// one split carried a corrupt cache-key annotation. The handler
+    /// caps the batch at 65_536 keys (≈8 KiB bitmap) to bound the
+    /// amount of blocking work a single request can schedule.
+    pub async fn cache_contains(
+        State(state): State<Arc<ServerState>>,
+        axum::Json(body): axum::Json<ContainsBody>,
+    ) -> Response {
+        const MAX_BATCH: usize = 65_536;
+
+        let pool = match parse_pool_field(&body.pool) {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
+        if body.keys.len() > MAX_BATCH {
+            return client_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "batch_too_large",
+                &format!("requested {} keys; max is {MAX_BATCH}", body.keys.len()),
+            );
+        }
+
+        let count = body.keys.len();
+        let mut bitmap = vec![0u8; (count + 7) / 8];
+        let mut hits: u64 = 0;
+        for (i, hex) in body.keys.iter().enumerate() {
+            let Ok(key) = Key::from_hex(hex) else {
+                continue;
+            };
+            if state.store.contains(pool, &key).await {
+                bitmap[i / 8] |= 1u8 << (i % 8);
+                hits += 1;
+            }
+        }
+
+        use base64::Engine as _;
+        let bitmap_b64 = base64::engine::general_purpose::STANDARD.encode(&bitmap);
+        (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "pool": body.pool,
+                "count": count,
+                "hits": hits,
+                "bitmap_b64": bitmap_b64,
+            })),
+        )
+            .into_response()
+    }
+
+    /// SHELF-G4 — `POST /filter/probe`. Body is
+    /// [`crate::filter_service::ProbeRequest`] JSON. Returns a
+    /// [`crate::filter_service::ProbeResponse`]. When no filter
+    /// service is wired we reply with `fail_open: true` and an
+    /// empty `maybe_match`, matching the service's own failure
+    /// semantics so callers don't need to special-case the
+    /// "service unwired" path.
+    pub async fn filter_probe(
+        State(state): State<Arc<ServerState>>,
+        axum::Json(req): axum::Json<crate::filter_service::ProbeRequest>,
+    ) -> Response {
+        let resp = match state.filter_service.as_ref() {
+            Some(svc) => svc.probe(&req),
+            None => crate::filter_service::ProbeResponse {
+                maybe_match: Vec::new(),
+                fail_open: true,
+            },
+        };
+        (StatusCode::OK, axum::Json(resp)).into_response()
+    }
+
+    /// SHELF-G6 — `POST /textindex/probe`. Looks up an in-memory
+    /// `KeywordIndex` keyed by `(table_fqn, column)` and returns
+    /// the matching row-group ordinals. A missing index is
+    /// *not* an error: the response sets `fail_open: true` and
+    /// the caller re-issues the full scan.
+    pub async fn textindex_probe(
+        State(state): State<Arc<ServerState>>,
+        axum::Json(req): axum::Json<crate::text_index::TextProbeRequest>,
+    ) -> Response {
+        let guard = match state.text_index.read() {
+            Ok(g) => g,
+            Err(_) => {
+                return (
+                    StatusCode::OK,
+                    axum::Json(crate::text_index::TextProbeResponse {
+                        row_group_ordinals: Vec::new(),
+                        fail_open: true,
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        let key = (req.table_fqn.clone(), req.column.clone());
+        let resp = match guard.get(&key) {
+            Some(idx) => crate::text_index::TextProbeResponse {
+                row_group_ordinals: idx.maybe_match(&req.pattern).into_iter().collect(),
+                fail_open: false,
+            },
+            None => crate::text_index::TextProbeResponse {
+                row_group_ordinals: Vec::new(),
+                fail_open: true,
+            },
+        };
+        (StatusCode::OK, axum::Json(resp)).into_response()
     }
 }
 

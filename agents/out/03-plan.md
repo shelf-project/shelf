@@ -938,6 +938,19 @@ Two shim fixes shipped as part of the Trino wiring work:
 - Effort: M. Depends on: SHELF-06, SHELF-07. Owner: rust-engineer-2.
 - Out of scope: `ListObjects`, `PutObject`, SigV4 auth, virtual-hosted style (see design note).
 
+**SHELF-22a — Unix-socket mode on `shelfd:9092`** — **CLOSED (not-building)**
+Investigated as a follow-up to ADR 0012 Phase 1. Benchmarked the
+TCP-localhost hop at **331 µs / req keep-alive** (985 µs fresh-conn);
+UDS best case would save ~125–175 µs / req, i.e. ≤6 % of a single cold
+metadata-heavy query and unmeasurable on a real 30 GiB scan. Crucially,
+Trino's native S3 client (AWS SDK v2) has no UDS-capable HTTP transport,
+so shipping a UDS listener would not benefit the actual Trino read
+path without 4–8 engineer-weeks of custom `SdkHttpClient` work. The
+honest follow-ups (SHELF-29 blob-cache plugin, SHELF-17/25 range
+coalescing, a keep-alive regression check inside SHELF-27) all have
+better ROI. Full measurement table, decision log, and re-open criteria
+in `shelfd/docs/design-notes/SHELF-22a-unix-socket-mode.md`.
+
 **SHELF-23 — `shelfctl` CLI: stats, pin, evict, ring, reload** — *Closed (admin HTTP surface under `/admin/`*; shipped with SHELF-24)*
 Rust CLI binary. Talks to `shelfd`'s admin HTTP surface
 (`/admin/{ring,pin,unpin,evict,reload}`). `stats` pretty-prints

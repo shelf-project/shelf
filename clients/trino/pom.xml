@@ -29,7 +29,7 @@
         read cache. Contains ShelfFileSystem (TrinoFileSystem SPI) and
         ShelfPrefetchListener (EventListener SPI). Fail-open by construction.
     </description>
-    <url>https://github.com/penpencil-oss/shelf</url>
+    <url>https://github.com/shelf-project/shelf</url>
 
     <licenses>
         <license>

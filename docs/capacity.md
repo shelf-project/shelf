@@ -1,8 +1,9 @@
 # Shelf capacity planning
 
 Sizing formulas for `shelfd` in terms of the two-pool layout
-(ADR-0008), with a worked example for the rep-2-scale workload that
-the v0.5 gate (ADR-0010) targets.
+(ADR-0008), with worked examples for the rep-2 v0.5 gate (ADR-0010)
+target and the v1 cluster rollout (all four `penpencil` Trino
+replicas) that the compressed-canary rollout plan targets.
 
 This doc is an **estimate**. The E3 (h2 throughput), E5
 (row-group/file reduction), E7 (ring churn), and E12 (Alluxio
@@ -14,16 +15,18 @@ citation or an explicit "placeholder — refine with X".
 
 ## 1. Inputs
 
-| Symbol    | Name                                       | Phase 0 source                     |
-|-----------|--------------------------------------------|------------------------------------|
-| `W`       | Working-set size (7-day unique byte range) | E5 harness on `trino_logs`         |
-| `H_rate`  | Target cumulative hit rate                 | plan §6.4.1 = 0.71 (Alluxio)       |
-| `R_rg`    | Row-group / file byte-reduction ratio      | E5 — placeholder 0.35 (65% cut)    |
-| `N`       | Pod count                                  | config — default 3 (v0.5) → 5 (prod) |
-| `H_meta`  | DRAM required for metadata pool            | constant 5 GiB (ADR-0008)          |
-| `H_dram`  | DRAM required per pod for rowgroup pool    | `W × R_rg × (1 - H_NVMe) / N`      |
-| `H_NVMe`  | NVMe per pod (rowgroup pool)               | `W × R_rg × headroom / N`          |
-| `egress`  | Steady-state S3 GB/month after warmup      | `(1 - H_rate) × monthly_reads`     |
+
+| Symbol   | Name                                       | Phase 0 source                       |
+| -------- | ------------------------------------------ | ------------------------------------ |
+| `W`      | Working-set size (7-day unique byte range) | E5 harness on `trino_logs`           |
+| `H_rate` | Target cumulative hit rate                 | plan §6.4.1 = 0.71 (Alluxio)         |
+| `R_rg`   | Row-group / file byte-reduction ratio      | E5 — placeholder 0.35 (65% cut)      |
+| `N`      | Pod count                                  | config — default 3 (v0.5) → 5 (prod) |
+| `H_meta` | DRAM required for metadata pool            | constant 5 GiB (ADR-0008)            |
+| `H_dram` | DRAM required per pod for rowgroup pool    | `W × R_rg × (1 - H_NVMe) / N`        |
+| `H_NVMe` | NVMe per pod (rowgroup pool)               | `W × R_rg × headroom / N`            |
+| `egress` | Steady-state S3 GB/month after warmup      | `(1 - H_rate) × monthly_reads`       |
+
 
 ## 2. Sizing formulas
 
@@ -95,15 +98,17 @@ egress_wipe_GBpm = monthly_reads_GBpm        # one-month warmup at 0% hit rate
 From E12 (Alluxio baseline on rep-2, already captured) and a first-pass
 `trino_logs` inspection:
 
-| Input              | Value                  | Source                                        |
-|--------------------|------------------------|-----------------------------------------------|
-| `W` (working set)  | 1.2 TiB                | E5 placeholder — rep-2 7-day unique byte range |
-| `R_rg`             | 0.35                   | E5 placeholder (65% file→row-group reduction) |
-| `N`                | 3                      | plan §3 Phase 1 deliverable 7                  |
-| `hot_fraction_dram`| 0.10                   | BLUEPRINT §9 Foyer heuristic                   |
-| `headroom_frac`    | 0.30                   | plan §3 Phase 5                                |
-| `H_rate`           | 0.71                   | plan §6.4.1                                    |
-| `monthly_reads`    | 900 TiB                | sre-1 pulled from Trino `QueryCompletedEvent` |
+
+| Input               | Value   | Source                                         |
+| ------------------- | ------- | ---------------------------------------------- |
+| `W` (working set)   | 1.2 TiB | E5 placeholder — rep-2 7-day unique byte range |
+| `R_rg`              | 0.35    | E5 placeholder (65% file→row-group reduction)  |
+| `N`                 | 3       | plan §3 Phase 1 deliverable 7                  |
+| `hot_fraction_dram` | 0.10    | BLUEPRINT §9 Foyer heuristic                   |
+| `headroom_frac`     | 0.30    | plan §3 Phase 5                                |
+| `H_rate`            | 0.71    | plan §6.4.1                                    |
+| `monthly_reads`     | 900 TiB | sre-1 pulled from Trino `QueryCompletedEvent`  |
+
 
 Compute:
 
@@ -140,9 +145,106 @@ larger than it intuits.
 
 ---
 
-## 4. Scale triggers
+## 4. Worked example: v1 cluster target (4-replica rollout)
 
-### 4.1 Horizontal scale-up
+When the compressed-canary rollout promotes Shelf from rep-2 canary
+to all four `penpencil` Trino replicas (rep-0, rep-1, rep-2, rep-3),
+the inputs to §2 scale ~4× on the read-volume axis. `values-prod.yaml`
+already pins `replicaCount: 5` for this target; this section documents
+the underlying math and where the assumptions are load-bearing.
+
+> **Caveat — this is an extrapolation, not a measurement.** The rep-2
+> `monthly_reads` figure (900 TiB/month) is from an sre-1 pull of
+> `QueryCompletedEvent` aggregate bytes. Per-replica figures for
+> rep-0 / rep-1 / rep-3 are captured as the `sre1-workload-confirm`
+> rollout pre-req in `docs/rollout-v1.md` — do not ship the rollout
+> until those numbers replace the 4× assumption below.
+
+
+| Input               | Value       | Source                                                          |
+| ------------------- | ----------- | --------------------------------------------------------------- |
+| `W` (working set)   | **4.8 TiB** | 4× rep-2 E5 placeholder — confirm per-replica with sre-1        |
+| `R_rg`              | 0.35        | same as §3; E5 gives one number for now                         |
+| `N`                 | **5**       | `values-prod.yaml` → `replicaCount: 5` (plan §3 Phase 5)        |
+| `hot_fraction_dram` | 0.10        | BLUEPRINT §9 Foyer heuristic                                    |
+| `headroom_frac`     | 0.30        | plan §3 Phase 5                                                 |
+| `H_rate`            | 0.71        | plan §6.4.1 (Alluxio baseline; Shelf's own steady-state TBD)    |
+| `monthly_reads`     | **3.6 PiB** | 4× rep-2; **refine with sre-1 per-replica pull before cutover** |
+
+
+Compute (plug into §2 formulas unchanged):
+
+```
+row_group_bytes = 4.8 TiB × 0.35            = 1.68 TiB
+per_pod_hot     = 1.68 TiB / 5              = 345 GiB
+H_dram          = 345 GiB × 0.10            = 35 GiB   (per pod)
+H_NVMe          = 345 GiB × 1.30            = 448 GiB  (per pod)
+```
+
+Chart defaults (`values-prod.yaml`):
+
+- `storage.size = 500 GiB` per pod → **~11 %** NVMe headroom vs. the
+  448 GiB target. That is tighter than the v0.5 rep-2 case (63 %
+  headroom) and sits below the 30 % `headroom_frac` the formula
+  assumed. **Action**: either bump `storage.size` to 640 GiB (keeps
+  30 % headroom) *or* accept tighter headroom and commit to daily
+  NVMe-utilisation monitoring for the first 30 days. Prefer the
+  former; the StorageClass is `local-nvme` and the larger ask is
+  almost never node-bound at the Karpenter pool.
+
+```
+mem_req         = 5 + 35 + 8                = 48 GiB   (per pod)
+```
+
+This matches `resources.requests.memory = 48Gi` in the chart default
+exactly — no bump needed.
+
+```
+egress_steady   = 3.6 PiB × (1 - 0.71)      ≈ 1.04 PiB/month
+egress_wipe     = 3.6 PiB                   = 3.6 PiB/month (one-off)
+```
+
+GET request-count cost at 256 KiB median range:
+`1.04 PiB / 256 KiB ≈ 4.5 B GET/month ≈ $1 800/month`. Roughly 4× the
+rep-2 figure — proportional, but worth flagging at finance-review
+level because the 1.1 B → 4.5 B jump crosses an attention threshold
+for most request-volume dashboards.
+
+### 4.1 Per-replica cold-start burst
+
+At rollout time, each replica's first 2-4 h post-cutover serves
+~100 % miss rate until shelfd's NVMe is warm. Worst case (no pre-warm):
+
+```
+cold_burst_bytes = per_replica_W × R_rg    ≈ 1.2 TiB × 0.35 = 420 GiB / replica
+cold_burst_get   = 420 GiB / 256 KiB       ≈ 1.7 M GET in 2-4 h
+```
+
+This is small compared to steady-state traffic, but concentrated in a
+short window. It will trip `ShelfReadPathP99Degraded` as a false
+positive unless the pre-warm script (`make prewarm`) runs first;
+target a 60 % hit-ratio floor at T+0 to stay below the alert.
+
+### 4.2 Why `replicaCount=5` and not `=4` (one per Trino replica)
+
+HRW routing distributes keys evenly in expectation, not
+per-Trino-replica. Keeping the pod count decoupled from the Trino
+replica count lets us:
+
+- Scale shelfd independently when the working set grows past the `W`
+  here (§5 scale triggers).
+- Survive a single-pod loss without coupling to a single Trino
+  replica being "in charge" of a pod.
+- Match anti-affinity to AZs rather than to Trino replicas —
+  `values-prod.yaml` requires hostname anti-affinity and prefers zone
+  anti-affinity; with 5 pods and typical 3-AZ spreads that lands
+  ≥ 2 per zone.
+
+---
+
+## 5. Scale triggers
+
+### 5.1 Horizontal scale-up
 
 Trigger if any of the following holds for > 24 h:
 
@@ -155,7 +257,7 @@ Trigger if any of the following holds for > 24 h:
 Action: `scale-up.md`. Expected rebalance cost: `1/(N+1)` of keys
 re-fetch from S3. Usually negligible to users.
 
-### 4.2 Vertical scale-up
+### 5.2 Vertical scale-up
 
 Trigger only if horizontal scale-up is not possible (node-pool
 constraint):
@@ -167,7 +269,7 @@ constraint):
 Action: bump `resources.requests` + `resources.limits` via Helm
 overlay. This requires a pod-restart-per-pod — use the PDB.
 
-### 4.3 Horizontal scale-down
+### 5.3 Horizontal scale-down
 
 Trigger if:
 
@@ -179,7 +281,7 @@ Action: `scale-down.md`.
 
 ---
 
-## 5. Pin list budget
+## 6. Pin list budget
 
 Pinned bytes per pod should stay under **20% of NVMe capacity** in the
 steady state. At 500 GiB NVMe per pod that means ≤ 100 GiB pinned.
@@ -190,7 +292,7 @@ that tipped it over.
 
 ---
 
-## 6. Known gaps
+## 7. Known gaps
 
 - `R_rg` is a single number here. In reality it varies by query
   cohort (dashboard vs ad-hoc vs dbt). Phase-4 splits this and tunes
@@ -200,3 +302,8 @@ that tipped it over.
   number; update this doc immediately after gate evaluation.
 - Multi-region egress costs are out of scope for v1 (single-region
   deployment). `regional-outage.md` covers the operational story.
+- The §4 extrapolation assumes per-replica workloads are roughly equal
+  in volume. They almost certainly are not — rep-2 is already the
+  canary target because it has the cleanest workload signal.
+  Per-replica `monthly_reads` from sre-1 replaces the 4× multiplier
+  before rollout.

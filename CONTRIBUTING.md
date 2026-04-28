@@ -10,7 +10,7 @@ This is a short, operational guide. The goals are:
 
 ## Code of conduct
 
-All participation is governed by the [Contributor Covenant 2.1](./CODE_OF_CONDUCT.md). Violations go to `conduct@shelf.example` (placeholder — to be replaced before OSS launch per [docs/launch/playbook.md](./docs/launch/playbook.md)).
+All participation is governed by the [Contributor Covenant 2.1](./CODE_OF_CONDUCT.md). Violations go to `conduct@shelf-project.dev`.
 
 ## Governance and decision process
 
@@ -35,7 +35,7 @@ Optional but recommended: `cargo-nextest`, `cargo-deny`, `cargo-audit`, `mdforma
 Clone and bootstrap:
 
 ```bash
-git clone https://github.com/penpencil-oss/shelf.git      # TODO_SHELF-01 — final URL
+git clone https://github.com/shelf-project/shelf.git
 cd shelf
 rustup show                                               # installs pinned toolchain
 ```

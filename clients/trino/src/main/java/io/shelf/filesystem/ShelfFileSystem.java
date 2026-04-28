@@ -226,10 +226,50 @@ public final class ShelfFileSystem
         return new ShelfInputFile(inner, fetcher, resolver, poolFor(location));
     }
 
+    // Track D1 — pool-routing extension. Iceberg produces a handful of
+    // metadata formats that the original BLUEPRINT §6.1 heuristic
+    // (".json" / ".avro") misses:
+    //
+    //   *.stats.puffin / *.puffin          — Puffin statistics blobs
+    //                                        (Iceberg v3+ CDC + NDV stats)
+    //   *-pos-deletes-*.parquet,
+    //   *-positions.parquet                — position-delete files
+    //   *-equality-deletes-*.parquet,
+    //   *-equality.parquet                 — equality-delete files
+    //
+    // All five are small (< 10 MB typical), queried on *every* read of
+    // the table they describe, and benefit from the metadata pool's
+    // FrozenHot DRAM behaviour. Leaving them on the rowgroup hybrid
+    // pool is wasteful — they thrash against row-group bytes, get
+    // evicted by S3-FIFO, and re-fetched from S3 on the next query.
+    //
+    // Parquet page-index + bloom-filter slices also belong here but
+    // are byte-range extractions from inside a larger .parquet file;
+    // routing for those is D3, driven by the plugin's prefetch
+    // extractor rather than the filename heuristic.
     static Pool poolFor(Location location)
     {
         String path = location.path().toLowerCase(Locale.ROOT);
+
+        // Iceberg + HMS metadata: manifest-list, manifests, snapshot,
+        // partition statistics, historical metadata.json.
         if (path.endsWith(".json") || path.endsWith(".avro") || path.endsWith("metadata.json")) {
+            return Pool.METADATA;
+        }
+        // Puffin statistics — Iceberg v2+ NDV + CDC metadata. See
+        // https://iceberg.apache.org/puffin-spec/.
+        if (path.endsWith(".puffin") || path.endsWith(".stats.puffin") || path.endsWith(".stats")) {
+            return Pool.METADATA;
+        }
+        // Position-delete + equality-delete files. These are Parquet
+        // by extension but semantically metadata: they're read on
+        // every scan against the table and are small.
+        if (path.endsWith("-pos-deletes.parquet")
+                || path.endsWith("-positions.parquet")
+                || path.endsWith("-equality-deletes.parquet")
+                || path.endsWith("-equality.parquet")
+                || path.contains("/deletes/")
+                || path.contains("-deletes-")) {
             return Pool.METADATA;
         }
         return Pool.ROWGROUP;

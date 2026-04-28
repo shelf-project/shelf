@@ -241,9 +241,7 @@ pub trait HostResolver: Send + Sync + 'static {
         &'a self,
         host: &'a str,
         port: u16,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = crate::Result<Vec<IpAddr>>> + Send + 'a>,
-    >;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::Result<Vec<IpAddr>>> + Send + 'a>>;
 }
 
 /// Default [`HostResolver`] backed by `tokio::net::lookup_host`.
@@ -255,9 +253,8 @@ impl HostResolver for TokioResolver {
         &'a self,
         host: &'a str,
         port: u16,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = crate::Result<Vec<IpAddr>>> + Send + 'a>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::Result<Vec<IpAddr>>> + Send + 'a>>
+    {
         Box::pin(async move {
             let addrs = tokio::net::lookup_host((host, port))
                 .await
@@ -370,8 +367,19 @@ impl Resolver {
     /// Await the spawned task. Returns once the resolver loop has
     /// observed `shutdown` and exited cleanly. Panics in the spawned
     /// task surface here as `Err(_)`.
-    pub async fn join(&self) -> crate::Result<()> {
+    ///
+    /// **One-shot.** The internal `JoinHandle` is consumed on the
+    /// first call; calling a second time is almost certainly a bug
+    /// (the second caller would silently return `Ok(())` without
+    /// actually awaiting anything). Named `join_once` rather than
+    /// `join` so the call-site is self-documenting, and a
+    /// `debug_assert!` catches accidental double-calls in tests.
+    pub async fn join_once(&self) -> crate::Result<()> {
         let handle = self.handle.lock().take();
+        debug_assert!(
+            handle.is_some(),
+            "Resolver::join_once called more than once on the same Resolver",
+        );
         if let Some(h) = handle {
             h.await.map_err(|e| {
                 if e.is_cancelled() {
@@ -453,9 +461,12 @@ async fn refresh_once(
     // Probe every IP concurrently. Each probe is independently
     // bounded by `cfg.stats_timeout`; a slow peer cannot stall the
     // round.
-    let probes = ips
-        .iter()
-        .map(|ip| async move { (*ip, probe.probe(*ip, cfg.stats_port, cfg.stats_timeout).await) });
+    let probes = ips.iter().map(|ip| async move {
+        (
+            *ip,
+            probe.probe(*ip, cfg.stats_port, cfg.stats_timeout).await,
+        )
+    });
     let results = futures::future::join_all(probes).await;
 
     let mut snapshots: Vec<(IpAddr, Stats)> = Vec::with_capacity(results.len());
@@ -505,11 +516,21 @@ async fn refresh_once(
 ///   StatefulSet pod rename mid-rollout when DNS still has both
 ///   the old and new IP).
 ///
+/// On the duplicate path, "first" is whichever IP appeared earlier
+/// in `snapshots` — typically lexical-smallest because the resolver
+/// collects from a `BTreeSet<IpAddr>`. That's not necessarily the
+/// warmer or freshest pod, so we emit a `warn!` whenever the dedup
+/// fires; per plan B6 the rate of this branch is the operationally
+/// useful signal, and the existing `draining: true` filter above
+/// already catches the common rolling-restart case.
+///
 /// Members are returned in `pod_id` order so `Router::update`
 /// sees a deterministic input — handy for snapshot tests and for
 /// `/admin/ring` to render reproducibly.
 pub fn build_members(snapshots: &[(IpAddr, Stats)], cfg: &ResolverConfig) -> Vec<Member> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut first_ip_for: std::collections::HashMap<String, IpAddr> =
+        std::collections::HashMap::new();
     let mut members: Vec<Member> = Vec::with_capacity(snapshots.len());
     for (ip, stats) in snapshots {
         if stats.draining {
@@ -519,8 +540,17 @@ pub fn build_members(snapshots: &[(IpAddr, Stats)], cfg: &ResolverConfig) -> Vec
             continue;
         }
         if !seen.insert(stats.pod_id.clone()) {
+            let kept = first_ip_for.get(&stats.pod_id).copied();
+            tracing::warn!(
+                pod_id = %stats.pod_id,
+                kept_ip = ?kept,
+                dropped_ip = %ip,
+                "membership: duplicate pod_id from DNS, keeping first IP — \
+                 possible mid-rollout pod rename, monitor if persistent",
+            );
             continue;
         }
+        first_ip_for.insert(stats.pod_id.clone(), *ip);
         let endpoint = match ip {
             IpAddr::V4(v4) => format!("{v4}:{}", cfg.data_port),
             IpAddr::V6(v6) => format!("[{v6}]:{}", cfg.data_port),
@@ -619,9 +649,18 @@ mod tests {
     fn build_members_is_deterministic_order() {
         let cfg = cfg();
         let snaps = vec![
-            (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), stats("shelf-2", 14 << 30, false)),
-            (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), stats("shelf-0", 14 << 30, false)),
-            (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), stats("shelf-1", 14 << 30, false)),
+            (
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+                stats("shelf-2", 14 << 30, false),
+            ),
+            (
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                stats("shelf-0", 14 << 30, false),
+            ),
+            (
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                stats("shelf-1", 14 << 30, false),
+            ),
         ];
         let members = build_members(&snaps, &cfg);
         let ids: Vec<&str> = members.iter().map(|m| m.id.as_str()).collect();
@@ -633,9 +672,18 @@ mod tests {
     fn build_members_filters_draining() {
         let cfg = cfg();
         let snaps = vec![
-            (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), stats("shelf-0", 14 << 30, false)),
-            (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), stats("shelf-1", 14 << 30, true)),
-            (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), stats("shelf-2", 14 << 30, false)),
+            (
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                stats("shelf-0", 14 << 30, false),
+            ),
+            (
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                stats("shelf-1", 14 << 30, true),
+            ),
+            (
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+                stats("shelf-2", 14 << 30, false),
+            ),
         ];
         let members = build_members(&snaps, &cfg);
         let ids: Vec<&str> = members.iter().map(|m| m.id.as_str()).collect();
@@ -646,9 +694,18 @@ mod tests {
     fn build_members_drops_empty_pod_id_and_duplicates() {
         let cfg = cfg();
         let snaps = vec![
-            (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), stats("", 14 << 30, false)),
-            (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), stats("shelf-1", 14 << 30, false)),
-            (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), stats("shelf-1", 14 << 30, false)),
+            (
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                stats("", 14 << 30, false),
+            ),
+            (
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                stats("shelf-1", 14 << 30, false),
+            ),
+            (
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+                stats("shelf-1", 14 << 30, false),
+            ),
         ];
         let members = build_members(&snaps, &cfg);
         assert_eq!(members.len(), 1);
@@ -715,9 +772,8 @@ mod tests {
             ip: IpAddr,
             _port: u16,
             _timeout: Duration,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = crate::Result<Stats>> + Send + 'a>,
-        > {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::Result<Stats>> + Send + 'a>>
+        {
             let answer = self.responses.get(&ip).cloned();
             Box::pin(async move {
                 answer.ok_or_else(|| crate::Error::Membership(format!("no canned stats for {ip}")))
@@ -770,7 +826,7 @@ mod tests {
         assert_eq!(ids, vec!["shelf-0", "shelf-1", "shelf-2"]);
 
         shutdown.cancel();
-        resolver.join().await.expect("clean join");
+        resolver.join_once().await.expect("clean join");
     }
 
     #[tokio::test]
@@ -814,7 +870,7 @@ mod tests {
         assert_eq!(ids, vec!["shelf-0"]);
 
         shutdown.cancel();
-        resolver.join().await.expect("clean join");
+        resolver.join_once().await.expect("clean join");
     }
 
     #[tokio::test]
@@ -857,7 +913,7 @@ mod tests {
         );
 
         shutdown.cancel();
-        resolver.join().await.expect("clean join");
+        resolver.join_once().await.expect("clean join");
     }
 
     #[tokio::test]
@@ -898,7 +954,7 @@ mod tests {
         );
 
         shutdown.cancel();
-        resolver.join().await.expect("clean join");
+        resolver.join_once().await.expect("clean join");
     }
 
     #[tokio::test]
@@ -930,7 +986,7 @@ mod tests {
         assert!(router.view().members().is_empty());
 
         shutdown.cancel();
-        resolver.join().await.expect("clean join");
+        resolver.join_once().await.expect("clean join");
     }
 
     #[tokio::test]
@@ -982,6 +1038,6 @@ mod tests {
         );
 
         shutdown.cancel();
-        resolver.join().await.expect("clean join");
+        resolver.join_once().await.expect("clean join");
     }
 }

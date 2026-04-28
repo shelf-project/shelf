@@ -17,7 +17,12 @@ spec:
     matchLabels:
       {{- include "shelf.selectorLabels" . | nindent 6 }}
   endpoints:
-    - port: metrics
+    # shelfd binds a single HTTP listener on the data plane (port `data`)
+    # that serves `/healthz`, `/readyz`, `/metrics`, `/stats`, `/admin/*`
+    # and `/ui`. The declared `metrics` (9091) + `admin` (9093) ports in
+    # service.yaml are reserved for a future dedicated control-plane
+    # listener but are not bound by current shelfd builds.
+    - port: data
       interval: {{ .Values.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
       path: /metrics

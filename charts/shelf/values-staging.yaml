@@ -1,6 +1,8 @@
-# Staging overlay — 3-pod StatefulSet, reduced NVMe, canary admission.
+# Staging overlay — 3-pod StatefulSet on EBS-backed PVCs, mirrors the
+# production shape so chaos drills exercise the production code path.
 #
-# Target: staging EKS cluster (mirrors rep-2 shape). Runs chaos drills.
+# Treat this file as a starting template; replace bucket names, region,
+# and IRSA role ARN to match your staging environment.
 
 replicaCount: 3
 
@@ -12,7 +14,7 @@ image:
 serviceAccount:
   create: true
   annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::000000000000:role/shelf-staging-s3
+    eks.amazonaws.com/role-arn: arn:aws:iam::000000000000:role/shelf-staging-s3-read
 
 resources:
   requests:
@@ -36,16 +38,16 @@ cache:
   admission:
     model:
       enabled: false
-      s3Uri: s3://penpencil-shelf-staging-config/admission-model.onnx
+      s3Uri: ""
   pinList:
-    s3Uri: s3://penpencil-shelf-staging-config/pin_list.json
+    s3Uri: ""
 
 origin:
-  bucket: penpencil-cdp-staging
-  region: ap-south-1
+  bucket: ""
+  region: us-east-1
 
 trino:
-  namespace: trino-db-staging
+  namespace: trino-staging
 
 networkPolicy:
   enabled: true

@@ -92,6 +92,13 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // forces an immediate exit). See `spawn_signal_handler` below.
     let shutdown = CancellationToken::new();
 
+    // Track G-11 — rolling-hit-ratio sampler + cold-start warm-up SLI.
+    // Detached: the task exits on shutdown, no graceful join needed.
+    let _warm_sampler = shelfd::warm_sampler::spawn(
+        shelfd::warm_sampler::DEFAULT_WARM_THRESHOLD_BPS,
+        shutdown.clone(),
+    );
+
     // SHELF-24: construct the pin-list loader BEFORE building
     // `ServerState` so the resulting `ReloadHandle` can be threaded
     // through `with_reload_handle`. The loader runs regardless of
@@ -234,7 +241,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // Wait for the resolver loop to observe shutdown and exit so we
     // don't race the `JoinHandle` drop in `Resolver::Drop`.
     if let Some(r) = resolver.as_ref() {
-        if let Err(e) = r.join().await {
+        if let Err(e) = r.join_once().await {
             tracing::warn!(error = %e, "resolver task did not exit cleanly");
         }
     }

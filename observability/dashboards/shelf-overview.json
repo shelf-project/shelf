@@ -18,10 +18,10 @@
   "graphTooltip": 1,
   "id": null,
   "links": [
-    {"title": "Runbook: hit rate low",     "url": "https://runbooks.penpencil.internal/shelf/shelf-hit-rate-too-low",  "type": "link", "icon": "external link"},
-    {"title": "Runbook: fall-through",     "url": "https://runbooks.penpencil.internal/shelf/shelf-fall-through-surge", "type": "link", "icon": "external link"},
-    {"title": "Runbook: NVMe high",        "url": "https://runbooks.penpencil.internal/shelf/shelf-nvme-usage-high",    "type": "link", "icon": "external link"},
-    {"title": "Runbook: circuit breaker",  "url": "https://runbooks.penpencil.internal/shelf/circuit-breaker-open",     "type": "link", "icon": "external link"}
+    {"title": "Runbook: hit rate low",     "url": "https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-hit-rate-too-low.md",  "type": "link", "icon": "external link"},
+    {"title": "Runbook: fall-through",     "url": "https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-fall-through-surge.md", "type": "link", "icon": "external link"},
+    {"title": "Runbook: NVMe high",        "url": "https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-nvme-usage-high.md",    "type": "link", "icon": "external link"},
+    {"title": "Runbook: circuit breaker",  "url": "https://github.com/shelf-project/shelf/blob/main/runbooks/circuit-breaker-open.md",     "type": "link", "icon": "external link"}
   ],
   "liveNow": false,
   "panels": [

@@ -394,7 +394,7 @@ public final class ShelfConfig
      * {@link io.shelf.client.FooterPrefetcher} and BLUEPRINT §7.3. A
      * value of {@value #DEFAULT_FOOTER_PREFETCH_KIB} KiB covers the
      * Parquet footer (metadata length + magic, footer thrift payload)
-     * for essentially every Iceberg file in the penpencil fleet.
+     * for essentially every typical Iceberg file in production fleets.
      */
     public int getFooterPrefetchKib()
     {

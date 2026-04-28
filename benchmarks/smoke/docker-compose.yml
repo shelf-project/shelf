@@ -100,6 +100,12 @@ services:
     build:
       context: ../..
       dockerfile: benchmarks/smoke/Dockerfile.shelfd
+      args:
+        # Forwarded into the builder stage. Default: empty (no
+        # features, stock image). Set `SHELFD_FEATURES=ui` in the
+        # shell (e.g. `SHELFD_FEATURES=ui make smoke-up`) to bake the
+        # embedded admin UI in, reachable at http://127.0.0.1:9091/ui.
+        SHELFD_FEATURES: "${SHELFD_FEATURES:-}"
     container_name: shelf-smoke-shelfd
     networks: [shelf-smoke]
     depends_on:

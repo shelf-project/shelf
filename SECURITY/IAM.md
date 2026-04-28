@@ -174,8 +174,8 @@ convention.
         "s3:GetObject"
       ],
       "Resource": [
-        "arn:aws:s3:::pw-data-cdp-prod-gold-layer/cdp/icesheet/silver_offline_event_data_2026/*",
-        "arn:aws:s3:::pw-data-cdp-prod-gold-layer/cdp/icesheet/silver_offline_event_data_2026/_metadata/*"
+        "arn:aws:s3:::example-prod-gold-layer/cdp/icesheet/silver_offline_event_data_2026/*",
+        "arn:aws:s3:::example-prod-gold-layer/cdp/icesheet/silver_offline_event_data_2026/_metadata/*"
       ]
     }
   ]

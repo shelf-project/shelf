@@ -21,13 +21,13 @@
     {
       "title": "shelfd metric dictionary",
       "type": "link",
-      "url": "https://github.com/penpencil-oss/shelf/blob/main/shelfd/docs/metrics.md",
+      "url": "https://github.com/shelf-project/shelf/blob/main/shelfd/docs/metrics.md",
       "targetBlank": true
     },
     {
       "title": "SHELF-27 design note",
       "type": "link",
-      "url": "https://github.com/penpencil-oss/shelf/blob/main/shelfd/docs/design-notes/SHELF-27-observability-dashboard.md",
+      "url": "https://github.com/shelf-project/shelf/blob/main/shelfd/docs/design-notes/SHELF-27-observability-dashboard.md",
       "targetBlank": true
     }
   ],
@@ -37,7 +37,7 @@
       "id": 1,
       "type": "stat",
       "title": "Hit Ratio (5m) — overall + per pool",
-      "description": "sum(rate(shelf_hits_total[5m])) / (hits + misses). Big number answers 'is the cache earning its keep right now?'. Per-pool rows confirm both metadata (footer/manifest) and rowgroup pools are hitting; the v0.5 gate wants overall ≥ 0.71.",
+      "description": "sum(rate(shelf_hits_total{replica=~\"$replica\"}[5m])) / (hits + misses). Big number answers 'is the cache earning its keep right now?'. Per-pool rows confirm both metadata (footer/manifest) and rowgroup pools are hitting; the v0.5 gate wants overall ≥ 0.71.",
       "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "fieldConfig": {
@@ -67,17 +67,17 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(shelf_hits_total[5m])) / clamp_min(sum(rate(shelf_hits_total[5m])) + sum(rate(shelf_misses_total[5m])), 1e-9)",
+          "expr": "sum(rate(shelf_hits_total{replica=~\"$replica\"}[5m])) / clamp_min(sum(rate(shelf_hits_total{replica=~\"$replica\"}[5m])) + sum(rate(shelf_misses_total{replica=~\"$replica\"}[5m])), 1e-9)",
           "legendFormat": "overall"
         },
         {
           "refId": "B",
-          "expr": "sum(rate(shelf_hits_total{pool=\"metadata\"}[5m])) / clamp_min(sum(rate(shelf_hits_total{pool=\"metadata\"}[5m])) + sum(rate(shelf_misses_total{pool=\"metadata\"}[5m])), 1e-9)",
+          "expr": "sum(rate(shelf_hits_total{replica=~\"$replica\",pool=\"metadata\"}[5m])) / clamp_min(sum(rate(shelf_hits_total{replica=~\"$replica\",pool=\"metadata\"}[5m])) + sum(rate(shelf_misses_total{replica=~\"$replica\",pool=\"metadata\"}[5m])), 1e-9)",
           "legendFormat": "metadata"
         },
         {
           "refId": "C",
-          "expr": "sum(rate(shelf_hits_total{pool=\"rowgroup\"}[5m])) / clamp_min(sum(rate(shelf_hits_total{pool=\"rowgroup\"}[5m])) + sum(rate(shelf_misses_total{pool=\"rowgroup\"}[5m])), 1e-9)",
+          "expr": "sum(rate(shelf_hits_total{replica=~\"$replica\",pool=\"rowgroup\"}[5m])) / clamp_min(sum(rate(shelf_hits_total{replica=~\"$replica\",pool=\"rowgroup\"}[5m])) + sum(rate(shelf_misses_total{replica=~\"$replica\",pool=\"rowgroup\"}[5m])), 1e-9)",
           "legendFormat": "rowgroup"
         }
       ]
@@ -114,7 +114,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(shelf_request_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(shelf_request_seconds_bucket{replica=~\"$replica\"}[5m])))",
           "legendFormat": "p99"
         }
       ]
@@ -123,7 +123,7 @@
       "id": 3,
       "type": "stat",
       "title": "Miss Volume (1m)",
-      "description": "sum(rate(shelf_misses_total[1m])). Sustained high miss rate means warmup isn't done, rotation just happened, or pin list drifted. Pair with the per-pool hit-ratio panel below.",
+      "description": "sum(rate(shelf_misses_total{replica=~\"$replica\"}[1m])). Sustained high miss rate means warmup isn't done, rotation just happened, or pin list drifted. Pair with the per-pool hit-ratio panel below.",
       "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "fieldConfig": {
@@ -152,7 +152,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(shelf_misses_total[1m]))",
+          "expr": "sum(rate(shelf_misses_total{replica=~\"$replica\"}[1m]))",
           "legendFormat": "misses req/s"
         }
       ]
@@ -161,7 +161,7 @@
       "id": 4,
       "type": "stat",
       "title": "Error Rate (5m)",
-      "description": "sum(rate(shelf_request_seconds_count{status=~\"5..\"}[5m])) / sum(rate(shelf_request_seconds_count[5m])). NOTE: shelf_request_seconds does NOT currently carry a `status` label — its labels are `path` and `outcome` (values: hit, miss, bad_request, not_found, error, ok). Until a `status` (or `outcome=~\"error\"`) surface is wired on the histogram, this panel will render 'No data'. Tracked as a follow-up in shelfd/docs/design-notes/SHELF-27-observability-dashboard.md. The ShelfReadPathHighErrorRate alert uses the same literal expression for consistency. TODO: switch to `outcome=~\"error\"` once metrics.md moves that selector into the supported set, or introduce a dedicated `shelf_http_requests_total{status}` counter.",
+      "description": "sum(rate(shelf_request_seconds_count{replica=~\"$replica\",status=~\"5..\"}[5m])) / sum(rate(shelf_request_seconds_count[5m])). NOTE: shelf_request_seconds does NOT currently carry a `status` label — its labels are `path` and `outcome` (values: hit, miss, bad_request, not_found, error, ok). Until a `status` (or `outcome=~\"error\"`) surface is wired on the histogram, this panel will render 'No data'. Tracked as a follow-up in shelfd/docs/design-notes/SHELF-27-observability-dashboard.md. The ShelfReadPathHighErrorRate alert uses the same literal expression for consistency. TODO: switch to `outcome=~\"error\"` once metrics.md moves that selector into the supported set, or introduce a dedicated `shelf_http_requests_total{status}` counter.",
       "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "fieldConfig": {
@@ -191,7 +191,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(shelf_request_seconds_count{status=~\"5..\"}[5m])) / clamp_min(sum(rate(shelf_request_seconds_count[5m])), 1e-9)",
+          "expr": "sum(rate(shelf_request_seconds_count{replica=~\"$replica\",status=~\"5..\"}[5m])) / clamp_min(sum(rate(shelf_request_seconds_count[5m])), 1e-9)",
           "legendFormat": "5xx share"
         }
       ]
@@ -218,7 +218,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (pool) (rate(shelf_hits_total[5m])) / clamp_min(sum by (pool) (rate(shelf_hits_total[5m])) + sum by (pool) (rate(shelf_misses_total[5m])), 1e-9)",
+          "expr": "sum by (pool) (rate(shelf_hits_total{replica=~\"$replica\"}[5m])) / clamp_min(sum by (pool) (rate(shelf_hits_total{replica=~\"$replica\"}[5m])) + sum by (pool) (rate(shelf_misses_total{replica=~\"$replica\"}[5m])), 1e-9)",
           "legendFormat": "{{pool}}"
         }
       ]
@@ -243,17 +243,17 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by (le, path) (rate(shelf_request_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.5, sum by (le, path) (rate(shelf_request_seconds_bucket{replica=~\"$replica\"}[5m])))",
           "legendFormat": "p50 — {{path}}"
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le, path) (rate(shelf_request_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, path) (rate(shelf_request_seconds_bucket{replica=~\"$replica\"}[5m])))",
           "legendFormat": "p95 — {{path}}"
         },
         {
           "refId": "C",
-          "expr": "histogram_quantile(0.99, sum by (le, path) (rate(shelf_request_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, path) (rate(shelf_request_seconds_bucket{replica=~\"$replica\"}[5m])))",
           "legendFormat": "p99 — {{path}}"
         }
       ]
@@ -278,12 +278,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (pool) (rate(shelf_head_hits_total[1m]))",
+          "expr": "sum by (pool) (rate(shelf_head_hits_total{replica=~\"$replica\"}[1m]))",
           "legendFormat": "head hit — {{pool}}"
         },
         {
           "refId": "B",
-          "expr": "sum by (pool) (rate(shelf_head_misses_total[1m]))",
+          "expr": "sum by (pool) (rate(shelf_head_misses_total{replica=~\"$replica\"}[1m]))",
           "legendFormat": "head miss — {{pool}}"
         }
       ]
@@ -292,7 +292,7 @@
       "id": 8,
       "type": "timeseries",
       "title": "Origin call-rate (success vs failure)",
-      "description": "Origin (S3) traffic split. NOTE: the planned `shelf_origin_requests_total{verb,status}` counter is not yet emitted (see shelfd/docs/metrics.md 'Planned' table, owning ticket SHELF-05 obs pass). Until it lands we proxy 'failure' via shelfd_error_total{component=\"origin\"} and 'success' via the miss-rate (misses are the calls that actually reach S3). TODO: rewire when shelf_origin_requests_total emits.",
+      "description": "Origin (S3) traffic split. NOTE: the planned `shelf_origin_requests_total{verb,status}` counter is not yet emitted (see shelfd/docs/metrics.md 'Planned' table, owning ticket SHELF-05 obs pass). Until it lands we proxy 'failure' via shelfd_error_total{replica=~\"$replica\",component=\"origin\"} and 'success' via the miss-rate (misses are the calls that actually reach S3). TODO: rewire when shelf_origin_requests_total emits.",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "fieldConfig": {
@@ -308,12 +308,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(shelf_misses_total[1m]))",
+          "expr": "sum(rate(shelf_misses_total{replica=~\"$replica\"}[1m]))",
           "legendFormat": "origin GET (proxy: miss-rate)"
         },
         {
           "refId": "B",
-          "expr": "sum by (kind) (rate(shelfd_error_total{component=\"origin\"}[1m]))",
+          "expr": "sum by (kind) (rate(shelfd_error_total{replica=~\"$replica\",component=\"origin\"}[1m]))",
           "legendFormat": "origin error — {{kind}}"
         }
       ]
@@ -349,7 +349,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(shelf_pinned_bytes)",
+          "expr": "sum(shelf_pinned_bytes{replica=~\"$replica\"})",
           "legendFormat": "pinned"
         }
       ]
@@ -375,7 +375,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(shelf_singleflight_followers_total[1m]))",
+          "expr": "sum(rate(shelf_singleflight_followers_total{replica=~\"$replica\"}[1m]))",
           "legendFormat": "follower coalesced"
         }
       ]
@@ -401,6 +401,24 @@
         "regex": "",
         "skipUrlSync": false,
         "type": "datasource"
+      },
+      {
+        "current": {"selected": true, "text": "All", "value": "$__all"},
+        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+        "definition": "label_values(shelf_hits_total, replica)",
+        "description": "Trino replica (rep-0 / rep-1 / rep-2 / rep-3). Populated from the `replica` label on shelfd metrics, which is driven by the `X-Shelf-Client-Replica` header set in each Trino replica's iceberg.properties (see SHELF-27a design note). Defaults to All; switch to a specific replica during canary to isolate its read-path behaviour.",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Replica",
+        "multi": true,
+        "name": "replica",
+        "options": [],
+        "query": {"query": "label_values(shelf_hits_total, replica)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
       }
     ]
   },

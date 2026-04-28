@@ -39,7 +39,7 @@ fs.shelf.circuit_breaker.open_window_ms=10000
 ```yaml
 replicaCount: 3
 image:
-  repository: ghcr.io/penpencil-oss/shelfd
+  repository: ghcr.io/shelf-project/shelfd
   tag: scaffold
   pullPolicy: IfNotPresent
 

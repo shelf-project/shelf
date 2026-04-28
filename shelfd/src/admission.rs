@@ -170,6 +170,8 @@ mod tests {
                 dram_bytes: 4 * 1024 * 1024,
                 nvme_dir: PathBuf::from("/tmp/unused"),
                 nvme_bytes: 0,
+                eviction_policy: crate::config::EvictionPolicy::default(),
+                disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
             },
         };
         let store = FoyerStore::open(&pools).await.expect("open");
@@ -184,7 +186,7 @@ mod tests {
         assert!(store.pin(Pool::RowGroup, &key));
 
         // Evict the cached bytes so the fetch path is exercised.
-        assert!(store.evict(Pool::RowGroup, &key));
+        assert!(store.evict(Pool::RowGroup, &key).await);
 
         // Size-threshold policy that rejects everything > 16 bytes
         // unless pinned.

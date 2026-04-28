@@ -102,6 +102,8 @@ pub fn test_config() -> (OriginConfig, PoolsConfig, AdmissionConfig) {
             dram_bytes: 16 * 1024 * 1024,
             nvme_dir: PathBuf::from("/tmp/it_unused"),
             nvme_bytes: 0,
+            eviction_policy: shelfd::config::EvictionPolicy::default(),
+            disk_cache: Default::default(),
         },
     };
     let admission = AdmissionConfig {

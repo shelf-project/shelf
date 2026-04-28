@@ -41,6 +41,7 @@ fn hybrid_pools(nvme_dir: std::path::PathBuf, nvme_bytes: u64) -> PoolsConfig {
             nvme_dir,
             nvme_bytes,
             eviction_policy: shelfd::config::EvictionPolicy::default(),
+            disk_cache: shelfd::config::RowGroupDiskCacheConfig::default(),
         },
     }
 }

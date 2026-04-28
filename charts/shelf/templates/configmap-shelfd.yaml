@@ -35,6 +35,21 @@ data:
         nvme_dir: {{ .Values.storage.mountPath | quote }}
         nvme_bytes: {{ .Values.cache.pools.rowgroup.nvmeSizeBytes | int64 }}
         eviction_policy: {{ .Values.cache.pools.rowgroup.evictionPolicy | default "lru" | quote }}
+        {{- with .Values.cache.pools.rowgroup.diskCache }}
+        disk_cache:
+          {{- with .flushers }}
+          flushers: {{ . | int }}
+          {{- end }}
+          {{- with .bufferPoolSizeBytes }}
+          buffer_pool_size_bytes: {{ . | int64 }}
+          {{- end }}
+          {{- with .submitQueueSizeThresholdBytes }}
+          submit_queue_size_threshold_bytes: {{ . | int64 }}
+          {{- end }}
+          {{- with .admissionBytesPerSec }}
+          admission_bytes_per_sec: {{ . | int64 }}
+          {{- end }}
+        {{- end }}
     admission:
       size_threshold_bytes: {{ mul (int64 .Values.cache.admission.sizeThresholdMiB) 1048576 }}
       pinned_bypass: {{ .Values.cache.admission.pinnedBypass }}

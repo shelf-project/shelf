@@ -25,19 +25,31 @@
 #![warn(rust_2018_idioms)]
 
 pub mod admission;
+pub mod compression;
 pub mod config;
 pub mod control;
 pub mod error;
+pub mod filter_service;
+pub mod fingerprint;
 pub mod head_lru;
 pub mod http;
 pub mod membership;
 pub mod metrics;
+pub mod mv_registry;
 pub mod origin;
+pub mod parquet_meta;
+pub mod peer;
 pub mod pinlist;
 pub mod router;
 pub mod s3_shim;
+pub mod side_bloom;
 pub mod store;
+pub mod table_props;
 pub mod telemetry;
+pub mod text_index;
+#[cfg(feature = "ui")]
+pub mod ui;
+pub mod warm_sampler;
 
 /// Re-export of the top-level error type so callers can `use shelfd::Error`.
 pub use error::Error;

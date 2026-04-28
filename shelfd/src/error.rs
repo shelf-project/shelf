@@ -49,6 +49,16 @@ pub enum Error {
     #[error("membership error: {0}")]
     Membership(String),
 
+    /// Single-flight de-duplication propagated a leader's failure to
+    /// followers (SHELF-06). The leader's original error variant
+    /// cannot be preserved across the `OnceCell<Result<Bytes,
+    /// String>>` boundary, so this variant exists specifically to
+    /// keep error-classification dashboards from labelling every
+    /// follower's failure as a generic `origin` error and conflating
+    /// "S3 was down" with "Foyer ran out of disk".
+    #[error("singleflight follower: {0}")]
+    Singleflight(String),
+
     /// Invalid key-derivation input (SHELF-04).
     #[error("invalid key input: {0}")]
     InvalidKey(&'static str),
@@ -71,6 +81,7 @@ impl Error {
             Error::Router(_) => "router",
             Error::Admission(_) => "admission",
             Error::Membership(_) => "membership",
+            Error::Singleflight(_) => "singleflight",
             Error::InvalidKey(_) => "key",
             Error::Internal(_) => "internal",
         }

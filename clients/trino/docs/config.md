@@ -22,7 +22,7 @@ verbatim.
 ```properties
 # iceberg.properties
 connector.name=iceberg
-hive.metastore.uri=thrift://trino-prod-metastore.penpencil.co:9083
+hive.metastore.uri=thrift://hms:9083
 iceberg.catalog.type=hive_metastore
 
 # Shelf

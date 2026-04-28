@@ -1,0 +1,62 @@
+// SHELF-G4 — ShelfFilterService.
+//
+// Scope: a gRPC surface on shelfd that takes a (table, column,
+// predicate, manifest_files) tuple and returns the row-group
+// refs that might match. Backed by G1 (Parquet native
+// indexes), G2 (side blooms), and G3 (sort-order tag).
+//
+// This file is the canonical IDL. The Rust implementation lives
+// under `src/filter_service.rs` and is currently wired to a
+// REST-equivalent at `POST /filter/probe` (same JSON body
+// shape, for operators without a gRPC client). A tonic-based
+// server will land behind the `grpc` crate feature once the
+// Trino plugin half (G5) is ready to consume it.
+syntax = "proto3";
+
+package shelf.filter.v1;
+
+service ShelfFilter {
+  // Fail-open: if shelf has no data for this (file, column),
+  // return `MaybeMatchAll` and let the engine do the full scan.
+  rpc Probe (ProbeRequest) returns (ProbeResponse);
+}
+
+message ProbeRequest {
+  // Fully-qualified table name, e.g. "iceberg.analytics.events".
+  string table_fqn = 1;
+  string column    = 2;
+  oneof predicate {
+    bytes    equal   = 3;   // Iceberg single value, wire-format.
+    Range    range   = 4;   // Min/max.
+    InList   in_list = 5;
+  }
+  // Manifest-file URIs to narrow the probe. When empty, the
+  // service scans every manifest for the current snapshot.
+  repeated string manifest_files = 6;
+}
+
+message Range {
+  bytes min_inclusive = 1;
+  bytes max_inclusive = 2;
+}
+
+message InList {
+  repeated bytes values = 1;
+}
+
+message ProbeResponse {
+  // Row groups that MIGHT match. Rows elided from this set
+  // are guaranteed not to contain matching values (subject to
+  // bloom FPP 0.01 on the G2 path).
+  repeated RowGroupRef maybe_match = 1;
+
+  // True iff shelf had *no* signal for this (file, column) and
+  // returned the unfiltered universe. Readers use this to
+  // decide whether the probe was worth the RTT.
+  bool fail_open = 2;
+}
+
+message RowGroupRef {
+  string file_etag        = 1;
+  uint32 row_group_ordinal = 2;
+}

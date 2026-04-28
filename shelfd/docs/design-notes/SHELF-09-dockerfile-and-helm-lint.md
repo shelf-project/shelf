@@ -43,7 +43,7 @@ SHELF-18 provisions the NVMe PVC.
 ## Chart wiring
 
 `charts/shelf/values.yaml:image.repository` already points at
-`ghcr.io/penpencil-oss/shelf/shelfd`. This Dockerfile is what we push
+`ghcr.io/shelf-project/shelfd`. This Dockerfile is what we push
 to that path. Tag policy stays overlay-driven: default
 `image.tag: ""` → `.Chart.AppVersion`; prod overlays pin an explicit
 digest (SHELF-21).

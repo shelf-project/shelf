@@ -120,7 +120,7 @@ rate** — pods die before the cache warms.
   + 3-master HA migration) at ≈ 71% hit rate. Shelf's v0.5 must beat
   this baseline; see §12.
 - 3 catalogs share the same buckets (`cdp`, `bronze`, `cdp_curated` on
-`pw-data-cdp-prod-gold-layer` and `pw-data-cdp-prod-silver-layer`).
+`example-prod-gold-layer` and `example-prod-silver-layer`).
 - `cdp.trino_logs.trino_queries` is a goldmine: every query's SQL, plan,
 scanned bytes, user, wall time, and partitions — historical workload data
 that nobody else has and that a cache can learn from.
@@ -375,7 +375,7 @@ Trino config (one catalog):
 ```properties
 # iceberg.properties
 connector.name=iceberg
-hive.metastore.uri=thrift://trino-prod-metastore.penpencil.co:9083
+hive.metastore.uri=thrift://hms.example.internal:9083
 iceberg.catalog.type=hive_metastore
 
 # enable Shelf
@@ -751,7 +751,7 @@ over the cached aggregate). Research-grade; deferred.
 #### Honest residual
 
 Novel ad-hoc aggregations on cold cache pay a full-scan cost on the
-first run. Acceptable — these are `airflow_user` / `dbt_user` queries,
+first run. Acceptable — these are ETL writer queries,
 not latency-sensitive.
 
 ---
@@ -777,7 +777,7 @@ throughput gain over HTTP/2 at our per-stream realistic bandwidth.
 // Reserved for v1.x Flight use. Not wired up in v1.
 // FlightDescriptor.cmd = serialized ShelfReadRequest
 message ShelfReadRequest {
-  string object_key = 1;          // e.g. "s3://pw-data-cdp-prod-gold-layer/silver/..."
+  string object_key = 1;          // e.g. "s3://example-prod-gold-layer/silver/..."
   uint64 offset     = 2;
   uint64 length     = 3;
   string tenant     = 4;
@@ -1120,7 +1120,7 @@ We adopt this in two places:
   < 5 ms without touching Trino at all.
   - When any referenced Iceberg table gets a new snapshot, the key
   changes and the result evicts itself.
-  - Users like `airflow_user`, `dbt_user` are skipped (they write,
+  - ETL writer users (e.g. `airflow_user`, `dbt_user`) are skipped (they write,
   and their queries are not repeated).
   - Results stored as Arrow IPC (zero-copy into Python clients).
   The result cache is **strictly complementary** to the data cache:

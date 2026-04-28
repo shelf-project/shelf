@@ -1,45 +1,38 @@
-# Production overlay — penpencil rep-2 EKS cluster.
+# Production overlay — example values for a 3-pod shelfd StatefulSet on
+# a dedicated EKS node pool with NVMe-backed PVCs and IRSA-based S3 auth.
 #
-# Source of sizing: post-cutover post-mortem 2026-04-27 (shelf-2 OOM-killed
-# 5x in 1h with the previous 22 GiB DRAM target inside a 32 GiB pod).
-# See runbook  shelfd/docs/runbooks/2026-04-shelf-2-oom.md.
+# Treat this file as a starting template, NOT a drop-in. Tune sizing,
+# bucket names, and IRSA role ARN to match your environment, then commit
+# the result to your own deployments repo.
 #
-# Sizing budget (per pod):
-#   pod.limits.memory                  = 32 GiB
-#   - cache.pools.metadata.sizeBytes   =  5 GiB
-#   - cache.pools.rowgroup.dramSizeBytes = 14 GiB
-#   = headroom                         = 13 GiB  (Rust runtime, S3 in-flight
-#                                                 response buffers up to
-#                                                 max_inflight × ~32 MiB,
-#                                                 NVMe write-back, tokio task
-#                                                 stacks, jemalloc fragmentation)
+# Sizing rule of thumb (per pod):
+#   pod.limits.memory MUST exceed
+#     cache.pools.metadata.sizeBytes
+#   + cache.pools.rowgroup.dramSizeBytes
+#   + (origin.pool.maxConnections × ~32 MiB worst-case rowgroup)
+#   + cache.pools.rowgroup.diskCache.submitQueueSizeThresholdBytes
+#   + ~3 GiB Rust runtime / tokio stacks / jemalloc fragmentation headroom
 #
-# Hot data still fits in DRAM at this size (current peak working set is
-# ~11 GiB during steady state, ~28 GiB only during burst when buffers
-# inflate); cold byte-ranges spill to NVMe. Bump dramSizeBytes ONLY in
-# lockstep with resources.limits.memory using the formula above.
+# Violating this rule causes the kernel OOM-killer to terminate the pod
+# under load. The defaults below are conservative for a 32 GiB pod limit
+# on a node with ~27 GiB allocatable.
 
 replicaCount: 3
 
 image:
-  repository: registry.gitlab.com/penpencil-services/data/data-engineering/ranger/shelfd
+  repository: ghcr.io/shelf-project/shelfd
   pullPolicy: IfNotPresent
-  # CI pins to an immutable digest-based tag per release.
-  # 0.1.0-preview-3 ships SHELF-E1b — LRU eviction in the hybrid
-  # row-group pool so NVMe (`shelf_disk_bytes_used`) actually fills
-  # under one-shot BI workloads. Multi-arch (amd64+arm64), built on
-  # rust:slim-trixie with the matching cc-debian13 runtime so glibc
-  # versions agree. See
-  #   shelfd/docs/design-notes/SHELF-E1-eviction-audit.md
-  tag: "0.1.0-preview-3"
+  # Pin to the exact tag your release pipeline produces. Empty string =
+  # .Chart.AppVersion (acceptable in dev; never in prod).
+  tag: "0.1.0"
 
 serviceAccount:
-  create: false
-  # rep-2 currently shares Alluxio's IRSA SA so S3 reads inherit the
-  # already-validated `data-platform-alluxio-role`. Set create:true and
-  # supply your own `eks.amazonaws.com/role-arn` annotation here when
-  # the dedicated `shelf-prod-s3` role is provisioned.
-  name: alluxio-sa
+  create: true
+  annotations:
+    # IRSA role with read access to the origin bucket. Replace with your
+    # own role ARN. The role's trust policy must permit
+    # system:serviceaccount:<ns>:<release-name>-shelf.
+    eks.amazonaws.com/role-arn: arn:aws:iam::000000000000:role/shelf-prod-s3-read
 
 resources:
   requests:
@@ -50,6 +43,8 @@ resources:
     memory: "32Gi"
 
 storage:
+  # Prefer local-nvme on instance-store node families (i4i, c6id, m6id,
+  # c7gd). Fall back to ebs-gp3-wffc on EBS-only families.
   storageClassName: local-nvme
   size: 240Gi
 
@@ -58,38 +53,45 @@ cache:
     metadata:
       sizeBytes: 5368709120          # 5 GiB
     rowgroup:
-      # SHELF-E1b — LRU so every memory eviction flows through to
-      # NVMe. Under S3-FIFO (the previous default) `shelf_disk_bytes_used`
-      # stayed at zero for hours of live traffic on rep-2 because
-      # one-shot Metabase reads were filtered out of the small queue
-      # before earning promotion.
+      # SHELF-E1b — LRU so every memory eviction flows through to NVMe.
+      # S3-FIFO is scan-resistant but keeps one-shot BI reads off NVMe;
+      # flip back to s3_fifo only when the SHELF-26 replay harness
+      # shows a per-policy hit-ratio gain on your workload.
       evictionPolicy: lru
-      dramSizeBytes: 15032385536     # 14 GiB  (was 22 GiB → OOM)
+      dramSizeBytes: 15032385536     # 14 GiB
       nvmeSizeBytes: 257698037760    # 240 GiB; matches storage.size
+      # Foyer LODC tunables — bound the disk-cache submit queue so a
+      # burst of inflight rowgroups can't OOM the pod under load.
+      diskCache:
+        flushers: 4                                 # was Foyer default 1
+        bufferPoolSizeBytes: 268435456              # 256 MiB (Foyer default 16 MiB)
+        submitQueueSizeThresholdBytes: 1073741824   # 1 GiB hard cap on LODC RSS pressure
   admission:
     sizeThresholdMiB: 1024
     pinnedBypass: true
     model:
       enabled: false
-      s3Uri: s3://penpencil-cdp-temp/shelf/admission-model.onnx
+      s3Uri: ""
       maxAgeHours: 48
   pinList:
-    s3Uri: s3://penpencil-cdp-temp/shelf/pin_list.json
+    # S3-backed pin list. Operators regenerate this from query logs;
+    # see tools/gen_pin_list.py.
+    s3Uri: ""
     reloadIntervalSeconds: 900
 
 origin:
-  bucket: penpencil-cdp-gold
-  region: ap-south-1
+  # Origin bucket (the data lake Trino reads).
+  bucket: ""
+  region: us-east-1
   pool:
-    # Each in-flight S3 GET buffers up to one Parquet rowgroup (~32 MiB
-    # typical, ~256 MiB for the largest file in cdp.* per origin metrics).
-    # 256 × 32 MiB = 8 GiB worst-case in-flight burst — already accounted
-    # for in the 13 GiB headroom above.
-    maxConnections: 256
+    # 128 × ~32 MiB = ~4 GiB worst-case in-flight buffer cap.
+    # Trino's S3 client reuses connections aggressively, so 128 saturates
+    # a single shelfd pod's bandwidth before connection count matters.
+    maxConnections: 128
     idleTimeoutSeconds: 60
 
 trino:
-  namespace: trino-db
+  namespace: trino
   coordinatorPodLabels:
     app: trino
     component: coordinator
@@ -98,7 +100,7 @@ trino:
     component: worker
 
 networkPolicy:
-  enabled: false
+  enabled: true
 
 serviceMonitor:
   enabled: true
@@ -114,11 +116,8 @@ priorityClass:
   create: true
   value: 100000
 
-# rep-2 shelf pods currently land on the alluxio node-pool (no
-# dedicated `workload=shelf` taint yet). Leave nodeSelector empty
-# until the dedicated pool ships, otherwise the StatefulSet stays
-# Pending after a `helm upgrade`.
-nodeSelector: {}
+nodeSelector:
+  workload: shelf
 
 affinity:
   podAntiAffinity:

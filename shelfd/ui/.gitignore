@@ -1,0 +1,11 @@
+node_modules/
+.vite/
+*.tsbuildinfo
+
+# `dist/` is the Vite build output and is overwritten by
+# `pnpm build`. We keep a minimal committed placeholder
+# (`dist/index.html`) so `cargo build -p shelfd --features ui`
+# succeeds on a clean checkout without a node toolchain — a real
+# build produces an SPA that replaces the placeholder.
+dist/*
+!dist/index.html

@@ -58,6 +58,9 @@ securityContext:
 # Ports — ADR-0004 (HTTP/2 only in v1). No Arrow Flight port in v1.
 # ---------------------------------------------------------------------------
 service:
+  # -- Type of the headless `shelf` Service (clusterIP: None is set in
+  # the template; this knob controls only the secondary `shelf-pool`
+  # ClusterIP svc used by external clients per SHELF-22).
   type: ClusterIP
   # -- HTTP/2 range-GET data plane (all payload sizes).
   # [ADR-0004 §Decision — "Ship v1 HTTP/2 range-GET only for all payload sizes"]
@@ -82,6 +85,14 @@ statefulset:
   podManagementPolicy: OrderedReady
   updateStrategy:
     type: RollingUpdate
+  # -- SHELF-22 — minimum seconds a new pod must be Ready before the sts
+  # controller starts terminating the next pod. The k8s svc removes a
+  # pod from the endpoint set when readiness fails (which fires before
+  # SIGKILL thanks to terminationGracePeriodSeconds=60), so 30s gives
+  # the new pod time to re-warm hot keys before its successor is taken
+  # out. Set to 0 only if you don't care about cache warm-up between
+  # rolling-update steps.
+  minReadySeconds: 30
 
 # -- Priority class name. Provisioned by this chart unless overridden.
 priorityClassName: shelf-data-plane
@@ -170,6 +181,51 @@ cache:
       #   shelfd/docs/runbooks/2026-04-shelf-2-oom.md
       dramSizeBytes: 15032385536   # 14 GiB
       nvmeSizeBytes: 257698037760  # 240 GiB; matches storage.size
+      # -- Foyer Large-Object Disk Cache (LODC) pipeline knobs.
+      #
+      # Post-mortem 2026-04-27: shelf-1 was OOM-killed (exit 137) at
+      # 14:30 UTC inside a 32 GiB pod *limit* on a 27.3 GiB *node
+      # allocatable*. Foyer 0.12's stock LODC defaults are
+      # `flushers=1` and `buffer_pool_size=16 MiB` (submit-queue
+      # threshold = 32 MiB). With shelfd's 256 in-flight × ~32 MiB
+      # Parquet rowgroup workload, a single flusher cannot drain to
+      # NVMe fast enough — proven by the
+      #   `[lodc] submit queue overflow, new entry ignored`
+      # warnings in the previous-container logs. RSS climbs in the
+      # submit queue + DRAM cache + S3 in-flight buffers
+      # simultaneously and the kernel kills the pod before the
+      # container limit is reached. See
+      #   shelfd/docs/runbooks/2026-04-shelf-1-oom.md
+      #
+      # Defaults below match the production overlay so the OSS
+      # chart is safe out of the box for Trino-class workloads.
+      # All three knobs are optional — leaving any field unset
+      # falls back to Foyer's own default.
+      diskCache:
+        flushers: 4                       # was Foyer default 1
+        bufferPoolSizeBytes: 268435456    # 256 MiB; was Foyer default 16 MiB
+        submitQueueSizeThresholdBytes: 1073741824  # 1 GiB; bounds RSS growth from the LODC pipeline
+        # -- SHELF-21e-v2 — admission rate-limit (bytes/sec) into the
+        # Foyer LODC pipeline. The three knobs above bound the *size*
+        # of the submit queue / flush buffers, which caps RSS but does
+        # not prevent overflow when sustained ingress exceeds the EBS
+        # drain rate (Foyer then logs
+        #   `[lodc] submit queue overflow, new entry ignored`
+        # and silently drops admissions). When this field is set,
+        # shelfd installs Foyer's built-in `RateLimitPicker` on the
+        # `HybridCacheBuilder`; admissions into NVMe self-throttle to
+        # whatever the disk can absorb. DRAM stays hot either way —
+        # the picker gates only the disk admission seam.
+        #
+        # Unset ⇒ no limiter (pre-preview-8 behaviour, Foyer's
+        # `AdmitAllPicker`). Production recommendation on the alluxio
+        # NodePool (gp3 EBS, ~250 MiB/s baseline) is ~200 MB/s so the
+        # picker leaves ~50 MiB/s headroom for the region-reclaim
+        # read path that shares the volume. Tune upward if you see
+        # `shelf_disk_bytes_used` rising more slowly than expected
+        # under sustained ingress; tune downward if you still observe
+        # submit-queue overflow lines in the logs.
+        # admissionBytesPerSec: 209715200  # 200 MiB/s
 
   admission:
     # -- Refuse inserts for objects > 1 GiB unless pinned. [ADR-0003]
@@ -187,7 +243,9 @@ cache:
 
   pinList:
     # -- S3-backed ConfigMap with the pin list. [ADR-0001, plan §4 SHELF-24]
-    s3Uri: s3://penpencil-shelf-config/pin_list.json
+    # Set to your own bucket; the chart does not assume a default location.
+    # Example: s3://my-org-shelf-config/pin_list.json
+    s3Uri: ""
     # -- Poll interval. SIGHUP also triggers a reload. [plan §4 SHELF-24]
     reloadIntervalSeconds: 900
 
@@ -195,8 +253,11 @@ cache:
 # Origin (S3) client — [plan §4 SHELF-05]
 # ---------------------------------------------------------------------------
 origin:
-  bucket: penpencil-cdp-data
-  region: ap-south-1
+  # -- Origin S3 bucket (the data Trino reads). Required.
+  # Example: my-org-data-lake
+  bucket: ""
+  # -- AWS region of the origin bucket.
+  region: us-east-1
   # -- Pooled HTTP client. Per-prefix sharding lands in Phase 3 (SHELF-??).
   # [plan §3 Phase 3 deliverable 6 — "Per-prefix connection pools"]
   pool:
@@ -209,7 +270,7 @@ origin:
 # ---------------------------------------------------------------------------
 trino:
   # -- Namespace where Trino coordinators & workers run.
-  namespace: trino-db
+  namespace: trino
   # -- Label selector on Trino coordinator pods allowed to ingress.
   coordinatorPodLabels:
     app: trino
@@ -268,9 +329,9 @@ priorityClass:
 # Scheduling
 # ---------------------------------------------------------------------------
 nodeSelector:
-  # -- Dedicated Karpenter pool. Phase 0 reuses the rep-2 alluxio pool to
-  # avoid new IaaS spend. [plan §3 Phase 0 — "reuse existing nodes, no new IaaS"]
-  workload: shelf
+  # -- Dedicated node pool label. Empty by default so the chart installs
+  # on any cluster; set this to pin shelfd onto a specific node pool.
+  {}
 
 tolerations: []
 
