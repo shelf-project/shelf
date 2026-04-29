@@ -29,7 +29,11 @@ struct Cli {
     /// Log filter (`RUST_LOG`-compatible). Defaults match `shelfctl`
     /// so operators see the same default verbosity across the
     /// Shelf binary suite.
-    #[arg(long, env = "SHELF_ADVISOR_LOG", default_value = "warn,shelf_advisor=info")]
+    #[arg(
+        long,
+        env = "SHELF_ADVISOR_LOG",
+        default_value = "warn,shelf_advisor=info"
+    )]
     log: String,
 
     #[command(subcommand)]

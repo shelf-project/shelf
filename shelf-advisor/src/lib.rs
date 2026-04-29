@@ -19,8 +19,8 @@ pub use error::{Error, Result};
 pub use input::{DataFile, IcebergEventLogReader, IcebergManifestReader, QueryRecord};
 pub use output::{write_recommendations_json, Recommendation};
 pub use recommenders::{
-    default_recommenders, BloomFilterRecommender, MaterializedViewRecommender,
-    OptimizeRecommender, Recommender,
+    default_recommenders, BloomFilterRecommender, MaterializedViewRecommender, OptimizeRecommender,
+    Recommender,
 };
 
 /// Run every recommender in `recommenders` against the supplied

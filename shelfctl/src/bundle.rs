@@ -64,10 +64,12 @@ pub async fn run(args: BundleArgs) -> Result<()> {
         .context("building kube client")?;
     let api: Api<Pod> = Api::namespaced(client, &args.namespace);
     let lp = ListParams::default().labels(&args.selector);
-    let pods = api
-        .list(&lp)
-        .await
-        .with_context(|| format!("listing pods ns={} selector={}", args.namespace, args.selector))?;
+    let pods = api.list(&lp).await.with_context(|| {
+        format!(
+            "listing pods ns={} selector={}",
+            args.namespace, args.selector
+        )
+    })?;
 
     let pod_names: Vec<String> = pods
         .items
@@ -264,8 +266,7 @@ fn is_text_file(path: &Path) -> bool {
 }
 
 fn write_tarball(workdir: &Path, root_name: &str, out: &Path) -> Result<()> {
-    let file = fs::File::create(out)
-        .with_context(|| format!("creating {}", out.display()))?;
+    let file = fs::File::create(out).with_context(|| format!("creating {}", out.display()))?;
     let enc = GzEncoder::new(file, Compression::default());
     let mut tar = tar::Builder::new(enc);
     tar.append_dir_all(root_name, workdir)?;

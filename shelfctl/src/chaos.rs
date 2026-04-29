@@ -50,8 +50,8 @@ pub async fn run(args: ChaosArgs) -> Result<()> {
         ));
     }
 
-    let fraction = parse_fraction(&args.kill)
-        .with_context(|| format!("parsing --kill {:?}", args.kill))?;
+    let fraction =
+        parse_fraction(&args.kill).with_context(|| format!("parsing --kill {:?}", args.kill))?;
 
     let client = Client::try_default()
         .await
@@ -59,10 +59,12 @@ pub async fn run(args: ChaosArgs) -> Result<()> {
     let api: Api<Pod> = Api::namespaced(client, &args.namespace);
 
     let lp = ListParams::default().labels(&args.selector);
-    let pods = api
-        .list(&lp)
-        .await
-        .with_context(|| format!("listing pods in ns={} selector={}", args.namespace, args.selector))?;
+    let pods = api.list(&lp).await.with_context(|| {
+        format!(
+            "listing pods in ns={} selector={}",
+            args.namespace, args.selector
+        )
+    })?;
 
     let names: Vec<String> = pods
         .items
@@ -70,7 +72,10 @@ pub async fn run(args: ChaosArgs) -> Result<()> {
         .filter_map(|p| p.metadata.name.clone())
         .collect();
     let total = names.len();
-    println!("matched {total} pods in ns={} selector={}", args.namespace, args.selector);
+    println!(
+        "matched {total} pods in ns={} selector={}",
+        args.namespace, args.selector
+    );
 
     if total == 0 {
         return Ok(());
@@ -80,7 +85,11 @@ pub async fn run(args: ChaosArgs) -> Result<()> {
     let target_count = target_count.min(total);
     let victims = pick_random(&names, target_count);
 
-    println!("targeting {} pods (fraction={:.3}):", victims.len(), fraction);
+    println!(
+        "targeting {} pods (fraction={:.3}):",
+        victims.len(),
+        fraction
+    );
     for name in &victims {
         println!("  - {name}");
     }
@@ -105,11 +114,7 @@ pub async fn run(args: ChaosArgs) -> Result<()> {
     // Re-list so the after-count reflects what the apiserver thinks
     // (terminating pods may still be visible until grace-period 0
     // takes effect, but that's fine — operators want the truth).
-    let after = api
-        .list(&lp)
-        .await
-        .map(|l| l.items.len())
-        .unwrap_or(total);
+    let after = api.list(&lp).await.map(|l| l.items.len()).unwrap_or(total);
     println!("before={total} after={after} killed={killed}");
     Ok(())
 }

@@ -31,8 +31,7 @@ fn analyze_writes_empty_json_array() {
     let trimmed = body.trim();
     assert_eq!(trimmed, "[]", "expected empty JSON array, got {body:?}");
 
-    let parsed: serde_json::Value =
-        serde_json::from_str(&body).expect("output must be valid JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("output must be valid JSON");
     assert!(parsed.is_array(), "top-level JSON must be an array");
     assert_eq!(parsed.as_array().unwrap().len(), 0);
 }

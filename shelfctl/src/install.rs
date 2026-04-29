@@ -457,9 +457,7 @@ ignored.key=foo
     fn values_yaml_omits_trino_block_when_no_endpoints() {
         let v = generate_values(&ctx_with(&["trino"], 1));
         let m = v.as_mapping().unwrap();
-        assert!(m
-            .get(&serde_yaml::Value::String("trino".into()))
-            .is_none());
+        assert!(m.get(&serde_yaml::Value::String("trino".into())).is_none());
     }
 }
 
