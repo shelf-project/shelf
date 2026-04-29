@@ -1,7 +1,7 @@
 # Shelf — a smart, Iceberg-native cache for Trino
 
 > Codename: **Shelf** (iceberg shelf + "on the shelf"). Happy to rename.
-> Status: design blueprint v0.4. Meant to be iterated on with the team.
+> Status: design blueprint v0.4 — last reviewed for 1.0.0-rc.4 (Apr 30, 2026); ACTIVE through v1.0.0. Meant to be iterated on with the team.
 > License intent: **Apache 2.0**. Public from day one.
 >
 > **v0.4 changes** (on top of v0.3):

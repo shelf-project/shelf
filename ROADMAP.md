@@ -8,7 +8,9 @@ Versioning follows [Semantic Versioning 2.0](https://semver.org/). See
 `RELEASING.md` for what each release ships and `CHANGELOG.md` for what has
 already shipped.
 
-## v0.5 — current line (preview, soak in progress)
+> Note: 1.0.0-rc.* tags are part of the v0.5 maturity line; rc.4 is the current released RC.
+
+## v0.5 → 1.0.0-rc.4 — current line (preview, soak in progress)
 
 The v0.5 line locks down the production path for the read side of the
 cache and the LODC (large-object direct-copy) write side. It is the
