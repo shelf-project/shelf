@@ -34,10 +34,14 @@
 
 pub mod event_listener;
 pub mod manifest;
+pub mod mv_pinning;
 pub mod shelfd_stats;
 
 pub use event_listener::{FixtureEventLogReader, IcebergEventLogReader, QueryRecord};
 pub use manifest::{DataFile, FixtureManifestReader, IcebergManifestReader};
+pub use mv_pinning::{
+    IcebergRefreshLogReader, IcebergTablePropertiesReader, MvTableProperties, RefreshEvent,
+};
 pub use shelfd_stats::{
     FixtureShelfdStatsReader, HttpShelfdStatsReader, PodStats, PoolStats, ShelfdStatsReader,
 };

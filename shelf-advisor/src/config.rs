@@ -251,6 +251,9 @@ struct ConfigFile {
     mv: MvConfig,
     #[serde(default = "BloomWriteConfig::defaults")]
     bloom_write: BloomWriteConfig,
+    /// SHELF-65 — knobs for the MV-aware pinning recommender.
+    #[serde(default)]
+    mv_pinning: MvPinningConfig,
 }
 
 impl AdvisorConfig {
@@ -282,6 +285,7 @@ impl AdvisorConfig {
             bloom: BloomConfig::default(),
             mv: MvConfig::default(),
             bloom_write: BloomWriteConfig::defaults(),
+            mv_pinning: MvPinningConfig::default(),
         }
     }
 
@@ -313,6 +317,7 @@ impl AdvisorConfig {
             bloom: f.bloom,
             mv: f.mv,
             bloom_write: f.bloom_write,
+            mv_pinning: f.mv_pinning,
         }
     }
 }
@@ -396,5 +401,118 @@ pin_list:
         assert_eq!(cfg.shelfd_stats_urls.len(), 1);
         assert_eq!(cfg.optimize.small_file_bytes, 16 * 1024 * 1024);
         assert_eq!(cfg.pin_list.min_frequency, 10);
+    }
+}
+
+/// SHELF-65 — MV-detection + refresh-detection + cap-protection
+/// knobs for the `MaterializedViewPinningRecommender`.
+///
+/// Each strategy below is opt-in via `detect_strategies`. A table is
+/// classified as an MV iff *any* enabled strategy fires (logical OR /
+/// union semantics). Refresh detection is the same OR-union over
+/// `refresh_user_pattern` (matches the `user` field on a
+/// `RefreshEvent` — see `IcebergRefreshLogReader`) and
+/// `refresh_sql_pattern` (matches the `query_sql` field).
+#[derive(Debug, Clone)]
+pub struct MvPinningConfig {
+    /// MV-detection strategies, OR-unioned. The recommender will WARN
+    /// once per run if a strategy is enabled but the corresponding
+    /// reader is unavailable (e.g. `IcebergProperty` requested but
+    /// no `IcebergTablePropertiesReader` plumbed in) — degrading to
+    /// the remaining strategies rather than failing the run.
+    pub detect_strategies: Vec<MvDetectStrategy>,
+
+    /// Regex matched against the table portion of a fully-qualified
+    /// `catalog.schema.table` name when `MvDetectStrategy::NameRegex`
+    /// is enabled. Default `^(mv_|materialized_)` covers the common
+    /// `cdp.gold.mv_orders` / `cdp.silver.materialized_dau` shapes.
+    pub name_regex: String,
+
+    /// Regex matched against `RefreshEvent::user` when
+    /// `IcebergRefreshLogReader` is provided. Default `^airflow_`
+    /// catches the standard `airflow_etl_<dag>` user pattern;
+    /// deployer-specific overlays may widen this to e.g.
+    /// `airflow_*|.*_etl` to cover bespoke ETL accounts.
+    pub refresh_user_pattern: String,
+
+    /// Regex matched against `RefreshEvent::query_sql`. Default
+    /// `(?i)^\s*REFRESH\s+MATERIALIZED\s+VIEW\s+` is the canonical
+    /// Trino DDL — case-insensitive, leading-whitespace-tolerant.
+    pub refresh_sql_pattern: String,
+
+    /// Lookback window for the refresh-history scan, in hours.
+    /// Independent from `AdvisorConfig::window` because the MV
+    /// recommender wants a *short* window (one or two refresh
+    /// cycles) to avoid mixing predicate columns across MV redefs,
+    /// even when the broader advisor lookback is 7 d. Default 24 h
+    /// per the design note.
+    pub lookback_hours: u64,
+
+    /// Cap protection — the maximum fraction of `nvme_capacity_bytes`
+    /// the aggregate pin-set across MV recommendations may consume.
+    /// If exceeded, every recommendation in the run is downgraded
+    /// one severity tier and tagged with `pin_bytes_too_large`.
+    /// Default 0.5 — leaves half of NVMe for non-MV traffic.
+    pub max_pin_bytes_pct: f32,
+
+    /// NVMe capacity per shelfd pod in bytes. Used as the denominator
+    /// for the `max_pin_bytes_pct` cap. Default 240 GiB matches the
+    /// chart's `storage.size`. The deployer's production overlay
+    /// should set this to the live cluster value if it diverges.
+    pub nvme_capacity_bytes: u64,
+
+    /// Fallback constant used when the `shelf_dollars_saved` cargo
+    /// feature is OFF. Picodollars per byte; the default
+    /// `0.0004 / 1024 / 1024 * 1e12 ≈ 381` picodollars/byte
+    /// approximates the AWS S3 GET request charge amortised over a
+    /// 1 MiB rowgroup at the us-east-1 list rate. The recommender
+    /// emits `cost_savings_per_refresh: null` + a
+    /// `cost_model_unavailable` flag when the feature is off; this
+    /// constant is only surfaced in `rationale` for traceability.
+    /// Once SHELF-61's `Cents` newtype lands the feature flips on
+    /// and this field becomes documentation-only.
+    pub s3_get_cost_picodollars_per_byte: u64,
+}
+
+/// MV-detection strategies. Each variant maps 1:1 to a reader the
+/// recommender consults; missing readers degrade to a single
+/// per-run WARN log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MvDetectStrategy {
+    /// Match `MvPinningConfig::name_regex` against the table portion
+    /// of a fully-qualified table name. Always available — needs no
+    /// reader.
+    NameRegex,
+    /// Inspect Trino's per-table Iceberg properties for
+    /// `trino.materialized-view.storage-table` /
+    /// `trino.materialized-view.fresh-snapshot-id`. Requires an
+    /// `IcebergTablePropertiesReader`.
+    TrinoProperty,
+    /// Inspect the canonical Iceberg `is_materialized_view = true`
+    /// table property. Requires an `IcebergTablePropertiesReader`.
+    /// The plain Iceberg flag is rare in practice (Trino-Iceberg
+    /// integration uses the `trino.*` keys above) but we honour the
+    /// upstream spec where it appears.
+    IcebergProperty,
+}
+
+impl Default for MvPinningConfig {
+    fn default() -> Self {
+        Self {
+            detect_strategies: vec![
+                MvDetectStrategy::NameRegex,
+                MvDetectStrategy::TrinoProperty,
+                MvDetectStrategy::IcebergProperty,
+            ],
+            name_regex: r"^(mv_|materialized_)".to_string(),
+            refresh_user_pattern: r"^airflow_".to_string(),
+            refresh_sql_pattern: r"(?i)^\s*REFRESH\s+MATERIALIZED\s+VIEW\s+".to_string(),
+            lookback_hours: 24,
+            max_pin_bytes_pct: 0.5,
+            nvme_capacity_bytes: 240 * 1024 * 1024 * 1024,
+            // 0.0004 USD per 1k GETs ÷ 1 MiB per GET ≈ 381 picodollars/byte.
+            // Documentation only when `shelf_dollars_saved` is OFF.
+            s3_get_cost_picodollars_per_byte: 381,
+        }
     }
 }

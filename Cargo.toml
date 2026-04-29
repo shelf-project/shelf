@@ -48,6 +48,11 @@ sha2 = "0.11"
 hex = "0.4"
 parking_lot = "0.12"
 humantime-serde = "1"
+# SHELF-65 — MV detection / refresh detection drive a small set of
+# user-facing regexes from the advisor config. `regex 1` is the
+# de-facto standard, no transitive native deps. Workspace-routed so
+# downstream recommenders can reuse the same compiled version.
+regex = "1"
 # AWS SDK — SHELF-05 origin client.
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"

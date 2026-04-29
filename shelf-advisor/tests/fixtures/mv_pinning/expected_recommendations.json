@@ -1,0 +1,68 @@
+[
+  {
+    "recommendation_type": "mv_pinning",
+    "table": "cdp.bronze.events",
+    "confidence": 0.875,
+    "rationale": {
+      "advisory_only": false,
+      "aggregate_pin_bytes_in_run": 322961408,
+      "cap_bytes": 128849018880,
+      "cost_model_inputs": {
+        "lookback_hours": 24,
+        "max_pin_bytes_pct": 0.5,
+        "nvme_capacity_bytes": 257698037760,
+        "s3_get_cost_picodollars_per_byte": 381
+      },
+      "cost_model_unavailable": true,
+      "cost_model_unavailable_reason": "shelf_dollars_saved cargo feature OFF; SHELF-61 (PR #68) not yet merged",
+      "cost_savings_per_refresh": null,
+      "expected_hit_ratio_lift": 0.75,
+      "file_count": 2,
+      "mv_table": "cdp.gold.mv_dau +others +others",
+      "pin_bytes_estimate": 255852544,
+      "pin_bytes_too_large": false,
+      "pin_key_derivation": "v1_path_proxy_etag",
+      "refresh_count_in_window": 4,
+      "sample_refresh_query_id": "20260429_010000_000aa_demo",
+      "severity": "info"
+    },
+    "suggested_change": {
+      "pool": "rowgroup",
+      "table": "cdp.bronze.events",
+      "ttl_hint_hours": 24
+    }
+  },
+  {
+    "recommendation_type": "mv_pinning",
+    "table": "cdp.bronze.users",
+    "confidence": 0.875,
+    "rationale": {
+      "advisory_only": false,
+      "aggregate_pin_bytes_in_run": 322961408,
+      "cap_bytes": 128849018880,
+      "cost_model_inputs": {
+        "lookback_hours": 24,
+        "max_pin_bytes_pct": 0.5,
+        "nvme_capacity_bytes": 257698037760,
+        "s3_get_cost_picodollars_per_byte": 381
+      },
+      "cost_model_unavailable": true,
+      "cost_model_unavailable_reason": "shelf_dollars_saved cargo feature OFF; SHELF-61 (PR #68) not yet merged",
+      "cost_savings_per_refresh": null,
+      "expected_hit_ratio_lift": 0.5,
+      "file_count": 1,
+      "mv_table": "cdp.gold.mv_dau",
+      "pin_bytes_estimate": 67108864,
+      "pin_bytes_too_large": false,
+      "pin_key_derivation": "v1_path_proxy_etag",
+      "refresh_count_in_window": 2,
+      "sample_refresh_query_id": "20260429_010000_000aa_demo",
+      "severity": "info"
+    },
+    "suggested_change": {
+      "pool": "rowgroup",
+      "table": "cdp.bronze.users",
+      "ttl_hint_hours": 24
+    }
+  }
+]

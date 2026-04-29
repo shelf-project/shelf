@@ -1,0 +1,13 @@
+{
+  "cdp.gold.mv_dau": {
+    "trino_storage_table": "cdp.gold.st_88a01",
+    "trino_fresh_snapshot_id": 51724891
+  },
+  "cdp.gold.mv_orders": {
+    "trino_storage_table": "cdp.gold.st_2a44b",
+    "trino_fresh_snapshot_id": 51724902
+  },
+  "cdp.silver.legacy_aggregate": {
+    "is_materialized_view": true
+  }
+}

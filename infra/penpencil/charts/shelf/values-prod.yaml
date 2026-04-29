@@ -237,3 +237,24 @@ affinity:
 
 logging:
   level: info
+
+# SHELF-65 — MV-aware pinning recommender knobs (consumed by the
+# `shelf-advisor` binary, not shelfd). The chart does not yet
+# template these into a ConfigMap because the advisor is run
+# manually today; this block is the canonical place for the
+# cluster-specific overrides so when the advisor's YAML loader
+# lands (SHELF-53) it picks them up without further changes.
+advisor:
+  mv_pinning:
+    # Widen the refresh-user pattern beyond the OSS default
+    # (`^airflow_`) to catch the in-cluster `_etl` users — these
+    # are the bespoke ETL accounts that don't go through the
+    # canonical `REFRESH MATERIALIZED VIEW` DDL but still drive
+    # the same base-table read pattern.
+    refresh_user_pattern: 'airflow_*|.*_etl'
+    # NVMe size matches storage.size above (240 GiB).
+    nvme_capacity_bytes: 257698037760
+    # Half of NVMe is the conservative pin-set ceiling; revisit
+    # once the SHELF-63 compaction-rewarm reactor is also
+    # contending for cache space.
+    max_pin_bytes_pct: 0.5

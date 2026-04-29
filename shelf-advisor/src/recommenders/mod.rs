@@ -3,30 +3,10 @@
 //! Each recommender consumes the input adapters bundled in
 //! [`AnalysisContext`] and emits zero or more
 //! [`Recommendation`](crate::output::Recommendation)s. SHELF-53
-//! ships:
-//!
-//! * the trait + the [`AnalysisContext`] aggregation struct (the
-//!   contract that sibling tickets SHELF-65 and SHELF-52 import),
-//! * a real [`OptimizeRecommender`] (small-file detection over
-//!   the Iceberg manifests), and
-//! * a real [`PinListRecommender`] (top-N hot-table pin candidates
-//!   scored against the live shelfd `/stats` capacity sample).
-//!
-//! `BloomFilterRecommender` and `MaterializedViewRecommender`
-//! are kept as stubs so the trait surface stays exercised by the
-//! default pipeline; their real implementations land in SHELF-52
-//! and SHELF-65 respectively. Both stubs return `Ok(vec![])`.
-//!
-//! ## Why `AnalysisContext` (and not three separate `&dyn` args)
-//!
-//! The phase-1 scaffold passed `(config, event_log, manifests)` as
-//! three positional arguments. SHELF-65's MV-aware-pinning
-//! advisor wants a fourth reader (`/stats`); SHELF-52's
-//! bloom-write advisor will want a fifth (`predicate_extractor`)
-//! once the sqlglot sidecar lands. Bundling everything into a
-//! struct future-proofs the trait — adding a new reader is a
-//! field append, not a breaking signature change for every
-//! existing recommender.
+//! ships the trait + scaffold; SHELF-52 ships the bloom-write
+//! advisor; SHELF-65 ships the real MV-aware pinning
+//! recommender (`MaterializedViewPinningRecommender`,
+//! `kind() == "mv_pinning"`).
 
 pub mod bloom;
 pub mod bloom_write;
@@ -41,7 +21,9 @@ use crate::output::Recommendation;
 
 pub use bloom::BloomFilterRecommender;
 pub use bloom_write::BloomWriteRecommender;
-pub use mv::MaterializedViewRecommender;
+pub use mv::{
+    MaterializedViewPinningRecommender, MaterializedViewRecommender, Severity as MvPinningSeverity,
+};
 pub use optimize::OptimizeRecommender;
 pub use pin_list::PinListRecommender;
 
@@ -88,7 +70,7 @@ pub fn default_recommenders() -> Vec<Box<dyn Recommender>> {
         Box::new(PinListRecommender::new()),
         Box::new(BloomFilterRecommender::new()),
         Box::new(BloomWriteRecommender::new()),
-        Box::new(MaterializedViewRecommender::new()),
+        Box::new(MaterializedViewPinningRecommender::new()),
     ]
 }
 
@@ -102,7 +84,7 @@ pub fn kind_filter(kind_arg: &str) -> Option<&'static str> {
         "optimize" | "optimize_targets" => Some("optimize_targets"),
         "pin_list" | "pin" | "pin_list_candidates" => Some("pin_list_candidates"),
         "bloom" | "bloom_filter_columns" => Some("bloom_filter_columns"),
-        "mv" | "mv_candidates" => Some("mv_candidates"),
+        "mv" | "mv_pinning" | "mv_candidates" => Some("mv_pinning"),
         _ => None,
     }
 }
@@ -117,7 +99,7 @@ mod tests {
         assert_eq!(kind_filter("pin"), Some("pin_list_candidates"));
         assert_eq!(kind_filter("pin_list"), Some("pin_list_candidates"));
         assert_eq!(kind_filter("bloom"), Some("bloom_filter_columns"));
-        assert_eq!(kind_filter("mv"), Some("mv_candidates"));
+        assert_eq!(kind_filter("mv"), Some("mv_pinning"));
         assert_eq!(kind_filter("all"), None);
         assert_eq!(kind_filter("nonsense"), None);
     }
@@ -129,7 +111,7 @@ mod tests {
         assert!(kinds.contains(&"pin_list_candidates"));
         assert!(kinds.contains(&"bloom_filter_columns"));
         assert!(kinds.contains(&"bloom_write"));
-        assert!(kinds.contains(&"mv_candidates"));
+        assert!(kinds.contains(&"mv_pinning"));
         assert_eq!(kinds.len(), 5);
     }
 }
