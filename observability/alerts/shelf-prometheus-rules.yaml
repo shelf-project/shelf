@@ -73,7 +73,7 @@ spec:
         - alert: ShelfNvmeUsageHigh
           # agents/8-operator.md §Pass-2: > 85% NVMe for 15m.
           expr: |
-            (shelf_nvme_bytes_used / shelf_nvme_bytes_capacity) > 0.85
+            (shelf_disk_bytes_used / shelf_disk_bytes_capacity) > 0.85
           for: 15m
           labels:
             severity: warn
