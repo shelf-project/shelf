@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.0-rc.2] — 2026-04-29
 
 **Hotfix release for the SHELF-21f LODC submit-queue overflow regression
-observed on the penpencil `data-platform-cluster` alluxio NodePool the
-night of 2026-04-28 → 2026-04-29.**
+observed on the originating cluster's alluxio NodePool the night of
+2026-04-28 → 2026-04-29 (full RCA + evidence in `docs/rollout-v1/`).**
 
 ### Why a hotfix
 
@@ -134,8 +134,9 @@ following runtime evidence:
 - Tag-driven release pipeline (`.github/workflows/release.yml`) — multi-arch
   container image to GHCR, Helm chart published OCI, `syft` SBOM, SLSA-v1.0
   provenance, `cosign sign --keyless` keyless signatures.
-- Penpencil-overlay leak guard in the release workflow + `.gitattributes`
-  `export-ignore` for `infra/penpencil/**`, `agents/out/**`, `docs/rollout-v1/**`.
+- Origin-overlay leak guard in the release workflow + `.gitattributes`
+  `export-ignore` for the in-repo origin-cluster overlay subtree,
+  `agents/out/**`, and `docs/rollout-v1/**`.
 - `docs/brand/` — locked tier-ordered primary mark + favicon.
 - OSS hygiene set: `CODE_OF_CONDUCT.md`, `MAINTAINERS.md`, `GOVERNANCE.md`,
   `ROADMAP.md`, `RELEASING.md`, `CHANGELOG.md`, GitHub issue templates,
