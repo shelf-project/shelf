@@ -35,6 +35,7 @@ use bytes::Bytes;
 
 use crate::http::ServerState;
 use crate::peer::{race_peer_or_origin, RaceOutcome};
+use crate::router;
 use crate::store::{Key, Pool};
 
 /// SHELF-23 — peer-fetch deadline for the `POST /cache/contains` probe.
@@ -106,15 +107,19 @@ where
     }
 
     // `Router::owner` panics on an empty ring (membership has not
-    // produced its first snapshot yet). We deliberately bail to
-    // origin-only in that window so a startup race never turns
-    // into a 500 — `is_local_owner` returns false for empty rings,
-    // so we mirror its safe-default.
+    // produced its first snapshot yet). The earlier code took two
+    // separate router reads (`view()` then `owner()`) which left a
+    // TOCTOU window: a membership update that emptied the ring
+    // between the two reads turned the panic into a 500 on the GET
+    // hot path. Take ONE `RingView` snapshot and run the empty-check
+    // and the owner lookup against it via `router::owner_in`, which
+    // returns `Option<Member>` and lets us fall through to the
+    // origin future on `None` — same safe default `is_local_owner`
+    // already uses for empty rings.
     let view = state.router.view();
-    if view.members().is_empty() {
+    let Some(owner) = router::owner_in(view.members(), key.as_bytes()).cloned() else {
         return origin_fut.await;
-    }
-    let owner = state.router.owner(key.as_bytes());
+    };
     if owner.id.as_str() == &*state.pod_id {
         // We are the HRW primary — no peer benefit.
         return origin_fut.await;
@@ -214,5 +219,24 @@ mod tests {
     fn pool_str_is_stable() {
         assert_eq!(pool_str(Pool::Metadata), "metadata");
         assert_eq!(pool_str(Pool::RowGroup), "rowgroup");
+    }
+
+    /// Regression for the empty-ring TOCTOU fix. `peer_or_origin_fetch`
+    /// previously took two separate router reads (`view()` then
+    /// `owner()`); a membership update that emptied the ring between
+    /// the two reads turned `Router::owner`'s panic
+    /// (`router.rs::owner` — `expect("...empty ring...")`) into a 500
+    /// on the GET hot path.
+    ///
+    /// The fix runs the empty-check and owner lookup against a single
+    /// `RingView` snapshot via `router::owner_in`, which returns
+    /// `None` on an empty slice and lets `peer_or_origin_fetch` fall
+    /// through to the bare origin future. Building a full
+    /// `ServerState` in a unit test is heavy (S3, Foyer, OTel, …); the
+    /// invariant the hot path actually depends on is the contract of
+    /// the helper itself, so we assert that directly.
+    #[test]
+    fn owner_in_returns_none_for_empty_ring() {
+        assert!(router::owner_in(&[], b"any-key").is_none());
     }
 }

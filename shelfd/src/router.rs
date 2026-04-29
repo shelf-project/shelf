@@ -123,7 +123,11 @@ impl Router {
     }
 }
 
-fn owner_in<'a>(members: &'a [Member], key: &[u8]) -> Option<&'a Member> {
+/// HRW lookup over an explicit member slice. Crate-private — `peer_fetch`
+/// uses this to take the empty-check and the owner lookup against the
+/// **same** `RingView` snapshot, avoiding the `Router::owner` panic path
+/// when membership flips between two separate reads.
+pub(crate) fn owner_in<'a>(members: &'a [Member], key: &[u8]) -> Option<&'a Member> {
     let mut best: Option<&'a Member> = None;
     let mut best_score = f64::NEG_INFINITY;
     for m in members {
