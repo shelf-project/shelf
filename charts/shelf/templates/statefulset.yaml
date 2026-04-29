@@ -71,37 +71,18 @@ spec:
             - name: admin
               containerPort: {{ .Values.service.adminPort }}
               protocol: TCP
+          # Only SHELFD_* env keys are honored by shelfd (main.rs); chart-level config goes through the ConfigMap above.
           env:
             - name: SHELFD_NODE_ID
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: SHELF_LOG_LEVEL
+            - name: SHELFD_LOG
               value: {{ .Values.logging.level | quote }}
-            - name: SHELF_LOG_FORMAT
-              value: {{ .Values.logging.format | quote }}
-            - name: SHELF_ORIGIN_BUCKET
+            - name: SHELFD_ORIGIN_BUCKET
               value: {{ .Values.origin.bucket | quote }}
-            - name: SHELF_ORIGIN_REGION
+            - name: SHELFD_ORIGIN_REGION
               value: {{ .Values.origin.region | quote }}
-            - name: SHELF_POOL_METADATA_SIZE_BYTES
-              value: {{ .Values.cache.pools.metadata.sizeBytes | quote }}
-            - name: SHELF_POOL_ROWGROUP_DRAM_SIZE_BYTES
-              value: {{ .Values.cache.pools.rowgroup.dramSizeBytes | quote }}
-            - name: SHELF_POOL_ROWGROUP_NVME_SIZE_BYTES
-              value: {{ .Values.cache.pools.rowgroup.nvmeSizeBytes | quote }}
-            - name: SHELF_ADMISSION_SIZE_THRESHOLD_MIB
-              value: {{ .Values.cache.admission.sizeThresholdMiB | quote }}
-            - name: SHELF_ADMISSION_PINNED_BYPASS
-              value: {{ .Values.cache.admission.pinnedBypass | quote }}
-            - name: SHELF_PIN_LIST_S3_URI
-              value: {{ .Values.cache.pinList.s3Uri | quote }}
-            - name: SHELF_PIN_LIST_RELOAD_SECONDS
-              value: {{ .Values.cache.pinList.reloadIntervalSeconds | quote }}
-            - name: SHELF_ORIGIN_POOL_MAX_CONNECTIONS
-              value: {{ .Values.origin.pool.maxConnections | quote }}
-            - name: SHELF_NVME_MOUNT_PATH
-              value: {{ .Values.storage.mountPath | quote }}
             - name: POD_NAME
               valueFrom:
                 fieldRef:
