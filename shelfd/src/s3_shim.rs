@@ -919,6 +919,110 @@ pub async fn handle_get_object(
         }
     }
 
+    // SHELF-30 — try to coalesce onto an in-flight leader for an
+    // overlapping byte range against the same `(bucket, key, etag)`
+    // triple. If we find a *subsuming* leader (its range fully covers
+    // ours), we wait for its bytes and slice — no origin GET, no Foyer
+    // insert. Otherwise we register as the leader for our own range
+    // and proceed through the standard fetch path; the
+    // `LeaderGuard::complete` call after `get_or_fetch` returns wakes
+    // any followers that arrived while we were fetching.
+    //
+    // Runtime kill-switch: `state.coalesce_enabled` flips this to a
+    // pre-SHELF-30 path (no coalescing) without rebuilding the binary.
+    // See ADR-0013 for the v1 subsumption-only trade-off.
+    let leader_guard = if state.is_coalesce_enabled() {
+        let outcome = state.coalescer.try_join_or_register(
+            &bucket,
+            &key,
+            meta.etag.as_deref(),
+            offset,
+            length,
+        );
+        match outcome {
+            crate::coalesce::Outcome::Follower {
+                mut receiver,
+                offset_in_leader,
+                length: follower_len,
+            } => {
+                // The leader's `complete` flips the watch slot from
+                // `None` to `Some(...)`; `changed()` returns once it
+                // sees that transition. If the leader's task aborts
+                // entirely without `Drop` firing (impossible in safe
+                // code today, but defensive), `changed()` returns an
+                // `Err` and we fall through.
+                let received = receiver.changed().await.is_ok();
+                let value = if received {
+                    receiver.borrow().clone()
+                } else {
+                    None
+                };
+                let fall_through_reason = match value {
+                    Some(Ok(leader_bytes)) => {
+                        match crate::coalesce::slice_for_follower(
+                            &leader_bytes,
+                            offset_in_leader,
+                            follower_len,
+                        ) {
+                            Some(sliced) => {
+                                crate::metrics::COALESCE_FOLLOWERS_TOTAL
+                                    .with_label_values(&[pool_label_early])
+                                    .inc();
+                                crate::metrics::COALESCE_FOLLOWER_BYTES_SAVED_TOTAL
+                                    .with_label_values(&[pool_label_early])
+                                    .inc_by(sliced.len() as u64);
+                                crate::metrics::S3_SHIM_RESPONSE_BYTES_TOTAL
+                                    .with_label_values(&["get_object", "coalesce_follower"])
+                                    .inc_by(sliced.len() as u64);
+                                let mut headers = HeaderMap::new();
+                                stamp_common_headers(&mut headers, &meta);
+                                headers.insert(
+                                    header::CONTENT_LENGTH,
+                                    HeaderValue::from_str(&sliced.len().to_string())
+                                        .expect("u64 is ASCII"),
+                                );
+                                let status = if is_partial {
+                                    let last =
+                                        offset.saturating_add(follower_len).saturating_sub(1);
+                                    let cr = format!("bytes {}-{}/{}", offset, last, total_size);
+                                    if let Ok(v) = HeaderValue::from_str(&cr) {
+                                        headers.insert(header::CONTENT_RANGE, v);
+                                    }
+                                    StatusCode::PARTIAL_CONTENT
+                                } else {
+                                    StatusCode::OK
+                                };
+                                return record_get_latency(
+                                    &state,
+                                    start,
+                                    "coalesce_follower",
+                                    (status, headers, sliced).into_response(),
+                                );
+                            }
+                            None => "truncated",
+                        }
+                    }
+                    Some(Err(_)) => "leader_error",
+                    None => "leader_dropped",
+                };
+                crate::metrics::COALESCE_FALLTHROUGH_TOTAL
+                    .with_label_values(&[pool_label_early, fall_through_reason])
+                    .inc();
+                None
+            }
+            crate::coalesce::Outcome::Leader(g) => {
+                if !g.is_noop() {
+                    crate::metrics::COALESCE_LEADERS_TOTAL
+                        .with_label_values(&[pool_label_early])
+                        .inc();
+                }
+                Some(g)
+            }
+        }
+    } else {
+        None
+    };
+
     let origin = state.origin.clone();
     let bucket_for_fetch = bucket.clone();
     let key_for_fetch = key.clone();
@@ -952,6 +1056,21 @@ pub async fn handle_get_object(
         .store
         .get_or_fetch(pool, key_obj, state.admission.as_ref(), fetcher)
         .await;
+
+    // SHELF-30 — publish the leader's bytes to any followers that
+    // arrived while `get_or_fetch` was running. Done immediately
+    // after the fetch returns so followers wake up before the
+    // leader spends time building its own response. On error we
+    // publish the error string so followers fall through rather
+    // than wait forever (see [`crate::coalesce::LeaderGuard::Drop`]
+    // for the panic-safe sibling path).
+    if let Some(g) = leader_guard {
+        let published = match &outcome {
+            Ok(ReadOutcome::Hit(b, _)) | Ok(ReadOutcome::Miss(b)) => Ok(b.clone()),
+            Err(e) => Err(e.to_string()),
+        };
+        g.complete(published);
+    }
 
     // Bookkeeping parity with the native `/cache/...` data plane: a
     // shim read that hits Foyer is a cache hit and must bump

@@ -131,6 +131,18 @@ pub struct ServerState {
     /// stored bytes without re-validating origin. Useful as a
     /// fast-revert lever if conditional GETs reveal a hot-bug.
     pub conditional_get_enabled: AtomicBool,
+    /// SHELF-30 — per-`(bucket, key, etag)` in-flight tracker that
+    /// catches overlapping byte-range GETs against the same Iceberg
+    /// snapshot and folds them into a single origin fetch.
+    /// See `crate::coalesce` and ADR-0013.
+    pub coalescer: Arc<crate::coalesce::RangeCoalescer>,
+    /// SHELF-30 — runtime kill-switch for the range coalescer.
+    /// Defaults to `true`. When `false`, every GET runs the
+    /// pre-SHELF-30 path: each split fires its own origin GET with
+    /// only the store-level single-flight on identical keys. Useful
+    /// as a fast-revert lever if the coalescer ever ships a
+    /// correctness regression in the wild.
+    pub coalesce_enabled: AtomicBool,
 }
 
 impl ServerState {
@@ -199,6 +211,8 @@ impl ServerState {
             // foyer cache and self-evicts.
             freshness: Arc::new(crate::freshness::FreshnessTracker::new(20_000)),
             conditional_get_enabled: AtomicBool::new(true),
+            coalescer: crate::coalesce::RangeCoalescer::new(),
+            coalesce_enabled: AtomicBool::new(true),
         }
     }
 
@@ -240,6 +254,20 @@ impl ServerState {
     /// SHELF-23 — read the conditional-GET toggle on the hot path.
     pub fn is_conditional_get_enabled(&self) -> bool {
         self.conditional_get_enabled.load(Ordering::Relaxed)
+    }
+
+    /// SHELF-30 — flip the range-coalesce toggle at runtime. Returns
+    /// the previous value. Mirrors [`Self::set_conditional_get_enabled`];
+    /// off restores the pre-SHELF-30 path (each split fires its own
+    /// origin GET; only the store-level single-flight on identical
+    /// keys remains).
+    pub fn set_coalesce_enabled(&self, enabled: bool) -> bool {
+        self.coalesce_enabled.swap(enabled, Ordering::Release)
+    }
+
+    /// SHELF-30 — read the range-coalesce toggle on the hot path.
+    pub fn is_coalesce_enabled(&self) -> bool {
+        self.coalesce_enabled.load(Ordering::Relaxed)
     }
 
     /// SHELF-G4 builder hook: install a `ShelfFilterService`. Kept
