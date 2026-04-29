@@ -11,8 +11,17 @@
 //! the binary entrypoint.
 //!
 //! Scope boundary (see `agents/out/adr/0001` … `0009`): no embedded
-//! Raft, no ONNX MLP admission, HTTP/2 only in v1, two Foyer pools
-//! only, S3-FIFO eviction.
+//! Raft, no ONNX MLP admission, HTTP/2 only in v1.
+//!
+//! Cache surface — three logical caches, two of them Foyer-backed:
+//!   * **metadata pool** (DRAM-only, Foyer): manifest + footer bytes.
+//!   * **rowgroup pool** (DRAM + NVMe hybrid, Foyer): Parquet row
+//!     groups; default eviction is **LRU** (see
+//!     [`config::EvictionPolicy`] — configurable to `S3Fifo`, `Lfu`,
+//!     or `Fifo`; SHELF-E1b moved the default off S3-FIFO).
+//!   * **head LRU** ([`head_lru`]): small object-existence cache that
+//!     short-circuits S3 `HEAD` round-trips. Not a Foyer pool; a
+//!     bounded path-keyed LRU with a negative-result TTL.
 //!
 //! Tickets that will flesh out this skeleton: SHELF-01 (workspace),
 //! SHELF-02 (server), SHELF-03 (DRAM pool), SHELF-05 (origin),
@@ -38,11 +47,18 @@
 pub mod admission;
 pub mod admission_limiter;
 pub mod aws_chunked;
+// Dormant modules — present in the tree but with zero non-test callers
+// in the current hot/control paths. Gated behind off-by-default Cargo
+// features so default `shelfd` builds ship a smaller binary; the source
+// stays in-tree per project policy (gate, don't delete) so a future
+// caller can flip the flag without resurrecting code from history.
+#[cfg(feature = "zstd_metadata")]
 pub mod compression;
 pub mod config;
 pub mod control;
 pub mod error;
 pub mod filter_service;
+#[cfg(feature = "fingerprint")]
 pub mod fingerprint;
 pub mod freshness;
 pub mod head_lru;
@@ -52,12 +68,17 @@ pub mod membership;
 pub mod metrics;
 pub mod mv_registry;
 pub mod origin;
+#[cfg(feature = "parquet_meta")]
 pub mod parquet_meta;
 pub mod peer;
 pub mod peer_fetch;
 pub mod pinlist;
 pub mod router;
 pub mod s3_shim;
+// Distinct feature name `side_bloom_module` to keep this gate from
+// being confused with the `SideBloom` trait that `filter_service`
+// defines independently for the hot path.
+#[cfg(feature = "side_bloom_module")]
 pub mod side_bloom;
 pub mod store;
 pub mod table_props;

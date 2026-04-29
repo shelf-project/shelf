@@ -104,8 +104,24 @@ raft = []
 flight = []
 # SHELF E2 — flip Pool::Metadata on-cache compression. Off by default
 # until the benchmark in `benchmarks/compression/` shows a positive
-# capacity × latency trade-off on rep-2's 7-day trace.
+# capacity × latency trade-off on rep-2's 7-day trace. Also gates the
+# `src/compression.rs` zstd wrapper (no non-test callers today).
 zstd_metadata = []
+# Track E7 — canonicalised jsonPlan fingerprint (`src/fingerprint.rs`).
+# Intended for the plugin-side query-tag path; no non-test caller in
+# shelfd's hot/control surfaces today, so off by default.
+fingerprint = []
+# SHELF-D3 phase 2 — Parquet footer/page-index extractor
+# (`src/parquet_meta.rs`). Phase-1 API landed; phase-2 wiring is still
+# pending, so the module has no non-test callers today and is off by
+# default.
+parquet_meta = []
+# SHELF-G2 — durable side-bloom store (`src/side_bloom.rs`). Not to be
+# confused with the in-process `SideBloom` trait in `filter_service`
+# (those are independent: the trait names a hot-path signal source,
+# this module ships the persistent variant). Off by default until the
+# G2 phase is wired up.
+side_bloom_module = []
 
 [[bench]]
 name = "hashring"
