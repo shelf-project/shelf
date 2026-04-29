@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SHELF-37 — Iceberg event-listener jar** (`clients/trino-listener/`).
+  New Trino `EventListener` SPI plugin, factory name
+  `shelf-iceberg-listener`, that captures every `QueryCompletedEvent`
+  and writes it to a configurable Iceberg table via the official
+  `iceberg-core` writer API. Append-only, partitioned by
+  `day(create_time)`, fail-open by default (`fail-mode=drop`). Backed
+  by a bounded queue + dedicated writer thread; the SPI hook never
+  stalls Trino's coordinator threads. Exposes a JMX MBean and an
+  optional Prometheus HTTP exporter on port 9099. Includes the
+  `shelf.tag.*` session-property → `tags_json` contract that SHELF-40 /
+  SHELF-42 build on. See `clients/trino-listener/README.md` for the
+  full configuration matrix and schema. The origin-cluster overlay
+  lives under `infra/` per the existing OSS-overlay convention and is
+  stripped from the publish surface by `release.yml`.
+
 ## [1.0.0-rc.2] — 2026-04-29
 
 **Hotfix release for the SHELF-21f LODC submit-queue overflow regression

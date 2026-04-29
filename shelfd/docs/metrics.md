@@ -46,6 +46,25 @@ row into the table above in the same PR that wires the emission.
 | `shelf_origin_seconds`        | histogram | `{verb,outcome}`       | S3 origin request latency.                                     | SHELF-05 (obs pass) |
 | `shelf_store_insert_seconds`  | histogram | `{pool}`               | Foyer insert latency (tail is the scan-eviction signal).       | SHELF-17 / SHELF-18 |
 
+## Trino-side metrics (SHELF-37)
+
+These series are emitted by the **Trino-side** Iceberg event-listener
+jar at `clients/trino-listener/`, not by `shelfd`. They live on the
+Trino coordinator JVM (JMX MBean `io.shelf.listener:type=Listener` and
+optional Prometheus HTTP at `:9099/metrics`). They are listed here so
+the dashboards in `observability/dashboards/*` and the SHELF-40 / SHELF-42
+consumers can find a single source of truth for every Shelf-emitted
+series.
+
+| Name                                       | Kind      | Labels                                                 | Description                                                  | Ticket    |
+|--------------------------------------------|-----------|--------------------------------------------------------|--------------------------------------------------------------|-----------|
+| `shelf_listener_events_total`              | counter   | `{outcome}` ∈ `received, written, dropped`             | Lifecycle counter for events seen by the listener.           | SHELF-37  |
+| `shelf_listener_queue_depth`               | gauge     | —                                                      | Current bounded ingest-queue depth.                          | SHELF-37  |
+| `shelf_listener_queue_capacity`            | gauge     | —                                                      | Configured queue capacity.                                   | SHELF-37  |
+| `shelf_listener_write_seconds_*`           | histogram | —                                                      | Iceberg flush latency. 17-bucket exponential, 500 µs → ~33 s. | SHELF-37  |
+| `shelf_listener_write_errors_total`        | counter   | `{reason}` ∈ `iceberg_commit, serialization, unknown`  | Failure counter by reason.                                   | SHELF-37  |
+| `shelf_listener_dropped_total`             | counter   | `{reason}` ∈ `queue_full, log_only, shutdown`          | Dropped events by reason. Mirrors the SPI-side decision path. | SHELF-37  |
+
 ## Notes
 
 - All `*_seconds` histograms use the exponential buckets

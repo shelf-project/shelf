@@ -108,8 +108,16 @@ jobs:
           java-version: "25"
           cache: maven
 
-      - name: mvn verify
+      - name: mvn verify (clients/trino)
         run: mvn -B -ntp -f clients/trino/pom.xml verify
+
+      - name: mvn verify (clients/trino-listener)
+        # SHELF-37 Iceberg event-listener jar. The integration suite
+        # (IcebergSinkRoundTripIT) gates itself on env SHELF_INTEGRATION=1
+        # via @EnabledIfEnvironmentVariable, so the lane stays fast on
+        # PR and nightly can flip the env var to exercise the full
+        # round-trip.
+        run: mvn -B -ntp -f clients/trino-listener/pom.xml verify
 
   # -------------------------------------------------------------------
   # Python lane — pytest on the trino_logs replay harness.
