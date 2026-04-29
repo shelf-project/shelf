@@ -1,36 +1,66 @@
-//! Control-plane surface for `shelfctl` + Grafana scraping.
+//! Control-plane wire types for `shelfctl` + Grafana scraping.
 //!
-//! Ticket ownership:
+//! ## Module shape (post-SHELF-23)
+//!
+//! This module is now **thin** — it only carries the on-the-wire
+//! payload types ([`Stats`], [`PoolStats`]) that `GET /stats`
+//! returns. The actual control-plane HTTP server (`/healthz`,
+//! `/readyz`, `/metrics`, `/stats`, `/admin/*`) was folded into the
+//! data-plane Axum router and now lives at
+//! [`crate::http::serve`]; the pin-list reload signal is wired via
+//! [`crate::pinlist::ReloadHandle::reload_now`], driven by the
+//! `POST /admin/reload` handler in `http.rs` and the SIGHUP path in
+//! `main.rs`.
+//!
+//! Anything below the type definitions is preserved only as a
+//! `#[deprecated]` shim returning [`crate::Error::Unimplemented`] so
+//! external callers of the older public surface get a structured
+//! error rather than the previous panic. The shim will be removed
+//! in v1.1.
+//!
+//! Ticket history:
 //! - SHELF-23 — `shelfctl` subcommands (`stats`, `pin`, `evict`,
-//!   `ring`, `reload`) route through this module.
-//! - SHELF-24 — `reload pin-list` raises SIGHUP → pin-list loader.
-//! - SHELF-08 — Prometheus `/metrics` is served here (kept off the
-//!   data plane so a hot-loop client cannot starve metrics scrapes).
+//!   `ring`, `reload`) now route through `http.rs`.
+//! - SHELF-24 — `reload pin-list` is implemented by
+//!   `crate::pinlist::ReloadHandle::reload_now`.
+//! - SHELF-08 — Prometheus `/metrics` is served by `http.rs`.
 //! - SHELF-20 — `/stats` returns capacity + used bytes used by the
-//!   plugin's HRW weighting.
-//!
-//! The control plane is HTTP-first for v1; a `tonic` gRPC service is
-//! scaffolded here so SHELF-23 can drop in the proto without churning
-//! callers. ADR-0004 scopes HTTP/2 only for the data plane — the
-//! control plane may accept HTTP/1.1 for kubectl-style probes.
+//!   plugin's HRW weighting; this module owns the wire types only.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-
-/// Handle to the live pin-list reloader. `reload()` sends a SIGHUP-
-/// equivalent to the owner task.
+/// Handle to the live pin-list reloader.
+///
+/// **Deprecated**: this type predates the real loader in
+/// [`crate::pinlist`]. Use [`crate::pinlist::ReloadHandle`] (acquired
+/// from `PinListLoader::boot_and_spawn`) instead.
 #[derive(Debug, Clone, Default)]
+#[deprecated(
+    since = "0.1.0",
+    note = "use crate::pinlist::ReloadHandle (wired in main.rs); this shim will be removed in v1.1"
+)]
 pub struct PinListReloadHandle {
     _private: (),
 }
 
+#[allow(deprecated)]
 impl PinListReloadHandle {
     /// Trigger an out-of-band pin list reload.
+    ///
+    /// **Deprecated**: returns [`crate::Error::Unimplemented`]. The
+    /// actual reload signal is exposed by
+    /// [`crate::pinlist::ReloadHandle::reload_now`], driven by
+    /// `POST /admin/reload` in `crate::http` and the SIGHUP path in
+    /// `main.rs`.
+    #[deprecated(
+        since = "0.1.0",
+        note = "use crate::pinlist::ReloadHandle::reload_now; this shim will be removed in v1.1"
+    )]
     pub fn reload(&self) -> crate::Result<()> {
-        todo!(
-            "SHELF-24: control: signal the pin-list reloader task; see \
-             03-plan.md §4 SHELF-24"
-        )
+        Err(crate::Error::Unimplemented(
+            "control::PinListReloadHandle::reload moved to crate::pinlist::ReloadHandle::reload_now \
+             (driven by POST /admin/reload in crate::http and the SIGHUP path in main.rs); \
+             will be removed in v1.1"
+                .to_string(),
+        ))
     }
 }
 
@@ -89,17 +119,4 @@ pub struct PoolStats {
     /// when the pool runs DRAM-only.
     #[serde(default)]
     pub disk_capacity_bytes: u64,
-}
-
-/// Serve the control plane (HTTP + gRPC stub).
-pub async fn serve(
-    _addr: SocketAddr,
-    _reload: PinListReloadHandle,
-    _store: Arc<crate::store::FoyerStore>,
-    _shutdown: tokio_util::sync::CancellationToken,
-) -> crate::Result<()> {
-    todo!(
-        "SHELF-23: control: serve /stats + /metrics + admin gRPC \
-         (pin/unpin/evict/reload) on addr; see 03-plan.md §4 SHELF-23"
-    )
 }

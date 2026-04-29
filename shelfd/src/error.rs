@@ -67,6 +67,16 @@ pub enum Error {
     /// Owning ticket must remove these before their PR merges.
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
+
+    /// Public surface that has been superseded but is still exported
+    /// for backwards-compatibility. Returned instead of `todo!()` so
+    /// an external caller of a deprecated API gets a structured error
+    /// they can match on, not an immediate panic.
+    ///
+    /// The string payload should reference the replacement code path
+    /// (e.g. "moved to http::serve") so consumers can self-route.
+    #[error("unimplemented: {0}")]
+    Unimplemented(String),
 }
 
 impl Error {
@@ -84,6 +94,7 @@ impl Error {
             Error::Singleflight(_) => "singleflight",
             Error::InvalidKey(_) => "key",
             Error::Internal(_) => "internal",
+            Error::Unimplemented(_) => "unimplemented",
         }
     }
 }
