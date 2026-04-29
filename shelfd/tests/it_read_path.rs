@@ -6,13 +6,14 @@
 //!   flow including single-flight coalescing under 100 concurrent
 //!   identical-key requests.
 //!
-//! Gating: every test in this file is skipped when `SHELF_INTEGRATION`
-//! is unset. CI flips it on; `cargo test` on a developer laptop stays
-//! offline by default.
+//! Gating: every test in this file is `#[cfg_attr(not(feature =
+//! "integration"), ignore)]`. Plain `cargo test` reports them as
+//! `ignored` (idiomatic Rust); CI flips them on with
+//! `cargo test -p shelfd --features integration` after MinIO is up.
 //!
 //! Pre-flight (operator):
 //!   cd shelfd/tests && docker compose up -d minio
-//!   SHELF_INTEGRATION=1 cargo test -p shelfd --test it_read_path
+//!   cargo test -p shelfd --features integration --test it_read_path
 
 #![cfg(test)]
 
@@ -42,12 +43,23 @@ const MINIO_ACCESS_KEY: &str = "minioadmin";
 const MINIO_SECRET_KEY: &str = "minioadmin";
 const TEST_BUCKET: &str = "shelf-it";
 
-fn skip_if_offline() -> bool {
-    if std::env::var("SHELF_INTEGRATION").as_deref() != Ok("1") {
-        eprintln!("SKIP: set SHELF_INTEGRATION=1 + run docker-compose to enable");
-        return true;
+/// Mirrors `common::require_minio_or_panic`. Kept local because this
+/// test file predates the shared `mod common` extraction and never
+/// migrated; the panic semantics match so the behaviour on
+/// `--features integration` is identical to the other `it_*.rs`
+/// suites.
+fn require_minio_or_panic() {
+    use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+    let panic_msg = "MinIO unreachable; set SHELF_INTEGRATION=1 only when \
+         docker compose -f shelfd/tests/docker-compose.yml up is healthy";
+    let addr: SocketAddr = "127.0.0.1:9000"
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut iter| iter.next())
+        .unwrap_or_else(|| panic!("{panic_msg}"));
+    if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_err() {
+        panic!("{panic_msg}");
     }
-    false
 }
 
 async fn s3_client() -> S3Client {
@@ -178,10 +190,9 @@ fn synth_key(seed: u8) -> String {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn s3_origin_reads_seeded_object() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let client = s3_client().await;
     ensure_bucket(&client).await;
     let key = "origin-direct";
@@ -199,10 +210,9 @@ async fn s3_origin_reads_seeded_object() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn http_cold_then_warm_get_hits_origin_once() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let client = s3_client().await;
     ensure_bucket(&client).await;
     let key_hex = synth_key(0x11);
@@ -250,10 +260,9 @@ async fn http_cold_then_warm_get_hits_origin_once() {
 /// SHELF-06 acceptance criterion: 100 concurrent cold GETs for the
 /// same key result in exactly ONE origin fetch.
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn one_hundred_concurrent_misses_collapse_to_one_origin_call() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let client = s3_client().await;
     ensure_bucket(&client).await;
     let key_hex = synth_key(0x77);

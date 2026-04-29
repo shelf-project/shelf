@@ -1,7 +1,19 @@
 //! Shared helpers for `shelfd` integration tests.
 //!
-//! Every consumer of this module must be gated on `SHELF_INTEGRATION=1`
-//! because the helpers expect a running MinIO at `127.0.0.1:9000`. See
+//! Every consumer of this module is compiled into a test binary that
+//! is gated by the `integration` Cargo feature
+//! (`#[cfg_attr(not(feature = "integration"), ignore)]` on every
+//! MinIO-backed `#[tokio::test]`). Without the feature the runner
+//! reports the tests as `ignored` — the idiomatic Rust signal — so a
+//! green `cargo test` no longer silently hides zero coverage.
+//!
+//! When the feature IS on but MinIO is unreachable (operator forgot
+//! `docker compose up -d`),
+//! [`require_minio_or_panic`](require_minio_or_panic) panics with a
+//! clear hint instead of returning early. The previous
+//! `skip_if_offline` returned `true` and let the caller short-circuit;
+//! that pattern made `cargo test --features integration` silently
+//! green when MinIO wasn't running. See
 //! `shelfd/tests/docker-compose.yml` for the spin-up command.
 //!
 //! Kept deliberately small: anything more specialised belongs in the
@@ -9,7 +21,7 @@
 
 #![allow(dead_code)]
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,12 +47,33 @@ pub const MINIO_ACCESS_KEY: &str = "minioadmin";
 pub const MINIO_SECRET_KEY: &str = "minioadmin";
 pub const TEST_BUCKET: &str = "shelf-it";
 
-pub fn skip_if_offline() -> bool {
-    if std::env::var("SHELF_INTEGRATION").as_deref() != Ok("1") {
-        eprintln!("SKIP: set SHELF_INTEGRATION=1 + run docker-compose to enable");
-        return true;
+/// Assert that MinIO is reachable on `127.0.0.1:9000` before exercising
+/// the rest of the test body. Panics with an operator-actionable
+/// message if the TCP connect fails — never returns a "skip" value.
+///
+/// This replaces the old `skip_if_offline()` helper, which returned
+/// `true` when `SHELF_INTEGRATION` was unset and let the caller
+/// `return;` from the test. That pattern made `cargo test` report
+/// every integration test as passing in 0s when the env var was not
+/// configured, hiding zero coverage in CI. The new contract:
+///
+/// 1. The cargo `integration` feature gates whether the test runs at
+///    all (compile-time `#[cfg_attr(not(feature = "integration"),
+///    ignore)]`); plain `cargo test` reports `ignored`.
+/// 2. When the feature IS on but MinIO is down, this helper panics
+///    with a clear hint instead of silently continuing into a flaky
+///    SDK error path.
+pub fn require_minio_or_panic() {
+    let panic_msg = "MinIO unreachable; set SHELF_INTEGRATION=1 only when \
+         docker compose -f shelfd/tests/docker-compose.yml up is healthy";
+    let addr: SocketAddr = "127.0.0.1:9000"
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut iter| iter.next())
+        .unwrap_or_else(|| panic!("{panic_msg}"));
+    if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_err() {
+        panic!("{panic_msg}");
     }
-    false
 }
 
 pub async fn s3_client() -> S3Client {

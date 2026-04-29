@@ -1,11 +1,12 @@
 //! Integration tests for the SHELF-21 S3-shim write path.
 //!
-//! Gating: skipped unless `SHELF_INTEGRATION=1` is set + a MinIO is
-//! running on `127.0.0.1:9000`. The CI matrix sets this; developer
-//! laptops stay offline by default. Pre-flight (operator):
+//! Gating: every test is `#[cfg_attr(not(feature = "integration"),
+//! ignore)]`. Developer laptops stay offline by default; CI runs
+//! `cargo test -p shelfd --features integration` after MinIO is up.
+//! Pre-flight (operator):
 //!
 //!   cd shelfd/tests && docker compose up -d minio
-//!   SHELF_INTEGRATION=1 cargo test -p shelfd --test it_shim_write
+//!   cargo test -p shelfd --features integration --test it_shim_write
 //!
 //! What this asserts:
 //!
@@ -27,8 +28,8 @@ use reqwest::Client;
 
 mod common;
 use common::{
-    build_state_with_pod_id, ensure_bucket, s3_client, skip_if_offline, spawn_server_with_shim,
-    TEST_BUCKET,
+    build_state_with_pod_id, ensure_bucket, require_minio_or_panic, s3_client,
+    spawn_server_with_shim, TEST_BUCKET,
 };
 
 async fn http_client() -> Client {
@@ -39,10 +40,9 @@ async fn http_client() -> Client {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn put_through_shim_round_trips() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 
@@ -98,10 +98,9 @@ async fn put_through_shim_round_trips() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn put_after_get_invalidates_head_lru() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 
@@ -143,10 +142,9 @@ async fn put_after_get_invalidates_head_lru() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn delete_through_shim_evicts_and_propagates() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 
@@ -187,10 +185,9 @@ async fn delete_through_shim_evicts_and_propagates() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn delete_is_idempotent_on_missing_key() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 
@@ -215,10 +212,9 @@ async fn delete_is_idempotent_on_missing_key() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn put_oversized_body_returns_501_not_implemented() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 

@@ -1,9 +1,10 @@
 //! Integration tests for the SHELF-22 S3-compat read shim.
 //!
-//! Gated on `SHELF_INTEGRATION=1`; see `tests/docker-compose.yml` for
-//! the MinIO spin-up. The tests use the **same** helpers as
-//! `it_head_stats.rs` / `it_read_path.rs` so the MinIO seed path is
-//! shared.
+//! Gating: every test is `#[cfg_attr(not(feature = "integration"),
+//! ignore)]`. Run with `cargo test -p shelfd --features integration`
+//! after `docker compose -f shelfd/tests/docker-compose.yml up -d`.
+//! The tests use the **same** helpers as `it_head_stats.rs` /
+//! `it_read_path.rs` so the MinIO seed path is shared.
 //!
 //! Scope (SHELF-22 acceptance):
 //! - HEAD parity headers (`Content-Length`, `ETag`, `Last-Modified`,
@@ -19,15 +20,14 @@ mod common;
 
 use bytes::Bytes;
 use common::{
-    build_state_with_pod_id, build_state_with_shim_cap, ensure_bucket, put_object, s3_client,
-    skip_if_offline, spawn_server_with_shim, TEST_BUCKET,
+    build_state_with_pod_id, build_state_with_shim_cap, ensure_bucket, put_object,
+    require_minio_or_panic, s3_client, spawn_server_with_shim, TEST_BUCKET,
 };
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn head_object_returns_s3_parity_headers() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let client = s3_client().await;
     ensure_bucket(&client).await;
     let key = "shim-head-parity";
@@ -89,10 +89,9 @@ async fn head_object_returns_s3_parity_headers() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn get_object_with_range_serves_bytes() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let client = s3_client().await;
     ensure_bucket(&client).await;
     let key = "shim-range-get";
@@ -128,10 +127,9 @@ async fn get_object_with_range_serves_bytes() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn get_object_without_range_returns_full_object() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let client = s3_client().await;
     ensure_bucket(&client).await;
     let key = "shim-full-get";
@@ -152,10 +150,9 @@ async fn get_object_without_range_returns_full_object() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn get_object_rejects_huge_unbounded_with_501() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let client = s3_client().await;
     ensure_bucket(&client).await;
     let key = "shim-oversized";
@@ -181,6 +178,7 @@ async fn get_object_rejects_huge_unbounded_with_501() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn get_object_suffix_range_serves_tail_bytes() {
     // The shim must honour `bytes=-N` (RFC 9110 §14.1.2), because
     // Trino's `io.trino.filesystem.s3.S3Input.readTail(n)` — the
@@ -188,9 +186,7 @@ async fn get_object_suffix_range_serves_tail_bytes() {
     // shape. The original parser treated suffix ranges as malformed
     // and returned 416, breaking every Iceberg query that hit the
     // shim. See SHELF-22 SPI wiring.
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let client = s3_client().await;
     ensure_bucket(&client).await;
     let key = "shim-suffix-range";
@@ -226,6 +222,7 @@ async fn get_object_suffix_range_serves_tail_bytes() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn shim_read_bumps_hits_and_misses_counters() {
     // Parity with the native `/cache` data plane: warm reads through
     // the shim must increment `shelf_hits_total{pool=...}` so the
@@ -233,9 +230,7 @@ async fn shim_read_bumps_hits_and_misses_counters() {
     // a catalog's `s3.endpoint` is swapped to shelfd. Without this,
     // the `run-smoke.sh` hit-ratio gate stays pinned at 0 — which is
     // exactly the regression this test is here to prevent.
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let client = s3_client().await;
     ensure_bucket(&client).await;
     let key = "shim-hit-miss-accounting.parquet"; // routes to rowgroup pool
@@ -293,10 +288,9 @@ async fn shim_read_bumps_hits_and_misses_counters() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn get_object_on_missing_key_returns_404_xml() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let client = s3_client().await;
     ensure_bucket(&client).await;
 
