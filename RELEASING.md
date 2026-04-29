@@ -54,10 +54,15 @@ shenanigans).
 
 Every tagged release publishes the following:
 
-- **Multi-arch container image** for the daemon:
-  `ghcr.io/shelf-project/shelfd:vX.Y.Z`, with `linux/amd64` and
-  `linux/arm64` manifests. Floating tags (`latest`, `vX`, `vX.Y`) are
-  updated for stable releases only.
+- **Container image** for the daemon:
+  `ghcr.io/shelf-project/shelfd:vX.Y.Z`. The pipeline currently builds
+  `linux/amd64` only; `linux/arm64` is tracked under issue
+  [#36](https://github.com/shelf-project/shelf/issues/36) and gated on
+  the QEMU build-time fitting the GitHub Actions runner timeout.
+  Floating tags (`latest`, `vX`, `vX.Y`) are updated for stable releases
+  only.
+
+  > **arm64 status**: see [#36](https://github.com/shelf-project/shelf/issues/36) — re-enables when the GHA runner timeout / cross-compile path is sorted (post-v1.0.0).
 - **Helm chart as an OCI artefact**:
   `ghcr.io/shelf-project/charts/shelf:vX.Y.Z`. The chart `appVersion`
   matches the daemon tag.
