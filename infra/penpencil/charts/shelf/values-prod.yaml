@@ -81,6 +81,38 @@ cache:
     s3Uri: ""
     reloadIntervalSeconds: 900
 
+  # SHELF-40 — `shelf_s3_dollars_saved_total` cost-saved counter.
+  # Penpencil cluster runs in `ap-south-1` (Mumbai); the
+  # ap-south-1 preset in `crates/shelf-cost/src/coefficients.rs`
+  # is wired with the same citations as `us-east-1`:
+  #
+  #   • S3 GET ($0.0004 / 1k requests, S3 Standard, ap-south-1)
+  #     https://aws.amazon.com/s3/pricing/  — § "Requests &
+  #     data retrievals" tab, "Asia Pacific (Mumbai)" row.
+  #   • Same-AZ data transfer = $0.00 / GiB.
+  #     https://aws.amazon.com/ec2/pricing/on-demand/  — § "Data
+  #     Transfer", "All AWS Regions" → same-AZ row.
+  #   • Cross-AZ data transfer = $0.01 / GiB each direction.
+  #     https://aws.amazon.com/ec2/pricing/on-demand/  — § "Data
+  #     Transfer within the same AWS Region".
+  #   • NAT-gateway data processing = $0.045 / GiB
+  #     https://aws.amazon.com/vpc/pricing/  — § "Pricing for
+  #     NAT gateway", "Asia Pacific (Mumbai)" row.
+  #
+  # Penpencil clusters use the S3 VPC gateway endpoint, so NAT
+  # processing does NOT apply to S3 traffic — `nat_traversal_basis_points`
+  # stays at the default `0` and the NAT term contributes 0 cents.
+  # If the topology changes (e.g. a private-subnet egress through
+  # NAT to S3), set `natTraversalBasisPoints: 10000` and the
+  # counter will start crediting NAT savings.
+  cost:
+    enabled: true
+    region: ap-south-1
+    # Inherit the ap-south-1 preset for every coefficient. To
+    # override (e.g. EDP discount), set the matching field below
+    # in your overlay and update the citation block above.
+    # natTraversalBasisPoints: 0   # default; S3 VPC endpoint = no NAT charge
+
 origin:
   # Origin bucket (the data lake Trino reads).
   bucket: ""

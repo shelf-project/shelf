@@ -161,6 +161,28 @@ async fn run(args: Args) -> anyhow::Result<()> {
         })
         .unwrap_or(true);
 
+    // SHELF-40 — load the audit-able cost model. `from_config`
+    // refuses to register on negative coefficients / unknown
+    // regions, which is exactly the "fail loud" gate the design
+    // note demands. When `cache.cost.enabled = false` we still
+    // build a `CostState` so the `with_cost_state` builder is
+    // unconditional — but the `enabled` bit short-circuits every
+    // hot-path bump.
+    let cost_state = match shelfd::cost::CostState::from_config(&config.cost) {
+        Ok(cs) => {
+            tracing::info!(
+                region = %cs.region(),
+                enabled = cs.is_enabled(),
+                "SHELF-40 cost state initialised"
+            );
+            cs
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "SHELF-40 cost state failed to initialise; counter disabled");
+            shelfd::cost::CostState::disabled()
+        }
+    };
+
     let mut state = ServerState::with_head_lru_and_pod_id(
         store.clone(),
         origin.clone(),
@@ -171,13 +193,19 @@ async fn run(args: Args) -> anyhow::Result<()> {
         config.node.id.clone(),
     )
     .with_drain_signal(drain_signal.clone())
-    .with_peer_fetch(peer_http, config.membership.stats_port);
+    .with_peer_fetch(peer_http, config.membership.stats_port)
+    .with_cost_state(cost_state.clone());
     state.set_peer_fetch_enabled(peer_fetch_enabled);
     tracing::info!(
         peer_fetch_enabled,
         peer_stats_port = config.membership.stats_port,
         "SHELF-23 peer-fetch wired into s3_shim::handle_get_object"
     );
+
+    // SHELF-40 — spawn the rolling-rate updater. No-op when the
+    // cost state is disabled. Cancelled on shutdown via the same
+    // `shutdown` token the data plane already observes.
+    cost_state.spawn_rate_updater(shutdown.clone());
     if let Some(handle) = reload_handle {
         state = state.with_reload_handle(handle);
     }

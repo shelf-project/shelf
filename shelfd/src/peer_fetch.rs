@@ -151,6 +151,23 @@ where
             crate::metrics::PEER_HIT_TOTAL
                 .with_label_values(&[pool_label])
                 .inc();
+            // SHELF-40 — bump `shelf_s3_dollars_saved_total{outcome="peer"}`
+            // here (and ONLY here, never alongside the local
+            // hit_memory/hit_disk arms in s3_shim.rs) so a peer
+            // hit and a local hit on the *same* content-addressed
+            // key cannot double-charge. Peer-hit bytes traversed
+            // a pod-to-pod network link; the OSS-default
+            // `DEFAULT_PEER_AZ::SameAz` describes the same-AZ
+            // happy path. Operators with multi-AZ shelf rings
+            // should override via the future SHELF-23 AZ
+            // attribution surface (tracked in the SHELF-40
+            // design note — until then, same-AZ is the audit-
+            // safe pessimistic default).
+            let event = shelf_cost::HitEvent::Peer {
+                bytes_returned: b.len() as u64,
+                peer_az: crate::cost::DEFAULT_PEER_AZ,
+            };
+            let _ = state.cost.observe(event);
             Ok(b)
         }
         // Peer was reachable but said "Miss" → origin is the answer.

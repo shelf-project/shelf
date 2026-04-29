@@ -70,6 +70,20 @@ pub struct Config {
     /// cp` can read through the cache without the Trino plugin.
     #[serde(default)]
     pub s3_shim: S3ShimConfig,
+
+    /// SHELF-40 — audit-able S3 + data-transfer cost model. Maps
+    /// every cache hit through `shelf-cost::CostModel` to a cents
+    /// contribution on the `shelf_s3_dollars_saved_total` counter,
+    /// using published AWS prices (citations live in the
+    /// `crates/shelf-cost/` README).
+    ///
+    /// Defaults to "on, region us-east-1" so the OSS chart does
+    /// the right thing out of the box. Operators on a different
+    /// region override `region: ap-south-1` (or any other
+    /// supported preset) in their values overlay and turn the
+    /// counter off via `cache.cost.enabled: false` if needed.
+    #[serde(default)]
+    pub cost: shelf_cost::CostConfig,
 }
 
 fn default_head_lru_entries() -> u64 {

@@ -271,6 +271,66 @@ cache:
     # -- Poll interval. SIGHUP also triggers a reload. [plan §4 SHELF-24]
     reloadIntervalSeconds: 900
 
+  # ---------------------------------------------------------------------------
+  # SHELF-40 — `shelf_s3_dollars_saved_total` cost-saved counter.
+  #
+  # The counter publishes one IntCounter series per
+  # `(region, outcome ∈ {hit_memory, hit_disk, peer})`. The unit is
+  # **integer cents** (not dollars, not micro-cents) because the
+  # underlying Prometheus type is i64 and we want the dashboard
+  # math to be `cents × 0.01 = dollars` everywhere — no hidden
+  # multipliers. The companion gauge
+  # `shelf_s3_dollars_saved_rate_cents_per_sec` is computed by
+  # shelfd as a 60 s rolling rate so dashboards don't need to
+  # `rate(... [60s]) * 0.01` in PromQL.
+  #
+  # All coefficients below default to the `us-east-1` published
+  # AWS price list (see `crates/shelf-cost/README.md` for the
+  # exact pricing-page citations and the "stale price refresh"
+  # runbook). Operators in `ap-south-1` flip `region: ap-south-1`
+  # in their values overlay; the `ap-south-1` preset is wired
+  # into the crate with the same citation discipline.
+  # Region-specific overlays go in your own values file, not in
+  # this chart default.
+  # ---------------------------------------------------------------------------
+  cost:
+    # -- Master switch. Default ON; flip to false to silence both
+    # the counter and the rolling-rate updater task. The wiring
+    # overhead with the counter on is one atomic add per cache
+    # hit — see `crates/shelf-cost/benches/dollars_saved_atomic_add.rs`.
+    enabled: true
+    # -- AWS region identifier. Picks the matching preset from the
+    # `shelf-cost` crate. Supported presets ship with citations:
+    # `us-east-1` (OSS default) and `ap-south-1` (Mumbai overlay
+    # default). Any other region requires the operator to supply
+    # explicit `*_micro_cents_*` overrides below with citations in
+    # their own values overlay.
+    region: us-east-1
+    # -- Override for the per-GET request rate, in micro-cents per
+    # request (1 cent = 1_000_000 µ¢). Unset ⇒ inherit the
+    # regional preset. The us-east-1 / ap-south-1 presets store
+    # `40 µ¢/req` (= $0.0004 / 1 000 GETs).
+    # getRequestMicroCents: 40
+    # -- Override for the same-AZ data-transfer rate (µ¢/GiB,
+    # `GiB = 2^30 bytes`). AWS lists same-AZ traffic as $0.00 in
+    # both us-east-1 and ap-south-1, so the preset is `0`.
+    # sameAzMicroCentsPerGib: 0
+    # -- Override for the cross-AZ data-transfer rate (µ¢/GiB).
+    # `$0.01/GiB ⇒ 1_000_000 µ¢/GiB` exact (no rounding residue).
+    # crossAzMicroCentsPerGib: 1000000
+    # -- Override for the NAT-gateway data-processing rate
+    # (µ¢/GiB). Both presets store `4_500_000` µ¢/GiB exactly
+    # (= `$0.045/GiB`).
+    # natProcessingMicroCentsPerGib: 4500000
+    # -- Fraction of cache-saved bytes that *would have* exited
+    # via NAT had the cache missed, expressed as basis points
+    # (0..=10_000; `10_000` = 100%). Defaults to `0` (S3 VPC
+    # gateway endpoint assumed). Setting this is the operator's
+    # affirmation that their VPC topology actually charges NAT
+    # for the modelled traffic; without it, the NAT term
+    # contributes zero cents.
+    # natTraversalBasisPoints: 0
+
 # ---------------------------------------------------------------------------
 # Origin (S3) client — [plan §4 SHELF-05]
 # ---------------------------------------------------------------------------

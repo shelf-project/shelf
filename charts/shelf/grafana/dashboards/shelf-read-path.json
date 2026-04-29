@@ -379,6 +379,87 @@
           "legendFormat": "follower coalesced"
         }
       ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "S3 cost saved (cents/sec, last 60s) — SHELF-40",
+      "description": "shelf_s3_dollars_saved_rate_cents_per_sec is published by shelfd as a 60-second rolling rate so this panel does NOT need to do `rate(...) * 0.01` itself. Unit is integer cents per second; Grafana renders it as `currencyUSD` after dividing by 100 via the `decimals` field. Each `outcome` series — `hit_memory`, `hit_disk`, `peer` — represents the cents-per-second the cache earned by avoiding the equivalent S3 GET (and bytes-out, when peer_az is cross-AZ). Sum across outcomes for a single 'how much is shelf saving right now' read. Coefficients live in `crates/shelf-cost/src/coefficients.rs`; defaults match the published AWS price list for `us-east-1` and `ap-south-1`.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cents/sec",
+          "decimals": 2,
+          "custom": {"lineWidth": 2, "fillOpacity": 10}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"]},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (shelf_s3_dollars_saved_rate_cents_per_sec{replica=~\"$replica\"})",
+          "legendFormat": "{{outcome}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(shelf_s3_dollars_saved_rate_cents_per_sec{replica=~\"$replica\"})",
+          "legendFormat": "total"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "S3 cost saved this month (running) — SHELF-40",
+      "description": "Running total of cents the cache has saved since the start of the current calendar month, rendered as USD (cents × 0.01). The series is the cumulative `shelf_s3_dollars_saved_total{outcome=\"hit_memory|hit_disk|peer\"}` counter; the `[$__range]` increase function lets the operator scope the stat to whichever Grafana time range is active (defaults to the dashboard's `now-1h`, but the natural reading is `now/M to now`). Pair with the cents/sec panel: this panel quantifies the procurement-deck-friendly $-saved number; the cents/sec panel shows the velocity at which it accrues. Unit reads as `currencyUSD` after dividing by 100 via Grafana `unit: 'currencyUSD'` + the `*0.01` scale on the field.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 21},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "custom": {"displayName": "USD saved (range)"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "blue", "value": null},
+              {"color": "green", "value": 1}
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byFrameRefID", "options": "A"},
+            "properties": [
+              {"id": "custom.scaleDistribution", "value": {"type": "linear"}}
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(shelf_s3_dollars_saved_total{replica=~\"$replica\"}[$__range])) * 0.01",
+          "legendFormat": "USD saved (current range)"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (outcome) (increase(shelf_s3_dollars_saved_total{replica=~\"$replica\"}[$__range])) * 0.01",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
     }
   ],
   "refresh": "30s",

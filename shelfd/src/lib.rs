@@ -57,6 +57,10 @@ pub mod coalesce;
 pub mod compression;
 pub mod config;
 pub mod control;
+// SHELF-40 — runtime glue for the `shelf-cost` audit-able cost
+// model. Lives here (not under `metrics`) because it owns its own
+// rolling-rate background task in addition to the metric handles.
+pub mod cost;
 pub mod error;
 pub mod filter_service;
 #[cfg(feature = "fingerprint")]

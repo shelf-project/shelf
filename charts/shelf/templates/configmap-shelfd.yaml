@@ -61,3 +61,26 @@ data:
       enabled: true
       bind_address: "0.0.0.0:{{ .Values.service.s3shimPort }}"
       max_full_object_bytes: 268435456
+    {{- with .Values.cache.cost }}
+    # SHELF-40 — `shelf_s3_dollars_saved_total` cost-saved counter.
+    # Defaults live in `crates/shelf-cost/src/coefficients.rs` per
+    # the published AWS price list (see crate README for citations).
+    cost:
+      enabled: {{ .enabled }}
+      region: {{ .region | quote }}
+      {{- with .getRequestMicroCents }}
+      get_request_micro_cents: {{ . | int64 }}
+      {{- end }}
+      {{- with .sameAzMicroCentsPerGib }}
+      same_az_micro_cents_per_gib: {{ . | int64 }}
+      {{- end }}
+      {{- with .crossAzMicroCentsPerGib }}
+      cross_az_micro_cents_per_gib: {{ . | int64 }}
+      {{- end }}
+      {{- with .natProcessingMicroCentsPerGib }}
+      nat_processing_micro_cents_per_gib: {{ . | int64 }}
+      {{- end }}
+      {{- with .natTraversalBasisPoints }}
+      nat_traversal_basis_points: {{ . | int }}
+      {{- end }}
+    {{- end }}

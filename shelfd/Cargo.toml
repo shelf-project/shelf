@@ -17,6 +17,9 @@ name = "shelfd"
 path = "src/lib.rs"
 
 [dependencies]
+# SHELF-40 — audit-able cost model + serde-validated config loader
+# behind the `shelf_s3_dollars_saved_total` counter.
+shelf-cost = { path = "../crates/shelf-cost" }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
