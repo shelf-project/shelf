@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SHELF-50 — Decoded metadata in-process cache.** New module
+  `shelfd/src/decoded_meta.rs` exposing two parallel
+  `parking_lot::Mutex<lru::LruCache<EtagKey, Arc<…>>>` caches:
+  `ManifestCache` (ETag → `Arc<ManifestFile>`) and
+  `ParquetFooterCache` (ETag → `Arc<parquet::file::metadata::ParquetMetaData>`).
+  Producer hook `on_metadata_admit(etag, hint, bytes)` is called
+  from the `Pool::Metadata` admission path; the heavy decode runs
+  fire-and-forget on `tokio::task::spawn_blocking` so the hot read
+  path is not extended. Consumer accessors `get_manifest(etag)`
+  and `get_parquet_footer(etag)` (no existing call site reads
+  yet — SHELF-46 / SHELF-37 / SHELF-47 are the planned consumers).
+  ETag-keyed invalidation via `invalidate(etag)` keeps the decoded
+  cache consistent with ADR-0011's content-addressed invariant.
+  New metrics: `shelf_decoded_meta_hits_total{kind}`,
+  `shelf_decoded_meta_misses_total{kind}`,
+  `shelf_decoded_meta_decode_seconds{kind}` histogram,
+  `shelf_decoded_meta_entries{kind}` gauge,
+  `shelf_decoded_meta_decode_errors_total{kind, reason}`. Helm
+  knob `cache.decodedMeta.{enabled, maxManifestEntries, maxFooterEntries}`
+  defaults to **`enabled: false`** because v1 ships ahead of any
+  consumer; downstream tickets flip it on. Design note at
+  `shelfd/docs/design-notes/SHELF-50-decoded-metadata-cache.md`.
 - **SHELF-42 — A/B query tagging.** Trino sessions can now stamp shelf-bound
   HTTP requests with an `X-Shelf-Tag` header carrying URL-encoded JSON
   (e.g. `{"experiment":"b1_compression_on","cohort":"prod_rep1"}`),

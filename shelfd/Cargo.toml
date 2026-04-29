@@ -58,6 +58,12 @@ prost = { workspace = true }
 zstd = { workspace = true }
 # SHELF-D7 — bitmap encoder for `POST /cache/contains`.
 base64 = { workspace = true }
+# SHELF-50 — bounded in-process LRU for decoded metadata (manifests +
+# Parquet footers). See `shelfd/docs/design-notes/SHELF-50-decoded-metadata-cache.md`.
+lru = { workspace = true }
+# SHELF-50 — Parquet footer parser. Compiled but inert when
+# `cache.decoded_meta.enabled = false` (production default).
+parquet = { workspace = true }
 # SHELF-E6 — peer probe HTTP client. `reqwest` is also used in dev
 # tests; duplicating the entry keeps the runtime feature set narrow
 # (no blocking, no native-tls) without forcing dev tests through the
@@ -89,6 +95,12 @@ tokio = { workspace = true }
 # per-test temp directory that the foyer `DirectFsDevice` can own
 # and clean up on drop.
 tempfile = "3"
+# SHELF-50 — the round-trip Parquet footer test serialises a real
+# `parquet::format::FileMetaData` via the Thrift compact protocol.
+# Pinned to the same line the upstream `parquet` crate transitively
+# uses (verified at parquet 53's `Cargo.toml`) so the two stay
+# binary-compatible.
+thrift = "0.17"
 
 [features]
 # Feature flags track ADR-0001/2/3/4/8/9 scope. The defaults represent

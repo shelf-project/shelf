@@ -92,6 +92,14 @@ pub struct Config {
     /// See `docs/contracts/ab-tag.md`.
     #[serde(default)]
     pub ab_tag: AbTagConfig,
+
+    /// SHELF-50 — decoded-metadata in-process LRU. Off by default;
+    /// see `shelfd/docs/design-notes/SHELF-50-decoded-metadata-cache.md`
+    /// for the rollout sequencing (downstream tickets SHELF-46 /
+    /// SHELF-37 / SHELF-47 flip it on once they consume the
+    /// decoded data).
+    #[serde(default)]
+    pub decoded_meta: DecodedMetaConfig,
 }
 
 fn default_head_lru_entries() -> u64 {
@@ -611,6 +619,58 @@ impl S3ShimConfig {
     }
     fn default_max_full_object_bytes() -> u64 {
         256 * 1024 * 1024
+    }
+}
+
+/// SHELF-50 — decoded-metadata cache configuration.
+///
+/// `enabled` is the master flag; the entry-count caps default to
+/// 10 000 each (matches `cache.decodedMeta.maxManifestEntries` /
+/// `cache.decodedMeta.maxFooterEntries` in `values.yaml`). The
+/// runtime cap is exposed for SHELF-50b sizing follow-ups; v1
+/// memory budgeting is by entry count only — see the design note
+/// for the trade-off.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecodedMetaConfig {
+    /// Master switch. Defaults to **false** because v1 ships the
+    /// cache infrastructure ahead of any consumer; flipping this
+    /// on without a downstream consumer just wastes RSS. Downstream
+    /// tickets (SHELF-46 / SHELF-37 / SHELF-47) flip it on as part
+    /// of their rollouts.
+    #[serde(default = "DecodedMetaConfig::default_enabled")]
+    pub enabled: bool,
+    /// Cap on resident decoded `ManifestFile` entries. Bounded by
+    /// `parking_lot::Mutex<LruCache>`; the per-entry size is
+    /// dominated by the raw avro bytes (typically 32–256 KiB on
+    /// production manifests).
+    #[serde(default = "DecodedMetaConfig::default_max_manifest_entries")]
+    pub max_manifest_entries: usize,
+    /// Cap on resident decoded `ParquetMetaData` entries. Per-entry
+    /// size scales with row-group count (typical 4–32 KiB).
+    #[serde(default = "DecodedMetaConfig::default_max_footer_entries")]
+    pub max_footer_entries: usize,
+}
+
+impl DecodedMetaConfig {
+    fn default_enabled() -> bool {
+        false
+    }
+    fn default_max_manifest_entries() -> usize {
+        10_000
+    }
+    fn default_max_footer_entries() -> usize {
+        10_000
+    }
+}
+
+impl Default for DecodedMetaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            max_manifest_entries: Self::default_max_manifest_entries(),
+            max_footer_entries: Self::default_max_footer_entries(),
+        }
     }
 }
 

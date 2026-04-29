@@ -93,3 +93,9 @@ data:
       max_distinct_tags: {{ .maxDistinctTags | int }}
       scrape_window: {{ .scrapeWindow | quote }}
     {{- end }}
+    {{- with .Values.cache.decodedMeta }}
+    decoded_meta:
+      enabled: {{ .enabled | default false }}
+      max_manifest_entries: {{ .maxManifestEntries | default 10000 | int64 }}
+      max_footer_entries: {{ .maxFooterEntries | default 10000 | int64 }}
+    {{- end }}

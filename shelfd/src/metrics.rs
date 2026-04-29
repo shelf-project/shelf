@@ -826,6 +826,180 @@ pub static AB_TAG_CAP_VIOLATIONS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("register ab_tag_cap_violations_total")
 });
 
+/// SHELF-50 — decoded-metadata in-process LRU hit counter. `kind`
+/// is one of `manifest` (Iceberg manifest list/file) or
+/// `parquet_footer`. The decoded LRU lives shelf-side in
+/// `decoded_meta.rs`; this counter increments on every accessor
+/// call that finds the entry resident, mirroring
+/// `shelf_hits_total` for byte-cache hits.
+pub static DECODED_META_HITS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_decoded_meta_hits_total",
+        "Hits in the SHELF-50 decoded-metadata in-process LRU. \
+         `kind` is one of `manifest` or `parquet_footer`. Compare \
+         with `shelf_hits_total{pool=\"metadata\"}` for the share of \
+         metadata reads that skip the deserialise step.",
+        &["kind"],
+        REGISTRY
+    )
+    .expect("register decoded_meta_hits_total")
+});
+
+/// SHELF-50 — decoded-metadata LRU miss counter. Same `kind` label
+/// as `DECODED_META_HITS_TOTAL`; pair them for hit-ratio panels.
+pub static DECODED_META_MISSES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_decoded_meta_misses_total",
+        "Misses in the SHELF-50 decoded-metadata LRU. A miss does \
+         NOT trigger an origin GET — it just means the byte cache \
+         is the source of truth and the next caller will re-parse \
+         (or, on warm pools, the fire-and-forget decoder will \
+         eventually backfill).",
+        &["kind"],
+        REGISTRY
+    )
+    .expect("register decoded_meta_misses_total")
+});
+
+/// SHELF-50 — fire-and-forget decode latency histogram, observed
+/// once per spawn. Buckets cover ~10 µs (warm-thread no-op) up to
+/// ~500 ms (manifest with thousands of data-file entries).
+pub static DECODED_META_DECODE_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec_with_registry!(
+        "shelf_decoded_meta_decode_seconds",
+        "Wall-clock seconds the SHELF-50 decode worker spent \
+         parsing one entry. Observed once per spawned decode \
+         regardless of success/failure; pair with \
+         `shelf_decoded_meta_decode_errors_total` to discount \
+         failed parses.",
+        &["kind"],
+        prometheus::exponential_buckets(0.000_010, 2.0, 16)
+            .expect("decoded_meta_decode_seconds bucket gen"),
+        REGISTRY
+    )
+    .expect("register decoded_meta_decode_seconds")
+});
+
+/// SHELF-50 — current resident entry count per kind. Refreshed
+/// after every insert/invalidate. Operators read it as a
+/// quick-look gauge against `cache.decodedMeta.maxManifestEntries`
+/// and `cache.decodedMeta.maxFooterEntries` — a steady-state value
+/// at the cap means the cache is saturated and SHELF-50b sizing
+/// should be revisited.
+pub static DECODED_META_ENTRIES: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_decoded_meta_entries",
+        "Resident entry count in the SHELF-50 decoded-metadata LRU.",
+        &["kind"],
+        REGISTRY
+    )
+    .expect("register decoded_meta_entries")
+});
+
+/// SHELF-50 — decode-error counter. `reason` is a low-cardinality
+/// label (`bad_magic`, `parquet_thrift`, `avro_header`, plus future
+/// additions when SHELF-50b lands the iceberg-rust integration).
+/// A non-zero rate is an investigation signal: either the byte
+/// cache admitted something that isn't actually a manifest /
+/// footer, or the parser version drifted from the writer.
+pub static DECODED_META_DECODE_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_decoded_meta_decode_errors_total",
+        "Decode failures observed by the SHELF-50 decode worker. \
+         The `reason` label classifies the failure mode; entries \
+         are NOT installed into the LRU on error.",
+        &["kind", "reason"],
+        REGISTRY
+    )
+    .expect("register decoded_meta_decode_errors_total")
+/// SHELF-50 — decoded-metadata in-process LRU hit counter. `kind`
+/// is one of `manifest` (Iceberg manifest list/file) or
+/// `parquet_footer`. The decoded LRU lives shelf-side in
+/// `decoded_meta.rs`; this counter increments on every accessor
+/// call that finds the entry resident, mirroring
+/// `shelf_hits_total` for byte-cache hits.
+pub static DECODED_META_HITS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_decoded_meta_hits_total",
+        "Hits in the SHELF-50 decoded-metadata in-process LRU. \
+         `kind` is one of `manifest` or `parquet_footer`. Compare \
+         with `shelf_hits_total{pool=\"metadata\"}` for the share of \
+         metadata reads that skip the deserialise step.",
+        &["kind"],
+        REGISTRY
+    )
+    .expect("register decoded_meta_hits_total")
+});
+
+/// SHELF-50 — decoded-metadata LRU miss counter. Same `kind` label
+/// as `DECODED_META_HITS_TOTAL`; pair them for hit-ratio panels.
+pub static DECODED_META_MISSES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_decoded_meta_misses_total",
+        "Misses in the SHELF-50 decoded-metadata LRU. A miss does \
+         NOT trigger an origin GET — it just means the byte cache \
+         is the source of truth and the next caller will re-parse \
+         (or, on warm pools, the fire-and-forget decoder will \
+         eventually backfill).",
+        &["kind"],
+        REGISTRY
+    )
+    .expect("register decoded_meta_misses_total")
+});
+
+/// SHELF-50 — fire-and-forget decode latency histogram, observed
+/// once per spawn. Buckets cover ~10 µs (warm-thread no-op) up to
+/// ~500 ms (manifest with thousands of data-file entries).
+pub static DECODED_META_DECODE_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec_with_registry!(
+        "shelf_decoded_meta_decode_seconds",
+        "Wall-clock seconds the SHELF-50 decode worker spent \
+         parsing one entry. Observed once per spawned decode \
+         regardless of success/failure; pair with \
+         `shelf_decoded_meta_decode_errors_total` to discount \
+         failed parses.",
+        &["kind"],
+        prometheus::exponential_buckets(0.000_010, 2.0, 16)
+            .expect("decoded_meta_decode_seconds bucket gen"),
+        REGISTRY
+    )
+    .expect("register decoded_meta_decode_seconds")
+});
+
+/// SHELF-50 — current resident entry count per kind. Refreshed
+/// after every insert/invalidate. Operators read it as a
+/// quick-look gauge against `cache.decodedMeta.maxManifestEntries`
+/// and `cache.decodedMeta.maxFooterEntries` — a steady-state value
+/// at the cap means the cache is saturated and SHELF-50b sizing
+/// should be revisited.
+pub static DECODED_META_ENTRIES: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_decoded_meta_entries",
+        "Resident entry count in the SHELF-50 decoded-metadata LRU.",
+        &["kind"],
+        REGISTRY
+    )
+    .expect("register decoded_meta_entries")
+});
+
+/// SHELF-50 — decode-error counter. `reason` is a low-cardinality
+/// label (`bad_magic`, `parquet_thrift`, `avro_header`, plus future
+/// additions when SHELF-50b lands the iceberg-rust integration).
+/// A non-zero rate is an investigation signal: either the byte
+/// cache admitted something that isn't actually a manifest /
+/// footer, or the parser version drifted from the writer.
+pub static DECODED_META_DECODE_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_decoded_meta_decode_errors_total",
+        "Decode failures observed by the SHELF-50 decode worker. \
+         The `reason` label classifies the failure mode; entries \
+         are NOT installed into the LRU on error.",
+        &["kind", "reason"],
+        REGISTRY
+    )
+    .expect("register decoded_meta_decode_errors_total")
+});
+
 /// Track G-11 companion — current rolling hit ratio per pool, in
 /// basis points (0–10_000). Sampled by the same `warm_sampler`
 /// task that flips `WARM_THRESHOLD_CROSSED_SECONDS`. Exposed as
@@ -971,6 +1145,12 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_misses_by_tag_total",
     "shelf_s3_shim_response_bytes_by_tag_total",
     "shelf_ab_tag_cap_violations_total",
+    // SHELF-50 — decoded-metadata in-process LRU.
+    "shelf_decoded_meta_hits_total",
+    "shelf_decoded_meta_misses_total",
+    "shelf_decoded_meta_decode_seconds",
+    "shelf_decoded_meta_entries",
+    "shelf_decoded_meta_decode_errors_total",
 ];
 
 #[cfg(test)]
@@ -1051,6 +1231,11 @@ mod tests {
             MISSES_BY_TAG_TOTAL.desc(),
             S3_SHIM_RESPONSE_BYTES_BY_TAG_TOTAL.desc(),
             AB_TAG_CAP_VIOLATIONS_TOTAL.desc(),
+            DECODED_META_HITS_TOTAL.desc(),
+            DECODED_META_MISSES_TOTAL.desc(),
+            DECODED_META_DECODE_SECONDS.desc(),
+            DECODED_META_ENTRIES.desc(),
+            DECODED_META_DECODE_ERRORS_TOTAL.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -1194,6 +1379,21 @@ mod tests {
             .inc_by(0);
         AB_TAG_CAP_VIOLATIONS_TOTAL
             .with_label_values(&["cardinality"])
+            .inc_by(0);
+        DECODED_META_HITS_TOTAL
+            .with_label_values(&["manifest"])
+            .inc_by(0);
+        DECODED_META_MISSES_TOTAL
+            .with_label_values(&["manifest"])
+            .inc_by(0);
+        DECODED_META_DECODE_SECONDS
+            .with_label_values(&["manifest"])
+            .observe(0.0);
+        DECODED_META_ENTRIES
+            .with_label_values(&["manifest"])
+            .set(0);
+        DECODED_META_DECODE_ERRORS_TOTAL
+            .with_label_values(&["manifest", "bad_magic"])
             .inc_by(0);
 
         let families = REGISTRY.gather();
