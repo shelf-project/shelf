@@ -8,8 +8,8 @@ replicaCount: 3
 
 image:
   pullPolicy: IfNotPresent
-  # Pin to a specific tag in your release pipeline.
-  tag: "0.1.0"
+  # tag intentionally empty — falls back to Chart.appVersion (currently 1.0.0-rc.4); update Chart.yaml only.
+  tag: ""
 
 serviceAccount:
   create: true

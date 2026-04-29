@@ -22,9 +22,8 @@ replicaCount: 3
 image:
   repository: ghcr.io/shelf-project/shelfd
   pullPolicy: IfNotPresent
-  # Pin to the exact tag your release pipeline produces. Empty string =
-  # .Chart.AppVersion (acceptable in dev; never in prod).
-  tag: "0.1.0"
+  # tag intentionally empty — falls back to Chart.appVersion (currently 1.0.0-rc.4); update Chart.yaml only.
+  tag: ""
 
 serviceAccount:
   create: true
