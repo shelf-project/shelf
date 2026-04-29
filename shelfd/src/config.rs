@@ -294,6 +294,79 @@ pub struct RowGroupDiskCacheConfig {
     /// the value is silently ignored at runtime.
     #[serde(default)]
     pub admission_bytes_per_sec: Option<u64>,
+    /// SHELF-29 — Independent-queue admission rate-limiter. Sits in
+    /// front of `cache.insert(...)` and bounds the **rate** of
+    /// admissions feeding Foyer's submit queue, complementing the
+    /// SHELF-21e *level* gate. See
+    /// `agents/out/SHELF-29-independent-queue-rate-limiter.md`.
+    ///
+    /// All sub-fields are optional via `#[serde(default)]` on the
+    /// nested struct; an absent block leaves the limiter on with
+    /// production defaults, which is the desired behaviour after
+    /// the 2026-04-29 OOM incident.
+    #[serde(default)]
+    pub admission: LodcAdmissionConfig,
+}
+
+/// SHELF-29 — Independent-queue token-bucket admission limiter config.
+///
+/// Defaults target the chronic ~700 admit/s × 4 MiB burst envelope
+/// observed on `1.0.0-rc.3` (rep-1 + rep-2): refill at 200 MiB/s
+/// (a hair below sustained EBS gp3), burst capacity 256 MiB
+/// (≈ 64 × 4 MiB rowgroups). The limiter is on by default; operators
+/// can disable per-pod via `enabled: false` or globally via the
+/// `SHELFD_LODC_ADMISSION=off` env var.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LodcAdmissionConfig {
+    /// Master switch. Default `true`. The env var
+    /// `SHELFD_LODC_ADMISSION=off` (case-insensitive `off`/`0`/`false`)
+    /// flips this to `false` at config load without a redeploy.
+    #[serde(default = "default_admission_enabled")]
+    pub enabled: bool,
+    /// Token bucket refill rate, in bytes/sec. `0` is the kill-switch
+    /// path — every admit drops with `reason="rate_limit"`, useful as
+    /// a one-shot "stop accepting writes" knob without taking the
+    /// pod down.
+    #[serde(default = "default_target_bytes_per_sec")]
+    pub target_bytes_per_sec: u64,
+    /// Token bucket capacity, in bytes. Caps to `u32::MAX` (4 GiB) at
+    /// limiter construction because the packed atomic state encodes
+    /// the live token count in 32 bits.
+    #[serde(default = "default_max_burst_bytes")]
+    pub max_burst_bytes: u64,
+    /// Forward-compatibility knob: optional secondary safety on the
+    /// concurrent admit count. The byte budget is the dominant gate
+    /// in v1; this field rarely binds under defaults.
+    #[serde(default = "default_max_inflight_admissions")]
+    pub max_inflight_admissions: u64,
+}
+
+fn default_admission_enabled() -> bool {
+    true
+}
+
+fn default_target_bytes_per_sec() -> u64 {
+    200 * 1024 * 1024
+}
+
+fn default_max_burst_bytes() -> u64 {
+    256 * 1024 * 1024
+}
+
+fn default_max_inflight_admissions() -> u64 {
+    1024
+}
+
+impl Default for LodcAdmissionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_admission_enabled(),
+            target_bytes_per_sec: default_target_bytes_per_sec(),
+            max_burst_bytes: default_max_burst_bytes(),
+            max_inflight_admissions: default_max_inflight_admissions(),
+        }
+    }
 }
 
 impl RowGroupPoolConfig {
@@ -584,6 +657,13 @@ impl Config {
             if !v.is_empty() {
                 self.observability.otlp_endpoint = Some(v);
             }
+        }
+        // SHELF-29 — emergency off-switch for the admission rate
+        // limiter without a redeploy. Anything other than the canonical
+        // falsy values is a no-op, so a misconfigured value never
+        // silently disables production back-pressure.
+        if crate::admission_limiter::env_disable_override() {
+            self.pools.rowgroup.disk_cache.admission.enabled = false;
         }
     }
 

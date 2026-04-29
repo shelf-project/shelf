@@ -36,6 +36,7 @@
 #![allow(clippy::manual_div_ceil)]
 
 pub mod admission;
+pub mod admission_limiter;
 pub mod aws_chunked;
 pub mod compression;
 pub mod config;

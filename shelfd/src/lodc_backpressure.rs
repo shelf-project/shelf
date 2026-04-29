@@ -201,7 +201,7 @@ impl LodcBackpressure {
 
         if inflight >= self.high_watermark_bytes {
             crate::metrics::LODC_DROPS_TOTAL
-                .with_label_values(&[self.pool_label])
+                .with_label_values(&[self.pool_label, "submit_queue_overflow"])
                 .inc();
             return false;
         }
@@ -378,10 +378,12 @@ mod tests {
 
     /// Helper: read the `shelf_lodc_drops_total` counter for the
     /// given pool label. Each test uses a unique label so concurrent
-    /// test runs do not poison each other's counter.
+    /// test runs do not poison each other's counter. The reason
+    /// label is fixed to `submit_queue_overflow` because the level
+    /// gate is the only call site that bumps via this helper.
     fn drops_for(label: &str) -> u64 {
         crate::metrics::LODC_DROPS_TOTAL
-            .with_label_values(&[label])
+            .with_label_values(&[label, "submit_queue_overflow"])
             .get()
     }
 }

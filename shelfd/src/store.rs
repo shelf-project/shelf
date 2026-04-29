@@ -421,6 +421,11 @@ pub struct FoyerStore {
     /// admission gate can be consulted with a single field access
     /// rather than a match-on-pool every read.
     rowgroup_lodc_bp: Option<crate::lodc_backpressure::LodcBackpressure>,
+    /// SHELF-29 — independent-queue admission rate-limiter. Sits
+    /// alongside `rowgroup_lodc_bp`; both gates must say admit for
+    /// the insert to proceed. `None` when the rowgroup pool is
+    /// DRAM-only OR the operator disabled the limiter.
+    rowgroup_lodc_admit: Option<crate::admission_limiter::LodcAdmission>,
     inflight: InflightMap,
     /// SHELF-24 allowlist. Held separately from the two Foyer caches
     /// so that (1) eviction of the bytes does not also unpin the key
@@ -504,8 +509,14 @@ impl FoyerStore {
                 &config.rowgroup.disk_cache,
                 pool_label(Pool::RowGroup),
             );
+            // SHELF-29 — the drops counter gained a `reason` label, so
+            // pre-touch each child the gate can ever bump. This keeps
+            // dashboards green on a freshly booted, idle pod.
             crate::metrics::LODC_DROPS_TOTAL
-                .with_label_values(&[pool_label(Pool::RowGroup)])
+                .with_label_values(&[pool_label(Pool::RowGroup), "submit_queue_overflow"])
+                .inc_by(0);
+            crate::metrics::LODC_DROPS_TOTAL
+                .with_label_values(&[pool_label(Pool::RowGroup), "rate_limit"])
                 .inc_by(0);
             crate::metrics::LODC_INFLIGHT_BYTES
                 .with_label_values(&[pool_label(Pool::RowGroup)])
@@ -515,6 +526,25 @@ impl FoyerStore {
                 .set(0);
             Some(bp)
         };
+
+        // SHELF-29 — wire the independent-queue admission rate-limiter
+        // alongside the level gate above. Returns `None` when the
+        // operator has explicitly disabled the limiter, which we want
+        // for unit-test pools and ops emergency rollback. Pre-touch
+        // the new gauges (drops counter is already pre-touched above)
+        // so the admin UI sees a non-empty series at boot.
+        let rowgroup_lodc_admit = crate::admission_limiter::LodcAdmission::from_config(
+            &config.rowgroup.disk_cache.admission,
+            pool_label(Pool::RowGroup),
+        );
+        if let Some(ref limiter) = rowgroup_lodc_admit {
+            crate::metrics::LODC_ADMIT_TOKENS_AVAILABLE
+                .with_label_values(&[pool_label(Pool::RowGroup)])
+                .set(limiter.max_burst_bytes_for_init() as i64);
+            crate::metrics::LODC_ADMIT_BURST_CAPACITY
+                .with_label_values(&[pool_label(Pool::RowGroup)])
+                .set(limiter.max_burst_bytes_for_init() as i64);
+        }
 
         // Pre-touch every metric family that is otherwise only emitted
         // after a real hit/miss/admit/evict has fired. The post-cutover
@@ -538,6 +568,11 @@ impl FoyerStore {
             crate::metrics::ADMISSIONS_TOTAL
                 .with_label_values(&[label, "reject_lodc"])
                 .inc_by(0);
+            // SHELF-29 — pre-touch the rate-limiter rejection child
+            // for the same reason as the other reject labels.
+            crate::metrics::ADMISSIONS_TOTAL
+                .with_label_values(&[label, "reject_rate"])
+                .inc_by(0);
             crate::metrics::EVICTIONS_TOTAL
                 .with_label_values(&[label, "capacity"])
                 .inc_by(0);
@@ -556,6 +591,7 @@ impl FoyerStore {
             metadata,
             rowgroup,
             rowgroup_lodc_bp,
+            rowgroup_lodc_admit,
             inflight: Mutex::new(HashMap::new()),
             pin_set: RwLock::new(HashMap::new()),
         })
@@ -843,17 +879,40 @@ impl FoyerStore {
             true
         };
 
-        let admit = policy_admit && lodc_admit;
+        // SHELF-29 — third admission gate: independent-queue token-
+        // bucket rate-limiter. Sized in bytes-per-second; bounds the
+        // rate of admissions feeding Foyer's submit queue independent
+        // of the in-flight level. Same non-blocking guarantee as the
+        // SHELF-21e gate (atomic CAS, no await, no Mutex). Only the
+        // rowgroup pool has the limiter; metadata is DRAM-only and
+        // has no NVMe drain budget to defend.
+        let rate_admit = if policy_admit && lodc_admit && pool == Pool::RowGroup {
+            match &self.rowgroup_lodc_admit {
+                Some(limiter) => limiter.try_admit(bytes.len() as u64),
+                None => true,
+            }
+        } else {
+            true
+        };
+
+        let admit = policy_admit && lodc_admit && rate_admit;
         let decision_label = if admit {
             "admit"
         } else if !lodc_admit {
-            // SHELF-21e — the policy said admit but back-pressure
-            // dropped the insert. Keep this label distinct from
-            // `reject_size` / `reject_other` so dashboards can
-            // tell "policy rejected" apart from "back-pressure
-            // dropped"; the latter is an ops signal that NVMe
-            // drain is falling behind ingress.
+            // SHELF-21e — the policy said admit but the level gate
+            // dropped the insert. Distinct from `reject_size` /
+            // `reject_rate` so dashboards can tell "policy rejected"
+            // apart from "back-pressure dropped" apart from
+            // "rate-limited"; the latter two are ops signals that
+            // NVMe drain is falling behind ingress.
             "reject_lodc"
+        } else if !rate_admit {
+            // SHELF-29 — the policy and the level gate both said
+            // admit but the rate-limiter dropped the insert. Kept
+            // distinct from `reject_lodc` so the
+            // `shelf_admissions_total` panel can show the *new*
+            // gate's blast radius vs the level gate's.
+            "reject_rate"
         } else if ctx.pinned {
             "reject_other"
         } else {

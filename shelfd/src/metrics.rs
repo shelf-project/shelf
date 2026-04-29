@@ -608,13 +608,49 @@ pub static WARM_THRESHOLD_CROSSED_SECONDS: Lazy<IntGaugeVec> = Lazy::new(|| {
 pub static LODC_DROPS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec_with_registry!(
         "shelf_lodc_drops_total",
-        "Hybrid-pool admissions dropped by shelfd's LODC back-pressure \
-         (see SHELF-21e). Increments once per dropped admission. Sustained \
-         non-zero rate ⇒ NVMe drain is falling behind ingress.",
-        &["pool"],
+        "Hybrid-pool admissions dropped by shelfd's LODC back-pressure. \
+         The `reason` label distinguishes the SHELF-21e level gate \
+         (`submit_queue_overflow`) from the SHELF-29 token-bucket gate \
+         (`rate_limit`). Sustained non-zero rate of either ⇒ NVMe \
+         drain is falling behind ingress and the cache is doing less \
+         work than it could.",
+        &["pool", "reason"],
         REGISTRY
     )
     .expect("register lodc_drops_total")
+});
+
+/// SHELF-29 — current bytes available in the rate-limiter's token
+/// bucket for the rowgroup pool. Climbs toward `max_burst_bytes` when
+/// the pod is idle, drains as admits consume tokens. Pair with
+/// [`LODC_ADMIT_BURST_CAPACITY`] for a "% of burst available" panel.
+pub static LODC_ADMIT_TOKENS_AVAILABLE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_lodc_admit_tokens_available",
+        "Bytes available in the SHELF-29 admission token bucket. \
+         Drains under burst, refills at the configured target rate. \
+         Reaching zero is the leading indicator of a `rate_limit` \
+         drop on the next admit.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register lodc_admit_tokens_available")
+});
+
+/// SHELF-29 — configured burst capacity (`max_burst_bytes`) of the
+/// rate-limiter, emitted once at boot. Constant per pod for the
+/// process lifetime; exposed as a gauge so the dashboard's
+/// "tokens-available / burst-capacity" panel can compute the ratio
+/// without hard-coding the denominator.
+pub static LODC_ADMIT_BURST_CAPACITY: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_lodc_admit_burst_capacity",
+        "Configured `max_burst_bytes` of the SHELF-29 admission \
+         rate-limiter. Constant per pod; exposed for dashboard ratios.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register lodc_admit_burst_capacity")
 });
 
 /// SHELF-21e — current in-flight bytes the back-pressure controller
@@ -714,6 +750,9 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_lodc_drops_total",
     "shelf_lodc_inflight_bytes",
     "shelf_lodc_queue_depth",
+    // SHELF-29 — independent-queue admission rate-limiter.
+    "shelf_lodc_admit_tokens_available",
+    "shelf_lodc_admit_burst_capacity",
     // SHELF-23 — peer-fetch outcome counters.
     "shelf_peer_hit_total",
     "shelf_peer_miss_total",
@@ -788,6 +827,8 @@ mod tests {
             LODC_DROPS_TOTAL.desc(),
             LODC_INFLIGHT_BYTES.desc(),
             LODC_QUEUE_DEPTH.desc(),
+            LODC_ADMIT_TOKENS_AVAILABLE.desc(),
+            LODC_ADMIT_BURST_CAPACITY.desc(),
             PEER_HIT_TOTAL.desc(),
             PEER_MISS_TOTAL.desc(),
             PEER_TIMEOUT_TOTAL.desc(),
@@ -888,9 +929,20 @@ mod tests {
         MISSES_BY_TABLE_TOTAL
             .with_label_values(&["metadata", "other"])
             .inc_by(0);
-        LODC_DROPS_TOTAL.with_label_values(&["rowgroup"]).inc_by(0);
+        LODC_DROPS_TOTAL
+            .with_label_values(&["rowgroup", "submit_queue_overflow"])
+            .inc_by(0);
+        LODC_DROPS_TOTAL
+            .with_label_values(&["rowgroup", "rate_limit"])
+            .inc_by(0);
         LODC_INFLIGHT_BYTES.with_label_values(&["rowgroup"]).set(0);
         LODC_QUEUE_DEPTH.with_label_values(&["rowgroup"]).set(0);
+        LODC_ADMIT_TOKENS_AVAILABLE
+            .with_label_values(&["rowgroup"])
+            .set(0);
+        LODC_ADMIT_BURST_CAPACITY
+            .with_label_values(&["rowgroup"])
+            .set(0);
         PEER_HIT_TOTAL.with_label_values(&["metadata"]).inc_by(0);
         PEER_MISS_TOTAL.with_label_values(&["metadata"]).inc_by(0);
         PEER_TIMEOUT_TOTAL
