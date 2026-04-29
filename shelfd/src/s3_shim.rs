@@ -766,10 +766,7 @@ fn finish_get_response(
 
     let mut headers = HeaderMap::new();
     stamp_common_headers(&mut headers, meta);
-    headers.insert(
-        header::CONTENT_LENGTH,
-        HeaderValue::from_str(&length.to_string()).expect("u64 is ASCII"),
-    );
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
     let status = if is_partial {
         let last = offset.saturating_add(length).saturating_sub(1);
         let cr = format!("bytes {}-{}/{}", offset, last, total_size);
@@ -1022,10 +1019,7 @@ pub async fn handle_get_object(
     stamp_common_headers(&mut headers, &meta);
     // Override `Content-Length` to the sliced length; `stamp_common`
     // reports the full-object size, which is wrong for a 206.
-    headers.insert(
-        header::CONTENT_LENGTH,
-        HeaderValue::from_str(&length.to_string()).expect("u64 is ASCII"),
-    );
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
     let status = if is_partial {
         // `resolve_range` already caps `offset + length <= total_size`,
         // so this add cannot overflow in practice. Use saturating
@@ -1832,9 +1826,7 @@ fn xml_ok(status: StatusCode, body: String) -> Response {
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/xml"),
     );
-    if let Ok(v) = HeaderValue::from_str(&body.len().to_string()) {
-        headers.insert(header::CONTENT_LENGTH, v);
-    }
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(body.len() as u64));
     if let Ok(v) = HeaderValue::from_str(&request_id()) {
         headers.insert(HeaderName::from_static("x-amz-request-id"), v);
     }
@@ -1911,9 +1903,10 @@ fn record_get_latency(
 /// `Content-Length` is seeded with the full-object size; ranged GETs
 /// overwrite it after the fact with the sliced length.
 fn stamp_common_headers(headers: &mut HeaderMap, meta: &HeadMeta) {
-    if let Ok(v) = HeaderValue::from_str(&meta.content_length.to_string()) {
-        headers.insert(header::CONTENT_LENGTH, v);
-    }
+    headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from(meta.content_length),
+    );
     if let Some(etag) = meta.etag.as_deref() {
         if let Ok(v) = HeaderValue::from_str(etag) {
             headers.insert(header::ETAG, v);
@@ -1976,9 +1969,7 @@ fn error_response(status: StatusCode, body: String, content_range: Option<String
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/xml"),
     );
-    if let Ok(v) = HeaderValue::from_str(&body.len().to_string()) {
-        headers.insert(header::CONTENT_LENGTH, v);
-    }
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(body.len() as u64));
     if let Some(cr) = content_range {
         if let Ok(v) = HeaderValue::from_str(&cr) {
             headers.insert(header::CONTENT_RANGE, v);
