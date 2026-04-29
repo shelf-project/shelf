@@ -70,6 +70,16 @@ pub struct Config {
     /// cp` can read through the cache without the Trino plugin.
     #[serde(default)]
     pub s3_shim: S3ShimConfig,
+
+    /// Coalesced range-GET dispatcher (SHELF-49). Default off so the
+    /// shim ships dark; enable per-replica via the chart's
+    /// `cache.coalesce.enabled` once the SHELF-37 listener proves
+    /// the per-replica origin-GET reduction is real and the per-pool
+    /// hit-ratio impact is non-negative.
+    ///
+    /// See `shelfd/docs/design-notes/SHELF-49-coalesced-range-get.md`.
+    #[serde(default)]
+    pub coalesce: CoalesceConfig,
 }
 
 fn default_head_lru_entries() -> u64 {
@@ -602,6 +612,104 @@ impl Default for S3ShimConfig {
     }
 }
 
+/// SHELF-49 — coalesced range-GET dispatcher knobs.
+///
+/// The S3 shim issues one origin GET per `Range:` request today.
+/// Trino's native S3 client emits many small adjacent ranges within
+/// the same Parquet file (row-group footer + dictionary pages + the
+/// requested column chunks); coalescing them into one larger origin
+/// GET cuts S3 request count and improves miss-path throughput
+/// without changing the bytes the shim hands back to Trino.
+///
+/// All fields are `#[serde(default)]` so existing values files keep
+/// parsing — an absent block leaves the dispatcher disabled and the
+/// shim takes the legacy single-range path verbatim.
+///
+/// Suffix (`bytes=-N`) and open-ended (`bytes=0-`) ranges still go
+/// straight through the legacy path (they need a `HeadObject` to be
+/// resolvable), and a peer-fetch hit (SHELF-23) bypasses the
+/// dispatcher entirely. Failure semantics live in the circuit
+/// breaker — after `consecutive_failures` errors the dispatcher
+/// falls back to single-range mode for `cool_off`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoalesceConfig {
+    /// Master switch. Default `false` so the dispatcher ships dark
+    /// and operators flip it on per replica via Helm.
+    #[serde(default = "CoalesceConfig::default_enabled")]
+    pub enabled: bool,
+    /// Maximum gap (in bytes) between two adjacent ranges that may
+    /// still be merged. Range B can join the running span if
+    /// `B.start - running_end ≤ max_gap_bytes`. Default 1 MiB —
+    /// covers the typical Parquet column-chunk → dictionary-page
+    /// gap without bridging into the next column on a wide file.
+    #[serde(default = "CoalesceConfig::default_max_gap_bytes")]
+    pub max_gap_bytes: u64,
+    /// Hard cap on the merged span. A candidate range that would
+    /// push the merged span past this is dispatched as the head
+    /// of a new subgroup. Default 16 MiB — keeps the worst-case
+    /// origin GET small enough that one bad coalesce does not
+    /// monopolise the per-pod inflight budget.
+    #[serde(default = "CoalesceConfig::default_max_coalesced_bytes")]
+    pub max_coalesced_bytes: u64,
+    /// How long the dispatcher waits before kicking off the
+    /// coalesced GET. The first request seeds the group; followers
+    /// have this window to enqueue. Default 200 µs — short enough
+    /// to be invisible to a Trino split (which is doing CPU work
+    /// before its next read anyway) but long enough to absorb the
+    /// per-thread fan-out the native S3 client issues for a
+    /// single Parquet stripe.
+    #[serde(default = "CoalesceConfig::default_wait_window_micros")]
+    pub wait_window_micros: u64,
+    /// Circuit-breaker failure threshold. After this many
+    /// consecutive coalesced GETs return errors the breaker opens
+    /// and the dispatcher falls back to single-range mode for
+    /// `cool_off`. Default 5.
+    #[serde(default = "CoalesceConfig::default_consecutive_failures")]
+    pub consecutive_failures: u64,
+    /// How long the breaker stays open. Default 30 s.
+    #[serde(with = "humantime_serde", default = "CoalesceConfig::default_cool_off")]
+    pub cool_off: Duration,
+}
+
+impl CoalesceConfig {
+    fn default_enabled() -> bool {
+        false
+    }
+    fn default_max_gap_bytes() -> u64 {
+        1024 * 1024
+    }
+    fn default_max_coalesced_bytes() -> u64 {
+        16 * 1024 * 1024
+    }
+    fn default_wait_window_micros() -> u64 {
+        200
+    }
+    fn default_consecutive_failures() -> u64 {
+        5
+    }
+    fn default_cool_off() -> Duration {
+        Duration::from_secs(30)
+    }
+    /// Convenience — the wait window as a `Duration`.
+    pub fn wait_window(&self) -> Duration {
+        Duration::from_micros(self.wait_window_micros)
+    }
+}
+
+impl Default for CoalesceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            max_gap_bytes: Self::default_max_gap_bytes(),
+            max_coalesced_bytes: Self::default_max_coalesced_bytes(),
+            wait_window_micros: Self::default_wait_window_micros(),
+            consecutive_failures: Self::default_consecutive_failures(),
+            cool_off: Self::default_cool_off(),
+        }
+    }
+}
+
 impl Config {
     /// Load and validate a config from disk.
     ///
@@ -931,6 +1039,45 @@ pin_list:
         cfg.validate_nvme().expect("creatable dir must validate");
         assert!(dir.is_dir(), "validator must create the missing dir");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // SHELF-49 — `CoalesceConfig` plumbing.
+    //
+    // Three properties pinned: (a) absent block → defaults apply,
+    // dispatcher off; (b) explicit values round-trip; (c) unknown
+    // sub-fields are rejected (matches the parent `deny_unknown_fields`
+    // discipline).
+    #[test]
+    fn coalesce_config_defaults_to_disabled() {
+        let cfg = Config::from_yaml_str(MINIMAL, None).expect("parse");
+        assert!(!cfg.coalesce.enabled);
+        assert_eq!(cfg.coalesce.max_gap_bytes, 1024 * 1024);
+        assert_eq!(cfg.coalesce.max_coalesced_bytes, 16 * 1024 * 1024);
+        assert_eq!(cfg.coalesce.wait_window_micros, 200);
+        assert_eq!(cfg.coalesce.consecutive_failures, 5);
+        assert_eq!(cfg.coalesce.cool_off, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn coalesce_config_accepts_set_values() {
+        let extra = "\ncoalesce:\n  enabled: true\n  max_gap_bytes: 2097152\n  max_coalesced_bytes: 33554432\n  wait_window_micros: 500\n  consecutive_failures: 10\n  cool_off: 1m\n";
+        let yaml = MINIMAL.to_owned() + extra;
+        let cfg = Config::from_yaml_str(&yaml, None).expect("parse");
+        assert!(cfg.coalesce.enabled);
+        assert_eq!(cfg.coalesce.max_gap_bytes, 2 * 1024 * 1024);
+        assert_eq!(cfg.coalesce.max_coalesced_bytes, 32 * 1024 * 1024);
+        assert_eq!(cfg.coalesce.wait_window_micros, 500);
+        assert_eq!(cfg.coalesce.wait_window(), Duration::from_micros(500));
+        assert_eq!(cfg.coalesce.consecutive_failures, 10);
+        assert_eq!(cfg.coalesce.cool_off, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn coalesce_config_rejects_unknown_subfield() {
+        let extra = "\ncoalesce:\n  enabled: true\n  bogus: 1\n";
+        let yaml = MINIMAL.to_owned() + extra;
+        let err = Config::from_yaml_str(&yaml, None).unwrap_err();
+        assert!(matches!(err, crate::Error::Config(_)));
     }
 
     #[test]

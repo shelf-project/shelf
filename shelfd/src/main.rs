@@ -171,7 +171,16 @@ async fn run(args: Args) -> anyhow::Result<()> {
         config.node.id.clone(),
     )
     .with_drain_signal(drain_signal.clone())
-    .with_peer_fetch(peer_http, config.membership.stats_port);
+    .with_peer_fetch(peer_http, config.membership.stats_port)
+    .with_coalesce_config(config.coalesce.clone());
+    tracing::info!(
+        coalesce_enabled = config.coalesce.enabled,
+        max_gap_bytes = config.coalesce.max_gap_bytes,
+        max_coalesced_bytes = config.coalesce.max_coalesced_bytes,
+        wait_window_micros = config.coalesce.wait_window_micros,
+        consecutive_failures = config.coalesce.consecutive_failures,
+        "SHELF-49 coalesced range-GET dispatcher wired into s3_shim"
+    );
     state.set_peer_fetch_enabled(peer_fetch_enabled);
     tracing::info!(
         peer_fetch_enabled,

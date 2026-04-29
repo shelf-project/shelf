@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SHELF-49 — Coalesced range-GET dispatcher in the S3 shim.** New
+  `shelfd::coalesce::Coalescer` batches concurrent ranges that
+  share `(bucket, key, etag)` into a single origin GET when their
+  gaps and total span fit operator-tunable budgets, then slices the
+  merged buffer back to each requester via `tokio::sync::oneshot`
+  for byte-identical delivery. Suffix (`bytes=-N`) and open-ended
+  (`bytes=0-`) ranges always take the legacy single-range path; a
+  circuit breaker (default `consecutive_failures = 5`,
+  `cool_off = 30s`) falls back to single-range mode after repeated
+  coalesced GET failures. New metrics:
+  `shelf_coalesce_ranges_total{outcome=coalesced|solo|disabled|circuit_open}`,
+  `shelf_coalesce_bytes_saved_total`, and
+  `shelf_coalesce_window_seconds`. New chart block
+  `cache.coalesce.{enabled,maxGapBytes,maxCoalescedBytes,waitWindowMicros,consecutiveFailures,coolOffSecs}`,
+  default `enabled: false` so the feature ships dark. Files:
+  `shelfd/src/coalesce.rs` (new), `shelfd/src/s3_shim.rs`
+  (closed-range path wired through dispatcher), `shelfd/src/config.rs`
+  (`CoalesceConfig`), `shelfd/src/metrics.rs` (3 new series +
+  `EXPOSED_SERIES`), `shelfd/src/lib.rs`, `shelfd/src/http.rs`
+  (`ServerState::with_coalesce_config` builder), `shelfd/src/main.rs`
+  (config wiring), `shelfd/tests/it_coalesce.rs` (gated on
+  `SHELF_INTEGRATION=1`), `charts/shelf/values.yaml`,
+  `charts/shelf/templates/configmap-shelfd.yaml`,
+  `infra/penpencil/charts/shelf/values-prod.yaml`,
+  `shelfd/docs/design-notes/SHELF-49-coalesced-range-get.md`.
+
 ## [1.0.0-rc.2] — 2026-04-29
 
 **Hotfix release for the SHELF-21f LODC submit-queue overflow regression

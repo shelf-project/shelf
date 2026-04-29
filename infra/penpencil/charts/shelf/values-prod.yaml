@@ -82,6 +82,20 @@ cache:
     s3Uri: ""
     reloadIntervalSeconds: 900
 
+  # SHELF-49 — coalesced range-GET dispatcher. Ships disabled in
+  # the prod overlay until the SHELF-37 plan-aware listener proves
+  # the per-replica origin-GET reduction is real and the per-pool
+  # hit ratio is non-negative on a single-replica canary. Flip to
+  # `enabled: true` per replica via Helm + helm upgrade once the
+  # SHELF-37 listener confirms the win.
+  coalesce:
+    enabled: false
+    maxGapBytes: 1048576
+    maxCoalescedBytes: 16777216
+    waitWindowMicros: 200
+    consecutiveFailures: 5
+    coolOffSecs: 30
+
 origin:
   # Origin bucket (the data lake Trino reads).
   bucket: ""

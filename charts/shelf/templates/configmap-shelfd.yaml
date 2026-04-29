@@ -61,3 +61,12 @@ data:
       enabled: true
       bind_address: "0.0.0.0:{{ .Values.service.s3shimPort }}"
       max_full_object_bytes: 268435456
+    {{- with .Values.cache.coalesce }}
+    coalesce:
+      enabled: {{ .enabled }}
+      max_gap_bytes: {{ .maxGapBytes | int64 }}
+      max_coalesced_bytes: {{ .maxCoalescedBytes | int64 }}
+      wait_window_micros: {{ .waitWindowMicros | int64 }}
+      consecutive_failures: {{ .consecutiveFailures | int64 }}
+      cool_off: {{ printf "%ds" (int .coolOffSecs) | quote }}
+    {{- end }}

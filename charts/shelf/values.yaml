@@ -271,6 +271,39 @@ cache:
     # -- Poll interval. SIGHUP also triggers a reload. [plan §4 SHELF-24]
     reloadIntervalSeconds: 900
 
+  # -- SHELF-49: Coalesced range-GET dispatcher.
+  # Trino's native S3 client emits many small adjacent ranges within
+  # the same Parquet file (footer + dictionary + a handful of column
+  # chunks). When `enabled: true`, shelfd's S3 shim batches concurrent
+  # ranges over the same `(bucket, key, etag)` triple into one origin
+  # GET — cutting S3 request count and improving miss-path throughput
+  # without changing the bytes returned to Trino. Suffix (`bytes=-N`)
+  # and open-ended (`bytes=0-`) ranges always take the legacy single-
+  # range path. A circuit breaker falls back to single-range mode for
+  # `coolOffSecs` after `consecutiveFailures` coalesced GETs error.
+  #
+  # Default `enabled: false` so the feature ships dark; flip per-replica
+  # via Helm + `helm upgrade` once the SHELF-37 listener confirms the
+  # per-replica origin-GET reduction is real and the per-pool hit
+  # ratio is non-negative.
+  coalesce:
+    enabled: false
+    # Maximum gap between two adjacent ranges that may still merge.
+    # 1 MiB covers the typical Parquet column-chunk → dictionary-page
+    # gap without bridging across columns on a wide file.
+    maxGapBytes: 1048576
+    # Hard cap on the merged span. Keeps any single coalesced GET
+    # small enough not to monopolise the per-pod inflight budget.
+    maxCoalescedBytes: 16777216
+    # Wait window for followers to join a leader's group. 200 µs is
+    # invisible to a Trino split (the native client is doing CPU work
+    # before its next read) but long enough to catch the per-thread
+    # fan-out for a single Parquet stripe.
+    waitWindowMicros: 200
+    # Circuit-breaker thresholds.
+    consecutiveFailures: 5
+    coolOffSecs: 30
+
 # ---------------------------------------------------------------------------
 # Origin (S3) client — [plan §4 SHELF-05]
 # ---------------------------------------------------------------------------

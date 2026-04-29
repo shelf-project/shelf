@@ -13,8 +13,10 @@
 
 use once_cell::sync::Lazy;
 use prometheus::{
-    register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
-    register_int_gauge_vec_with_registry, HistogramVec, IntCounterVec, IntGaugeVec,
+    register_histogram_with_registry, register_histogram_vec_with_registry,
+    register_int_counter_with_registry, register_int_counter_vec_with_registry,
+    register_int_gauge_vec_with_registry, Histogram, HistogramVec, IntCounter,
+    IntCounterVec, IntGaugeVec,
 };
 
 /// Global Prometheus registry.
@@ -708,6 +710,96 @@ pub static ROLLING_HIT_RATIO_BPS: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("register rolling_hit_ratio_bps")
 });
 
+/// SHELF-49 — coalesced range-GET dispatcher outcome counter.
+///
+/// `outcome` is one of:
+///   `coalesced`    — the request joined a multi-waiter group and
+///                    its slice was filled from a coalesced origin
+///                    GET (the happy path; lower S3 request count).
+///   `solo`         — the request was the only waiter when its
+///                    group dispatched; it issued one origin GET
+///                    by itself. Indistinguishable from the
+///                    legacy single-range path on the wire.
+///   `disabled`     — `cache.coalesce.enabled = false`. The request
+///                    bypassed the dispatcher entirely.
+///   `circuit_open` — the breaker is open after `consecutive_failures`
+///                    coalesced GETs returned errors; the request
+///                    bypassed the dispatcher and went straight
+///                    through the legacy single-range path.
+///
+/// One increment per **input** range (not per coalesced origin GET)
+/// so dashboards can compute "% of input ranges that benefited from
+/// coalescing" as `coalesced / total`.
+pub static COALESCE_RANGES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_coalesce_ranges_total",
+        "SHELF-49 — input range outcomes from the coalescing dispatcher: \
+         `coalesced` (joined a multi-waiter group), `solo` (single \
+         requester), `disabled` (master switch off), `circuit_open` \
+         (breaker open after repeated coalesced GET failures).",
+        &["outcome"],
+        REGISTRY
+    )
+    .expect("register coalesce_ranges_total")
+});
+
+/// SHELF-49 — bytes "saved" by coalescing relative to a hypothetical
+/// world where every requester issued its own origin GET.
+///
+/// Per merge group `G`, the dispatcher issues exactly **one** origin
+/// GET that covers the merged span `[start, end_exclusive)`. The
+/// counter increment is computed as
+///
+/// ```text
+///   max(0, sum_over_waiters(w.length) - (end_exclusive - start))
+/// ```
+///
+/// In words: how many bytes the dispatcher avoided fetching by
+/// merging *N* requesters into one origin GET, even after paying
+/// the cost of the bridging gaps. The lower bound of zero matters
+/// because pathological interleaved requesters can produce a
+/// merged span whose length **exceeds** the sum of individual
+/// lengths (overlap free + gap bridging cost), which would render
+/// a negative "savings" value. We floor at zero so the metric is
+/// always non-negative; the dashboard can still surface
+/// `shelf_coalesce_bytes_saved_total / shelf_coalesce_ranges_total`
+/// as an "avg bytes saved per coalesced range" panel without a
+/// flapping sign.
+pub static COALESCE_BYTES_SAVED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter_with_registry!(
+        "shelf_coalesce_bytes_saved_total",
+        "SHELF-49 — bytes the dispatcher avoided fetching by merging \
+         multiple in-flight ranges into one origin GET. Computed per \
+         merge group as max(0, sum(individual_lengths) - merged_span). \
+         Lower-bounded at 0 so it is never negative on overlapping \
+         requesters.",
+        REGISTRY
+    )
+    .expect("register coalesce_bytes_saved_total")
+});
+
+/// SHELF-49 — wait-window histogram. One observation per dispatch,
+/// recording the wall-clock seconds from "first waiter joined" to
+/// "merged GET issued" (i.e. the window during which followers had
+/// the chance to coalesce). Buckets cover ~10 µs (lone request,
+/// no wait) up to ~10 ms (a slow scheduler tick); the configured
+/// default wait window is 200 µs so the histogram p50 / p99 should
+/// sit well under 1 ms in steady state.
+///
+/// Labelless (one series): the window is a property of the
+/// dispatched group, not of an individual requester or per-subgroup
+/// outcome — adding a label would invite mis-aggregation.
+pub static COALESCE_WINDOW_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram_with_registry!(
+        "shelf_coalesce_window_seconds",
+        "SHELF-49 — coalescing wait-window duration (first waiter to \
+         dispatch), in seconds. One observation per dispatched group.",
+        prometheus::exponential_buckets(0.00001, 2.0, 12).expect("coalesce bucket gen"),
+        REGISTRY
+    )
+    .expect("register coalesce_window_seconds")
+});
+
 /// Stable list of metric series `shelfd` exposes on `/metrics` in the
 /// Phase-0 gate build. Kept as module-level data so `docs/metrics.md`
 /// and the tests can both reference a single source of truth; the
@@ -763,6 +855,10 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_conditional_modified_total",
     "shelf_conditional_skipped_total",
     "shelf_conditional_error_total",
+    // SHELF-49 — coalesced range-GET dispatcher.
+    "shelf_coalesce_ranges_total",
+    "shelf_coalesce_bytes_saved_total",
+    "shelf_coalesce_window_seconds",
 ];
 
 #[cfg(test)]
@@ -837,6 +933,9 @@ mod tests {
             CONDITIONAL_MODIFIED_TOTAL.desc(),
             CONDITIONAL_SKIPPED_TOTAL.desc(),
             CONDITIONAL_ERROR_TOTAL.desc(),
+            COALESCE_RANGES_TOTAL.desc(),
+            COALESCE_BYTES_SAVED_TOTAL.desc(),
+            COALESCE_WINDOW_SECONDS.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -963,6 +1062,16 @@ mod tests {
         CONDITIONAL_ERROR_TOTAL
             .with_label_values(&["metadata"])
             .inc_by(0);
+        // SHELF-49 — touch every dispatcher-emitted label / shape so
+        // the scrape-side regression matches the descriptor-side
+        // check above.
+        for outcome in ["coalesced", "solo", "disabled", "circuit_open"] {
+            COALESCE_RANGES_TOTAL
+                .with_label_values(&[outcome])
+                .inc_by(0);
+        }
+        COALESCE_BYTES_SAVED_TOTAL.inc_by(0);
+        COALESCE_WINDOW_SECONDS.observe(0.0);
 
         let families = REGISTRY.gather();
         let names: HashSet<String> = families.iter().map(|f| f.name().to_owned()).collect();

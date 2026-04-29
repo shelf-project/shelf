@@ -38,6 +38,7 @@
 pub mod admission;
 pub mod admission_limiter;
 pub mod aws_chunked;
+pub mod coalesce;
 pub mod compression;
 pub mod config;
 pub mod control;

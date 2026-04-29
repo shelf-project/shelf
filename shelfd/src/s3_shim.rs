@@ -922,10 +922,31 @@ pub async fn handle_get_object(
         }
     }
 
+    // SHELF-49 — closed-range and full-object GETs go through the
+    // coalescer, which is a no-op pass-through when
+    // `cache.coalesce.enabled = false`. Suffix (`bytes=-N`) and
+    // open-ended (`bytes=0-`) ranges resolve to a `(offset, length)`
+    // here only because we already issued a HEAD; the dispatcher
+    // cannot reason about "tail of the object" semantics across
+    // requesters that may observe different `total_size`s through
+    // racing HEADs, so they intentionally route to the legacy solo
+    // path. (When SHELF-23 peer-fetch wins the race, the coalescer
+    // is bypassed entirely — the peer hit short-circuits before the
+    // origin future fires.)
+    let coalesce_eligible = matches!(range_spec, None | Some(RangeSpec::Closed { .. }));
+    let etag_for_coalesce = meta.etag.clone();
     let origin = state.origin.clone();
+    let coalescer = state.coalescer.clone();
     let bucket_for_fetch = bucket.clone();
     let key_for_fetch = key.clone();
     let origin_fut = async move {
+        if coalesce_eligible {
+            if let Some(etag) = etag_for_coalesce.as_deref() {
+                return coalescer
+                    .fetch(&bucket_for_fetch, &key_for_fetch, etag, offset, length)
+                    .await;
+            }
+        }
         origin
             .as_ref()
             .get_range(&bucket_for_fetch, &key_for_fetch, offset, length)

@@ -131,6 +131,14 @@ pub struct ServerState {
     /// stored bytes without re-validating origin. Useful as a
     /// fast-revert lever if conditional GETs reveal a hot-bug.
     pub conditional_get_enabled: AtomicBool,
+    /// SHELF-49 — coalesced range-GET dispatcher. Wraps `origin` and
+    /// fans concurrent same-`(bucket, key, etag)` reads into one
+    /// origin GET when their gaps + total span fit the configured
+    /// caps. Defaults to a **disabled** coalescer that delegates
+    /// 1:1 to `Origin::get_range` so existing callers / tests need
+    /// no change. `main` builds an enabled instance when
+    /// `cache.coalesce.enabled = true` in the rendered config.
+    pub coalescer: Arc<crate::coalesce::Coalescer>,
 }
 
 impl ServerState {
@@ -168,6 +176,17 @@ impl ServerState {
         head_lru: Arc<HeadLru>,
         pod_id: impl Into<Arc<str>>,
     ) -> Self {
+        // SHELF-49 — default coalescer is disabled-config wrapping the
+        // same `origin`. With `enabled=false` every `Coalescer::fetch`
+        // call short-circuits to `RangeFetcher::fetch_range` (one
+        // increment of `shelf_coalesce_ranges_total{outcome=disabled}`)
+        // so the hot path is bit-for-bit identical to the pre-SHELF-49
+        // shim. `main` swaps this for an enabled instance when the
+        // operator flips `cache.coalesce.enabled = true`.
+        let fetcher: Arc<dyn crate::coalesce::RangeFetcher> =
+            Arc::new(crate::coalesce::S3OriginFetcher::new(origin.clone()));
+        let coalescer =
+            crate::coalesce::Coalescer::new(crate::config::CoalesceConfig::default(), fetcher);
         Self {
             store,
             origin,
@@ -199,7 +218,20 @@ impl ServerState {
             // foyer cache and self-evicts.
             freshness: Arc::new(crate::freshness::FreshnessTracker::new(20_000)),
             conditional_get_enabled: AtomicBool::new(true),
+            coalescer,
         }
+    }
+
+    /// SHELF-49 — replace the default (disabled) coalescer with one
+    /// built from the operator-supplied [`crate::config::CoalesceConfig`].
+    /// `main` calls this from the post-config hookup path; callers
+    /// that don't pass through `main` (most unit tests) inherit the
+    /// disabled default and pay no overhead.
+    pub fn with_coalesce_config(mut self, cfg: crate::config::CoalesceConfig) -> Self {
+        let fetcher: Arc<dyn crate::coalesce::RangeFetcher> =
+            Arc::new(crate::coalesce::S3OriginFetcher::new(self.origin.clone()));
+        self.coalescer = crate::coalesce::Coalescer::new(cfg, fetcher);
+        self
     }
 
     /// SHELF-23 builder: install the operator-supplied peer-fetch
