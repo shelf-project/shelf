@@ -29,6 +29,7 @@
 //! existing recommender.
 
 pub mod bloom;
+pub mod bloom_write;
 pub mod mv;
 pub mod optimize;
 pub mod pin_list;
@@ -39,6 +40,7 @@ use crate::input::{IcebergEventLogReader, IcebergManifestReader, ShelfdStatsRead
 use crate::output::Recommendation;
 
 pub use bloom::BloomFilterRecommender;
+pub use bloom_write::BloomWriteRecommender;
 pub use mv::MaterializedViewRecommender;
 pub use optimize::OptimizeRecommender;
 pub use pin_list::PinListRecommender;
@@ -85,6 +87,7 @@ pub fn default_recommenders() -> Vec<Box<dyn Recommender>> {
         Box::new(OptimizeRecommender::new()),
         Box::new(PinListRecommender::new()),
         Box::new(BloomFilterRecommender::new()),
+        Box::new(BloomWriteRecommender::new()),
         Box::new(MaterializedViewRecommender::new()),
     ]
 }
@@ -120,12 +123,13 @@ mod tests {
     }
 
     #[test]
-    fn default_set_has_four_kinds() {
+    fn default_set_has_five_kinds() {
         let kinds: Vec<&'static str> = default_recommenders().iter().map(|r| r.kind()).collect();
         assert!(kinds.contains(&"optimize_targets"));
         assert!(kinds.contains(&"pin_list_candidates"));
         assert!(kinds.contains(&"bloom_filter_columns"));
+        assert!(kinds.contains(&"bloom_write"));
         assert!(kinds.contains(&"mv_candidates"));
-        assert_eq!(kinds.len(), 4);
+        assert_eq!(kinds.len(), 5);
     }
 }

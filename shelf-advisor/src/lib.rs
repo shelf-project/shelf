@@ -22,13 +22,18 @@
 //! [`Envelope`] (new `recommend` / `watch` / `dry-run` modes).
 
 pub mod config;
+pub mod cost;
 pub mod error;
 pub mod input;
 pub mod output;
 pub mod recommenders;
 pub mod runtime;
 
-pub use config::{AdvisorConfig, BloomConfig, MvConfig, OptimizeConfig, PinListConfig};
+pub use config::{
+    AdvisorConfig, BloomConfig, BloomWriteConfig, MvConfig, OptimizeConfig, PinListConfig,
+    DEFAULT_PREDICATE_COLUMN_REGEX,
+};
+pub use cost::{Cents, GIB, S3_REWRITE_TARIFF_CENTS_PER_GIB};
 pub use error::{Error, Result};
 pub use input::{
     DataFile, FixtureEventLogReader, FixtureManifestReader, FixtureShelfdStatsReader,
@@ -41,7 +46,8 @@ pub use output::{
 };
 pub use recommenders::{
     default_recommenders, kind_filter, AnalysisContext, BloomFilterRecommender,
-    MaterializedViewRecommender, OptimizeRecommender, PinListRecommender, Recommender,
+    BloomWriteRecommender, MaterializedViewRecommender, OptimizeRecommender, PinListRecommender,
+    Recommender,
 };
 
 /// Run every recommender against the supplied context and return

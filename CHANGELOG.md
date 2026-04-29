@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — SHELF-52 bloom-write advisor
+
+- **`shelf-advisor::recommenders::bloom_write::BloomWriteRecommender`**
+  recommends Iceberg tables that would benefit most from being
+  rewritten with Parquet bloom filters on selected predicate columns.
+  Detection groups `QueryRecord`s by table over the configured
+  lookback window, applies `BloomWriteConfig::min_query_count` (default
+  50) and `min_query_bytes` (default 1 GiB) gates, and ranks predicate
+  columns via a configurable regex over `query_text`. Cost-savings
+  projection uses `1 / NDV` from `IcebergManifestReader::ndv()` when
+  available and falls back to `default_selectivity = 0.1` otherwise.
+  Severity buckets at `payback_queries < 100` (critical), `100..1000`
+  (warn), `>= 1000` (info). Output carries an `action_yaml` fragment
+  with `ALTER TABLE … SET PROPERTIES ('write.parquet.bloom-filter-columns'
+  = '…')` + `EXECUTE optimize`. The recommender does **not** perform
+  the rewrite; operators consume the JSON and trigger their own
+  CI/CD path. The feature is wired into `default_recommenders()`,
+  meaning the existing CLI smoke test still produces `[]` against the
+  empty stub readers but real callers see the new
+  `recommendation_type: "bloom_write"` rows. Local placeholder
+  `Cents` newtype (`shelf-advisor::cost`) replaces the
+  `crates/shelf-cost::Cents` import once SHELF-40 / PR #68 lands.
+  Column-ranking limitations (CTE inlining, function-wrapped
+  predicates, subqueries) are explicitly documented in
+  `docs/design-notes/SHELF-52-bloom-write-advisor.md`. Tier-4
+  `shelfd::side_bloom` gating: per the cost-reduction plan,
+  Tier-4 ships only if `bloom_write` flags > 30 % of cost
+  in tables with no writer-side blooms.
+
 ### Added — SHELF-53 advisor framework
 
 - **`shelf-advisor` core implementation.** The

@@ -57,6 +57,21 @@ pub struct QueryRecord {
 
     /// Total bytes physically scanned for this table.
     pub physical_input_bytes: u64,
+
+    /// Raw SQL text from `QueryCompletedEvent.metadata.query`.
+    /// Optional because the SHELF-37 event-listener jar does not
+    /// universally project the column today; the SHELF-52
+    /// bloom-write advisor's regex extractor falls back to
+    /// `equality_predicate_columns` when the text is absent.
+    ///
+    /// **Caveat (documented in the SHELF-52 design note):** the
+    /// regex over raw SQL only captures lexically-visible
+    /// `WHERE col = literal` patterns. CTE inlining, subqueries,
+    /// and function-wrapped predicates (e.g. `lower(col) = 'x'`)
+    /// silently miss; relying on this field is a heuristic, not a
+    /// precise predicate-pushdown trace.
+    #[serde(default)]
+    pub query_text: String,
 }
 
 /// Reader contract for the event-log table.

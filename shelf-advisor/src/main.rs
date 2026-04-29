@@ -30,9 +30,10 @@ use tracing_subscriber::EnvFilter;
 
 use shelf_advisor::{
     default_recommenders, render_rfc3339_utc, run_pipeline, run_pipeline_bare, write_envelope_json,
-    write_per_kind_dir, write_recommendations_json, AdvisorConfig, AnalysisContext, DataFile,
-    FixtureEventLogReader, FixtureManifestReader, FixtureShelfdStatsReader, HttpShelfdStatsReader,
-    IcebergEventLogReader, IcebergManifestReader, PodStats, QueryRecord, ShelfdStatsReader,
+    write_per_kind_dir, write_recommendations_json, AdvisorConfig, AnalysisContext,
+    BloomWriteConfig, DataFile, FixtureEventLogReader, FixtureManifestReader,
+    FixtureShelfdStatsReader, HttpShelfdStatsReader, IcebergEventLogReader, IcebergManifestReader,
+    PodStats, QueryRecord, ShelfdStatsReader,
 };
 
 /// CLI form of the recommendation-type discriminator. clap's
@@ -291,6 +292,7 @@ async fn main() -> Result<()> {
             // wired) + bare-array writer. The SHELF-34 smoke test
             // depends on this writing `[]` for an empty input.
             let recs = run_against_live_bare(&cfg).await?;
+
             write_recommendations_json(&output, &recs).with_context(|| {
                 format!("failed to write recommendations to {}", output.display())
             })?;
