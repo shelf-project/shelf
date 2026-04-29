@@ -44,7 +44,7 @@ prometheus = { version = "0.13", features = ["process"] }
 bytes = "1"
 futures = "0.3"
 once_cell = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 parking_lot = "0.12"
 humantime-serde = "1"
