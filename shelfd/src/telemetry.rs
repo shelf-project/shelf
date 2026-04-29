@@ -25,7 +25,7 @@ use std::time::Duration;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::{trace::TracerProvider, Resource};
+use opentelemetry_sdk::{trace::SdkTracerProvider, Resource};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -36,7 +36,7 @@ use crate::config::ObservabilityConfig;
 /// pending spans on a best-effort basis.
 #[derive(Debug, Default)]
 pub struct TelemetryGuard {
-    provider: Option<TracerProvider>,
+    provider: Option<SdkTracerProvider>,
 }
 
 impl TelemetryGuard {
@@ -124,7 +124,7 @@ pub fn init(
 ///
 /// Uses the `rt-tokio` runtime so the batch processor cooperates with
 /// the main Tokio runtime shelfd builds in `main`.
-fn build_otlp_provider(endpoint: &str, pod_id: &str) -> anyhow::Result<TracerProvider> {
+fn build_otlp_provider(endpoint: &str, pod_id: &str) -> anyhow::Result<SdkTracerProvider> {
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(endpoint)
@@ -132,14 +132,16 @@ fn build_otlp_provider(endpoint: &str, pod_id: &str) -> anyhow::Result<TracerPro
         .build()
         .map_err(|e| anyhow::anyhow!("otlp exporter build: {e}"))?;
 
-    let resource = Resource::new([
-        KeyValue::new("service.name", "shelfd"),
-        KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-        KeyValue::new("pod.id", pod_id.to_owned()),
-    ]);
+    let resource = Resource::builder()
+        .with_attributes([
+            KeyValue::new("service.name", "shelfd"),
+            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+            KeyValue::new("pod.id", pod_id.to_owned()),
+        ])
+        .build();
 
-    let provider = TracerProvider::builder()
-        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
         .with_resource(resource)
         .build();
 
