@@ -58,13 +58,16 @@ cache:
       # flip back to s3_fifo only when the SHELF-26 replay harness
       # shows a per-policy hit-ratio gain on your workload.
       evictionPolicy: lru
-      dramSizeBytes: 15032385536     # 14 GiB
+      # SHELF-21f (2026-04-29): see overlay note in values.yaml.
+      dramSizeBytes: 11811160064     # 11 GiB (was 14 GiB)
       nvmeSizeBytes: 257698037760    # 240 GiB; matches storage.size
       # Foyer LODC tunables — bound the disk-cache submit queue so a
       # burst of inflight rowgroups can't OOM the pod under load.
+      # SHELF-21f bumped flushers + bufferPool so the queue actually
+      # drains in steady state.
       diskCache:
-        flushers: 4                                 # was Foyer default 1
-        bufferPoolSizeBytes: 268435456              # 256 MiB (Foyer default 16 MiB)
+        flushers: 8                                 # was 4 (was Foyer default 1)
+        bufferPoolSizeBytes: 402653184              # 384 MiB (was 256 MiB)
         submitQueueSizeThresholdBytes: 1073741824   # 1 GiB hard cap on LODC RSS pressure
   admission:
     sizeThresholdMiB: 1024

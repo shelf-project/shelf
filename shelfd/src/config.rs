@@ -119,12 +119,27 @@ pub struct OriginConfig {
     #[serde(default)]
     pub region: Option<String>,
     /// Max in-flight S3 GET requests per pod.
+    ///
+    /// SHELF-21f (2026-04-29) — lowered the default from 256 → 128
+    /// after the LODC submit-queue overflow regression on shelf-0/1
+    /// in the alluxio NodePool. Each in-flight request reserves a
+    /// receive buffer for up to one ~32 MiB Parquet rowgroup, so
+    /// `max_inflight × 32 MiB` is the worst-case RSS footprint of
+    /// the origin pool. With the previous default of 256, this was
+    /// up to 8 GiB on top of the 19 GiB Foyer DRAM caps and the
+    /// 1 GiB LODC submit-queue cap, leaving zero headroom under
+    /// the ~27.3 GiB node-allocatable ceiling on the m6a/c6a-4xlarge
+    /// alluxio pool. 128 caps the worst case at ~4 GiB and keeps
+    /// the budget feasible. Operators who run on bigger nodes can
+    /// override via `origin.pool.maxConnections` in the chart values.
+    /// See `shelfd/docs/runbooks/2026-04-shelf-1-oom.md` and the
+    /// 2026-04-29 LODC regression entry in `CHANGELOG.md`.
     #[serde(default = "default_max_inflight")]
     pub max_inflight: usize,
 }
 
 fn default_max_inflight() -> usize {
-    256
+    128
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -652,7 +667,7 @@ pin_list:
         assert_eq!(cfg.pools.metadata.dram_bytes, 1_048_576);
         assert_eq!(cfg.admission.size_threshold_bytes, 1_073_741_824);
         // Defaults applied.
-        assert_eq!(cfg.origin.max_inflight, 256);
+        assert_eq!(cfg.origin.max_inflight, 128);
         assert!(cfg.admission.pinned_bypass);
     }
 

@@ -179,7 +179,15 @@ cache:
       # 5x in 1h on 2026-04-27 because it tried to take 22 GiB DRAM
       # inside a 32 GiB pod. See runbook
       #   shelfd/docs/runbooks/2026-04-shelf-2-oom.md
-      dramSizeBytes: 15032385536   # 14 GiB
+      # SHELF-21f (2026-04-29): lowered 14 GiB → 11 GiB to free
+      # ~3 GiB of headroom on the 27.3 GiB-allocatable alluxio
+      # NodePool nodes after the 2026-04-29 LODC regression
+      # (shelf-1 OOMKill exit 137 at 06:40 IST; shelf-0 RSS peaks
+      # of 27–29 GiB observed). A smaller DRAM tier also reduces
+      # the rate at which the rowgroup pool evicts into the LODC,
+      # so this knob is part of the H3 fix even though its primary
+      # effect is RSS budget.
+      dramSizeBytes: 11811160064   # 11 GiB (was 14 GiB)
       nvmeSizeBytes: 257698037760  # 240 GiB; matches storage.size
       # -- Foyer Large-Object Disk Cache (LODC) pipeline knobs.
       #
@@ -202,9 +210,18 @@ cache:
       # All three knobs are optional — leaving any field unset
       # falls back to Foyer's own default.
       diskCache:
-        flushers: 4                       # was Foyer default 1
-        bufferPoolSizeBytes: 268435456    # 256 MiB; was Foyer default 16 MiB
-        submitQueueSizeThresholdBytes: 1073741824  # 1 GiB; bounds RSS growth from the LODC pipeline
+        # SHELF-21f (2026-04-29): doubled flushers 4 → 8 and bumped
+        # bufferPool 256 MiB → 384 MiB so the LODC drains faster
+        # than write ingress. Without this, `shelf_lodc_inflight_bytes`
+        # was pinned at the 80% watermark (~860 MiB) on shelf-2/3
+        # for the full 6 h soak window 2026-04-29 03:00–09:00 IST
+        # and `shelf_lodc_drops_total` grew 2.5× overnight cluster
+        # wide. 8 flushers approximately doubles the gp3 drain
+        # parallelism; the 384 MiB bufferPool fits within the new
+        # 11 GiB DRAM cap with adequate headroom.
+        flushers: 8                                 # was 4 (was Foyer default 1)
+        bufferPoolSizeBytes: 402653184              # 384 MiB; was 256 MiB
+        submitQueueSizeThresholdBytes: 1073741824   # 1 GiB; bounds RSS growth from the LODC pipeline
         # -- SHELF-21e-v2 — admission rate-limit (bytes/sec) into the
         # Foyer LODC pipeline. The three knobs above bound the *size*
         # of the submit queue / flush buffers, which caps RSS but does
@@ -261,7 +278,15 @@ origin:
   # -- Pooled HTTP client. Per-prefix sharding lands in Phase 3 (SHELF-??).
   # [plan §3 Phase 3 deliverable 6 — "Per-prefix connection pools"]
   pool:
-    maxConnections: 256  # [placeholder: phase-0 benchmark TBD]
+    # SHELF-21f (2026-04-29): lowered 256 → 128 to bound
+    # worst-case origin-pool RSS at maxConnections × ~32 MiB
+    # ≈ 4 GiB on the 27.3 GiB-allocatable alluxio NodePool. The
+    # live cluster ConfigMap had been hand-edited to 512 during
+    # the 2026-04-28 chaos window (raising worst-case origin RSS
+    # to ~16 GiB) which left zero room for the 19 GiB DRAM caps +
+    # 1 GiB LODC submit queue under the node ceiling. The deploy
+    # runbook for SHELF-21f explicitly resets the live ConfigMap.
+    maxConnections: 128
     idleTimeoutSeconds: 60
 
 # ---------------------------------------------------------------------------
