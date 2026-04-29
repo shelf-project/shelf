@@ -34,6 +34,7 @@ fn test_pools() -> PoolsConfig {
             nvme_bytes: 0,
             eviction_policy: shelfd::config::EvictionPolicy::default(),
             disk_cache: shelfd::config::RowGroupDiskCacheConfig::default(),
+            compression: shelfd::config::CompressionConfig::default(),
         },
     }
 }

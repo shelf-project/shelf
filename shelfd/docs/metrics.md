@@ -35,6 +35,10 @@ covered by the `registry_exposes_documented_series` regression test.
 | `shelf_decoded_meta_decode_seconds` | histogram | `{kind}`     | Wall-clock seconds the SHELF-50 decode worker spent parsing one entry. Buckets `prometheus::exponential_buckets(0.000_010, 2.0, 16)` — 10 µs → ~330 ms. | SHELF-50 |
 | `shelf_decoded_meta_entries`  | gauge     | `{kind}`             | Resident entry count per kind in the SHELF-50 LRU. Compare against `cache.decodedMeta.maxManifestEntries` / `maxFooterEntries`. | SHELF-50 |
 | `shelf_decoded_meta_decode_errors_total` | counter | `{kind, reason}` | Decode failures observed by the SHELF-50 worker. `reason` ∈ `{bad_magic, parquet_thrift, avro_header}`. Failed entries are NOT installed. | SHELF-50 |
+| `shelf_compress_bytes_in_total` | counter | `{pool}` | Bytes presented to the compression pipeline before encoding. Pair with `shelf_compress_bytes_out_total` for the live compression-ratio panel `1 - out/in`. | B1 |
+| `shelf_compress_bytes_out_total` | counter | `{pool}` | Bytes returned by the compression pipeline (encoded frame, including the 1-byte version header). | B1 |
+| `shelf_compress_outcomes_total` | counter | `{pool, outcome}` | Encode/decode outcome counter; `outcome` ∈ `compressed`, `skipped_small`, `skipped_incompressible`, `decompressed_ok`, `decompressed_uncompressed`, `decompress_error`. | B1 |
+| `shelf_compress_seconds` | histogram | `{pool, op}` | Compression-pipeline latency; `op` ∈ `encode`, `decode`. | B1 |
 
 ## Planned (future tickets)
 

@@ -34,6 +34,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::OnceCell;
 
+use crate::compression::CompressionPipeline;
+
 // NOTE: The trait below uses `impl Future` (RPITIT) instead of the
 // `async_trait` crate. If we later need `dyn Store`, SHELF-NN will add
 // the `async_trait` dep with its own design note and dep justification
@@ -393,6 +395,18 @@ impl PoolHandle {
         }
     }
 
+    /// **B1** — DRAM-only payload accessor used by [`FoyerStore::pin`]
+    /// when compression is enabled, so the pin-set can record the
+    /// *decoded* byte length rather than the on-disk frame length.
+    /// Returns `None` when the entry is not memory-resident; callers
+    /// are responsible for fall-back behaviour.
+    fn memory_payload_bytes(&self, key: &Key) -> Option<Bytes> {
+        match self {
+            PoolHandle::Dram { cache, .. } => cache.get(key).map(|e| e.value().clone()),
+            PoolHandle::Hybrid { cache, .. } => cache.memory().get(key).map(|e| e.value().clone()),
+        }
+    }
+
     fn remove(&self, key: &Key) {
         match self {
             PoolHandle::Dram { cache, .. } => {
@@ -403,6 +417,24 @@ impl PoolHandle {
             }
         }
     }
+}
+
+/// **B1** — on-disk record of how the rowgroup NVMe ring was last
+/// written, persisted at `<nvme_dir>/.shelf-compression.json`. The
+/// store boots only when the configured pipeline matches this
+/// marker; mismatching configs abort with an operator-actionable
+/// error rather than corrupt-read silently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CompressionMarker {
+    /// Marker schema version. Bump when fields are added in a
+    /// non-backward-compatible way.
+    version: u32,
+    /// Pipeline descriptor (e.g. `"zstd@3"`). Matches the string
+    /// returned by `CompressionPipeline::descriptor`.
+    descriptor: String,
+    /// Configured minimum size that triggers actual compression
+    /// (smaller frames are stored uncompressed but still tag-prefixed).
+    min_size_bytes: u64,
 }
 
 /// Pool-segmented Foyer cache. `metadata` is always DRAM-only per
@@ -421,6 +453,13 @@ pub struct FoyerStore {
     /// admission gate can be consulted with a single field access
     /// rather than a match-on-pool every read.
     rowgroup_lodc_bp: Option<crate::lodc_backpressure::LodcBackpressure>,
+    /// **B1** — optional zstd pipeline for the rowgroup pool. `Some`
+    /// when `cache.pools.rowgroup.compression.enabled` is true. The
+    /// pipeline wraps every byte stream that reaches Foyer's
+    /// `insert` and unwraps everything that comes back out of
+    /// `get`, so compression is invisible to `PoolHandle` and the
+    /// `Store` trait.
+    rowgroup_compression: Option<CompressionPipeline>,
     /// SHELF-29 — independent-queue admission rate-limiter. Sits
     /// alongside `rowgroup_lodc_bp`; both gates must say admit for
     /// the insert to proceed. `None` when the rowgroup pool is
@@ -479,6 +518,30 @@ impl FoyerStore {
             cache: metadata_cache,
             dram_capacity: metadata_capacity,
         };
+
+        // **B1** — validate compression config + reconcile with the
+        // on-disk marker file (hybrid pool only). Run before any
+        // Foyer pool is constructed so a misconfiguration aborts
+        // boot loud and early rather than corrupting bytes silently
+        // on the first read.
+        config.rowgroup.compression.validate()?;
+        let rowgroup_compression = if config.rowgroup.compression.enabled {
+            let pipeline = CompressionPipeline::new(
+                pool_label(Pool::RowGroup),
+                config.rowgroup.compression.level,
+                config.rowgroup.compression.min_size_bytes,
+            );
+            pipeline.pre_touch_metrics();
+            Some(pipeline)
+        } else {
+            None
+        };
+        if config.rowgroup.nvme_bytes > 0 {
+            Self::ensure_compression_marker(
+                &config.rowgroup.nvme_dir,
+                rowgroup_compression.as_ref(),
+            )?;
+        }
 
         let rowgroup = if config.rowgroup.nvme_bytes == 0 {
             let cache = foyer::CacheBuilder::new(rowgroup_capacity as usize)
@@ -592,9 +655,118 @@ impl FoyerStore {
             rowgroup,
             rowgroup_lodc_bp,
             rowgroup_lodc_admit,
+            rowgroup_compression,
             inflight: Mutex::new(HashMap::new()),
             pin_set: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// **B1** — reconcile the configured compression mode with the
+    /// `.shelf-compression.json` marker file in `nvme_dir`. The
+    /// marker is the only authoritative record of how the bytes
+    /// already on the NVMe ring were encoded; flipping mode without
+    /// wiping the dir would corrupt every read because the encoder
+    /// header byte (`0x00` / `0x5A`) is indistinguishable from
+    /// arbitrary Parquet content.
+    ///
+    /// Rules:
+    /// - Empty `nvme_dir` (no Foyer region files yet) — write a
+    ///   marker that matches the current config (or no marker if
+    ///   compression is off).
+    /// - Non-empty `nvme_dir` + marker present + matches config — ok.
+    /// - Non-empty `nvme_dir` + marker present + mismatches config —
+    ///   abort with a clear "wipe NVMe to switch compression mode"
+    ///   error.
+    /// - Non-empty `nvme_dir` + marker missing + compression off —
+    ///   ok (legacy state, the ring was never compressed).
+    /// - Non-empty `nvme_dir` + marker missing + compression on —
+    ///   abort: there is pre-existing uncompressed data the new
+    ///   decoder cannot tell apart from a header byte.
+    fn ensure_compression_marker(
+        nvme_dir: &std::path::Path,
+        pipeline: Option<&CompressionPipeline>,
+    ) -> crate::Result<()> {
+        let marker_path = nvme_dir.join(".shelf-compression.json");
+        let dir_exists = nvme_dir.exists();
+        let dir_has_payload = if dir_exists {
+            std::fs::read_dir(nvme_dir)
+                .map(|rd| {
+                    rd.filter_map(Result::ok)
+                        .any(|entry| entry.file_name() != ".shelf-compression.json")
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        let existing_marker: Option<CompressionMarker> = match std::fs::read(&marker_path) {
+            Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(|e| {
+                crate::Error::Store(format!(
+                    "pool.rowgroup compression marker `{}` is malformed: {e}; \
+                     either restore a known-good marker or wipe the NVMe ring",
+                    marker_path.display()
+                ))
+            })?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(crate::Error::Store(format!(
+                    "pool.rowgroup compression marker `{}`: read failed: {e}",
+                    marker_path.display()
+                )));
+            }
+        };
+
+        match (existing_marker.as_ref(), pipeline) {
+            (Some(marker), Some(pipe)) if marker.descriptor == pipe.descriptor() => Ok(()),
+            (Some(marker), Some(pipe)) => Err(crate::Error::Store(format!(
+                "pool.rowgroup compression marker mismatch: NVMe ring was written with `{}` \
+                 but config is `{}`. Wipe `{}` and restart to switch compression mode \
+                 (the on-disk frames are not self-describing).",
+                marker.descriptor,
+                pipe.descriptor(),
+                nvme_dir.display(),
+            ))),
+            (Some(marker), None) => Err(crate::Error::Store(format!(
+                "pool.rowgroup compression is disabled but the NVMe ring at `{}` was \
+                 written with `{}`. Wipe the directory and restart, or re-enable \
+                 compression with the same descriptor.",
+                nvme_dir.display(),
+                marker.descriptor,
+            ))),
+            (None, Some(pipe)) if dir_has_payload => Err(crate::Error::Store(format!(
+                "pool.rowgroup compression is enabled (`{}`) but the NVMe ring at `{}` \
+                 contains pre-existing uncompressed data. Wipe the directory and restart \
+                 — flipping compression on a populated ring corrupts subsequent reads.",
+                pipe.descriptor(),
+                nvme_dir.display(),
+            ))),
+            (None, Some(pipe)) => {
+                if !dir_exists {
+                    std::fs::create_dir_all(nvme_dir).map_err(|e| {
+                        crate::Error::Store(format!(
+                            "pool.rowgroup nvme_dir `{}`: create failed: {e}",
+                            nvme_dir.display()
+                        ))
+                    })?;
+                }
+                let marker = CompressionMarker {
+                    version: 1,
+                    descriptor: pipe.descriptor(),
+                    min_size_bytes: pipe.min_size_bytes() as u64,
+                };
+                let bytes = serde_json::to_vec_pretty(&marker).map_err(|e| {
+                    crate::Error::Store(format!("compression marker serialise: {e}"))
+                })?;
+                std::fs::write(&marker_path, bytes).map_err(|e| {
+                    crate::Error::Store(format!(
+                        "pool.rowgroup compression marker `{}`: write failed: {e}",
+                        marker_path.display()
+                    ))
+                })?;
+                Ok(())
+            }
+            (None, None) => Ok(()),
+        }
     }
 
     /// SHELF-21e — Foyer's monotonic "bytes committed to NVMe"
@@ -772,7 +944,8 @@ impl FoyerStore {
                         .with_label_values(&[pool_label(pool)])
                         .inc();
                 }
-                return Ok(ReadOutcome::Hit(bytes, tier.into()));
+                let payload = self.decode_for_read(pool, bytes)?;
+                return Ok(ReadOutcome::Hit(payload, tier.into()));
             }
             None => {
                 if matches!(self.handle_for(pool), PoolHandle::Hybrid { .. }) {
@@ -971,9 +1144,25 @@ impl FoyerStore {
         // require async I/O which the admin surface does not do.
         // Operators can always re-fetch to warm the memory tier and
         // then pin.
-        let len = match self.handle_for(pool).memory_get_len(key) {
-            Some(len) => len,
-            None => return false,
+        //
+        // **B1**: when compression is enabled the *stored* length is
+        // the encoded frame length, but `pinned_bytes()` is a budget
+        // signal that should reflect what the user sees. Decode the
+        // memory-resident frame so the pin-set tracks the decoded
+        // payload length.
+        let len = match (
+            self.compression_for(pool),
+            self.handle_for(pool).memory_payload_bytes(key),
+        ) {
+            (Some(pipeline), Some(stored)) => match pipeline.decode_from_store(&stored) {
+                Ok(decoded) => decoded.len() as u64,
+                Err(_) => stored.len() as u64,
+            },
+            (None, _) => match self.handle_for(pool).memory_get_len(key) {
+                Some(len) => len,
+                None => return false,
+            },
+            (Some(_), None) => return false,
         };
         self.pin_set.write().insert(key.clone(), (pool, len));
         true
@@ -1010,6 +1199,40 @@ impl FoyerStore {
     /// installed. O(N) over the pin-set; no cache lookups.
     pub fn pinned_bytes(&self) -> u64 {
         self.pin_set.read().values().map(|(_, len)| *len).sum()
+    }
+
+    /// **B1** — pipeline lookup keyed on `Pool`. Today only
+    /// `Pool::RowGroup` can carry a pipeline; the metadata pool
+    /// keeps its legacy compile-time `zstd_metadata` feature gate
+    /// for now. Returning `None` short-circuits the encode/decode
+    /// boundary in the hot path.
+    fn compression_for(&self, pool: Pool) -> Option<&CompressionPipeline> {
+        match pool {
+            Pool::RowGroup => self.rowgroup_compression.as_ref(),
+            Pool::Metadata => None,
+        }
+    }
+
+    /// **B1** — pre-store transform. Returns the bytes Foyer should
+    /// hold; identical to `bytes` when no pipeline is configured.
+    fn encode_for_store(&self, pool: Pool, bytes: Bytes) -> crate::Result<Bytes> {
+        match self.compression_for(pool) {
+            Some(pipeline) => pipeline
+                .encode_for_store(&bytes)
+                .map_err(|e| crate::Error::Store(format!("compression encode: {e}"))),
+            None => Ok(bytes),
+        }
+    }
+
+    /// **B1** — post-load transform. Returns the original payload
+    /// bytes; identical to `bytes` when no pipeline is configured.
+    fn decode_for_read(&self, pool: Pool, bytes: Bytes) -> crate::Result<Bytes> {
+        match self.compression_for(pool) {
+            Some(pipeline) => pipeline
+                .decode_from_store(&bytes)
+                .map_err(|e| crate::Error::Store(format!("compression decode: {e}"))),
+            None => Ok(bytes),
+        }
     }
 
     /// Evict a key from `pool`. Preserves the pin-set so a subsequent
@@ -1137,12 +1360,12 @@ impl Store for FoyerStore {
         // would otherwise never report. DRAM-only pools do not
         // bump either counter (hence the guard on `Tier::Disk`).
         match self.handle_for(pool).get(key).await? {
-            Some((bytes, Tier::Dram)) => Ok(Some(bytes)),
+            Some((bytes, Tier::Dram)) => Ok(Some(self.decode_for_read(pool, bytes)?)),
             Some((bytes, Tier::Disk)) => {
                 crate::metrics::DISK_HITS_TOTAL
                     .with_label_values(&[pool_label(pool)])
                     .inc();
-                Ok(Some(bytes))
+                Ok(Some(self.decode_for_read(pool, bytes)?))
             }
             None => {
                 if matches!(self.handle_for(pool), PoolHandle::Hybrid { .. }) {
@@ -1156,7 +1379,8 @@ impl Store for FoyerStore {
     }
 
     async fn insert(&self, pool: Pool, key: Key, bytes: Bytes) -> crate::Result<()> {
-        self.handle_for(pool).insert(key, bytes);
+        let to_store = self.encode_for_store(pool, bytes)?;
+        self.handle_for(pool).insert(key, to_store);
         Ok(())
     }
 
@@ -1425,6 +1649,7 @@ mod store_tests {
                 nvme_bytes: 0,
                 eviction_policy: crate::config::EvictionPolicy::default(),
                 disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
+                compression: crate::config::CompressionConfig::default(),
             },
         }
     }
@@ -1615,6 +1840,7 @@ mod store_tests {
                 nvme_bytes: 0,
                 eviction_policy: crate::config::EvictionPolicy::default(),
                 disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
+                compression: crate::config::CompressionConfig::default(),
             },
         };
         let store = FoyerStore::open(&pools).await.expect("open");
@@ -1676,6 +1902,7 @@ mod store_tests {
                 nvme_bytes: 0,
                 eviction_policy: crate::config::EvictionPolicy::default(),
                 disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
+                compression: crate::config::CompressionConfig::default(),
             },
         };
         let store = FoyerStore::open(&pools).await.expect("open");
@@ -1808,6 +2035,7 @@ mod store_tests {
                 nvme_bytes: 64 * 1024 * 1024,
                 eviction_policy: crate::config::EvictionPolicy::default(),
                 disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
+                compression: crate::config::CompressionConfig::default(),
             },
         }
     }
@@ -1916,6 +2144,7 @@ mod store_tests {
                 nvme_bytes: 64 * 1024 * 1024,
                 eviction_policy: crate::config::EvictionPolicy::default(),
                 disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
+                compression: crate::config::CompressionConfig::default(),
             },
         };
         let store = FoyerStore::open(&pools).await.expect("open");
@@ -2027,6 +2256,7 @@ mod store_tests {
                 nvme_bytes: 0,
                 eviction_policy: crate::config::EvictionPolicy::default(),
                 disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
+                compression: crate::config::CompressionConfig::default(),
             },
         };
         let store = FoyerStore::open(&cfg).await.expect("open small pool");
@@ -2087,6 +2317,258 @@ mod store_tests {
         assert!(
             now_admin > baseline_admin,
             "explicit evict must bump reason=admin (baseline {baseline_admin}, now {now_admin})",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // **B1** — rowgroup zstd compression coverage.
+    //
+    // Every test below exercises a `compression.enabled = true`
+    // RowGroupPoolConfig: we want byte-identity round-trips, the
+    // pin-set's recorded length to be the *decoded* size, and
+    // marker-file aborts to fire on mode flips.
+    // -----------------------------------------------------------------
+
+    fn compressible_payload(byte_len: usize) -> Bytes {
+        // Repeating short JSON-ish chunk — compresses well under
+        // zstd-3, mirrors the row-group dictionary-encoded string
+        // distribution well enough for unit-test purposes.
+        let unit = br#"{"row":"abcdefghijklmnopqrstuvwxyz","val":1234567890}"#;
+        let mut out = Vec::with_capacity(byte_len + unit.len());
+        while out.len() < byte_len {
+            out.extend_from_slice(unit);
+        }
+        out.truncate(byte_len);
+        Bytes::from(out)
+    }
+
+    fn compressed_dram_pool() -> PoolsConfig {
+        PoolsConfig {
+            metadata: MetadataPoolConfig {
+                dram_bytes: 1 << 20,
+            },
+            rowgroup: RowGroupPoolConfig {
+                dram_bytes: 8 * 1024 * 1024,
+                nvme_dir: std::path::PathBuf::from("/tmp/unused"),
+                nvme_bytes: 0,
+                eviction_policy: crate::config::EvictionPolicy::default(),
+                disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
+                compression: crate::config::CompressionConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn compression_round_trip_is_byte_identical() {
+        let store = FoyerStore::open(&compressed_dram_pool())
+            .await
+            .expect("open compressed DRAM pool");
+        let key = k(80);
+        let payload = compressible_payload(64 * 1024);
+        store
+            .insert(Pool::RowGroup, key.clone(), payload.clone())
+            .await
+            .unwrap();
+        let got = store.get(Pool::RowGroup, &key).await.unwrap();
+        assert_eq!(
+            got.as_deref(),
+            Some(&payload[..]),
+            "compression encode/decode must be byte-identical",
+        );
+    }
+
+    #[tokio::test]
+    async fn compression_used_bytes_reflects_encoded_frame() {
+        // The Foyer pool's `usage()` reports stored bytes, which are
+        // post-encode. A highly compressible 64 KiB JSON-ish payload
+        // should land at well under half its original size on zstd-3.
+        let store = FoyerStore::open(&compressed_dram_pool())
+            .await
+            .expect("open compressed DRAM pool");
+        let payload = compressible_payload(64 * 1024);
+        store
+            .insert(Pool::RowGroup, k(81), payload.clone())
+            .await
+            .unwrap();
+        let used = store.used_bytes(Pool::RowGroup);
+        assert!(
+            used > 0,
+            "used_bytes must reflect at least the header byte"
+        );
+        assert!(
+            (used as usize) < payload.len() / 2,
+            "compression must shrink storage on highly redundant input: used={used}, payload={}",
+            payload.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn compression_pin_records_decoded_length() {
+        let store = FoyerStore::open(&compressed_dram_pool())
+            .await
+            .expect("open compressed DRAM pool");
+        let key = k(82);
+        let payload = compressible_payload(64 * 1024);
+        store
+            .insert(Pool::RowGroup, key.clone(), payload.clone())
+            .await
+            .unwrap();
+        assert!(store.pin(Pool::RowGroup, &key));
+        assert_eq!(
+            store.pinned_bytes(),
+            payload.len() as u64,
+            "pin-set must record the decoded payload length, not the encoded frame",
+        );
+    }
+
+    #[tokio::test]
+    async fn compression_outcomes_metric_advances_on_round_trip() {
+        let store = FoyerStore::open(&compressed_dram_pool())
+            .await
+            .expect("open compressed DRAM pool");
+        let baseline_in = crate::metrics::COMPRESS_BYTES_IN_TOTAL
+            .with_label_values(&["rowgroup"])
+            .get();
+        let baseline_compressed = crate::metrics::COMPRESS_OUTCOMES_TOTAL
+            .with_label_values(&["rowgroup", "compressed"])
+            .get();
+        let baseline_decompressed = crate::metrics::COMPRESS_OUTCOMES_TOTAL
+            .with_label_values(&["rowgroup", "decompressed_ok"])
+            .get();
+
+        let payload = compressible_payload(8 * 1024);
+        store
+            .insert(Pool::RowGroup, k(83), payload.clone())
+            .await
+            .unwrap();
+        assert!(store
+            .get(Pool::RowGroup, &k(83))
+            .await
+            .unwrap()
+            .is_some());
+
+        let now_in = crate::metrics::COMPRESS_BYTES_IN_TOTAL
+            .with_label_values(&["rowgroup"])
+            .get();
+        let now_compressed = crate::metrics::COMPRESS_OUTCOMES_TOTAL
+            .with_label_values(&["rowgroup", "compressed"])
+            .get();
+        let now_decompressed = crate::metrics::COMPRESS_OUTCOMES_TOTAL
+            .with_label_values(&["rowgroup", "decompressed_ok"])
+            .get();
+
+        assert!(
+            now_in - baseline_in >= payload.len() as u64,
+            "shelf_compress_bytes_in_total must advance by at least the payload length",
+        );
+        assert!(
+            now_compressed > baseline_compressed,
+            "shelf_compress_outcomes_total{{outcome=compressed}} must advance",
+        );
+        assert!(
+            now_decompressed > baseline_decompressed,
+            "shelf_compress_outcomes_total{{outcome=decompressed_ok}} must advance",
+        );
+    }
+
+    #[tokio::test]
+    async fn marker_written_on_first_open_with_compression() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pools = PoolsConfig {
+            metadata: MetadataPoolConfig {
+                dram_bytes: 1 << 20,
+            },
+            rowgroup: RowGroupPoolConfig {
+                dram_bytes: 1 << 20,
+                nvme_dir: dir.path().to_path_buf(),
+                nvme_bytes: 64 * 1024 * 1024,
+                eviction_policy: crate::config::EvictionPolicy::default(),
+                disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
+                compression: crate::config::CompressionConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+            },
+        };
+        let _store = FoyerStore::open(&pools).await.expect("open hybrid + compression");
+        let marker_path = dir.path().join(".shelf-compression.json");
+        let bytes = std::fs::read(&marker_path).expect("marker file must exist after open");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("marker is valid JSON");
+        assert_eq!(parsed["version"], 1);
+        assert_eq!(parsed["descriptor"], "zstd@3");
+    }
+
+    #[tokio::test]
+    async fn marker_mismatch_aborts_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Pre-populate the directory with a mismatched marker AND a
+        // dummy region file so `dir_has_payload` is `true`. This
+        // simulates the "operator flipped compression mode against a
+        // populated NVMe ring" failure mode.
+        std::fs::write(
+            dir.path().join(".shelf-compression.json"),
+            br#"{"version":1,"descriptor":"zstd@3","min_size_bytes":256}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("region-0.bin"), b"foyer-payload").unwrap();
+        let pools = PoolsConfig {
+            metadata: MetadataPoolConfig {
+                dram_bytes: 1 << 20,
+            },
+            rowgroup: RowGroupPoolConfig {
+                dram_bytes: 1 << 20,
+                nvme_dir: dir.path().to_path_buf(),
+                nvme_bytes: 64 * 1024 * 1024,
+                eviction_policy: crate::config::EvictionPolicy::default(),
+                disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
+                // Compression OFF in config but marker says zstd@3 —
+                // expected to fail loudly.
+                compression: crate::config::CompressionConfig::default(),
+            },
+        };
+        let err = FoyerStore::open(&pools)
+            .await
+            .expect_err("mismatched compression marker must abort open");
+        let message = format!("{err}");
+        assert!(
+            message.contains("compression marker") || message.contains("compression is disabled"),
+            "expected marker-mismatch diagnostic, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn marker_missing_with_payload_and_compression_on_aborts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Pre-existing payload, no marker — operator flipping
+        // compression on against an unmarked populated ring.
+        std::fs::write(dir.path().join("region-0.bin"), b"foyer-payload").unwrap();
+        let pools = PoolsConfig {
+            metadata: MetadataPoolConfig {
+                dram_bytes: 1 << 20,
+            },
+            rowgroup: RowGroupPoolConfig {
+                dram_bytes: 1 << 20,
+                nvme_dir: dir.path().to_path_buf(),
+                nvme_bytes: 64 * 1024 * 1024,
+                eviction_policy: crate::config::EvictionPolicy::default(),
+                disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
+                compression: crate::config::CompressionConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+            },
+        };
+        let err = FoyerStore::open(&pools)
+            .await
+            .expect_err("compression-on against unmarked populated ring must abort");
+        let message = format!("{err}");
+        assert!(
+            message.contains("pre-existing uncompressed data"),
+            "expected ring-already-populated diagnostic, got: {message}"
         );
     }
 }

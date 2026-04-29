@@ -197,6 +197,7 @@ fn singleflight_emits_leader_and_follower_events() {
                 nvme_bytes: 0,
                 eviction_policy: shelfd::config::EvictionPolicy::default(),
                 disk_cache: shelfd::config::RowGroupDiskCacheConfig::default(),
+                compression: shelfd::config::CompressionConfig::default(),
             },
         };
         let store = Arc::new(FoyerStore::open(&pools).await.expect("open"));

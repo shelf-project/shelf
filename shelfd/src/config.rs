@@ -281,6 +281,80 @@ pub struct RowGroupPoolConfig {
     /// parsing.
     #[serde(default)]
     pub disk_cache: RowGroupDiskCacheConfig,
+    /// **B1** — opt-in zstd compression of cached row-group payloads
+    /// before they reach Foyer. Off by default so the default chart
+    /// boots byte-identical to v0.5; flip
+    /// `cache.pools.rowgroup.compression.enabled` to engage. See
+    /// [`CompressionConfig`] for the full surface and the on-disk
+    /// safety contract enforced by `FoyerStore::open`.
+    #[serde(default)]
+    pub compression: CompressionConfig,
+}
+
+/// Per-pool zstd compression knob.
+///
+/// Disabled by default. Enabling on a populated NVMe ring requires a
+/// one-time wipe of [`RowGroupPoolConfig::nvme_dir`]; see the
+/// "On-disk safety contract" rustdoc on [`crate::compression`] and
+/// the `.shelf-compression.json` marker that `FoyerStore::open`
+/// writes / validates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompressionConfig {
+    /// Master switch. Default `false` — operators flip this on
+    /// per-pool after wiping NVMe.
+    #[serde(default)]
+    pub enabled: bool,
+    /// zstd compression level. Default `3` (zstd's own default).
+    /// Levels 1–9 are the practical range; higher levels gain <5 %
+    /// ratio on Iceberg / Parquet at 2–4× CPU cost.
+    #[serde(default = "default_compression_level")]
+    pub level: i32,
+    /// Inputs smaller than this are stored uncompressed (the zstd
+    /// 13-byte frame overhead dominates). Default 256 B.
+    #[serde(default = "default_compression_min_size")]
+    pub min_size_bytes: usize,
+}
+
+fn default_compression_level() -> i32 {
+    crate::compression::ZSTD_LEVEL
+}
+
+fn default_compression_min_size() -> usize {
+    crate::compression::MIN_COMPRESS_BYTES
+}
+
+impl Default for CompressionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            level: default_compression_level(),
+            min_size_bytes: default_compression_min_size(),
+        }
+    }
+}
+
+impl CompressionConfig {
+    /// Validate operator-supplied bounds at config load. Centralised
+    /// here so the `Config::from_yaml` path surfaces the failure with
+    /// `Error::Config(...)` rather than panicking deep inside zstd.
+    pub fn validate(&self) -> crate::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if !(1..=22).contains(&self.level) {
+            return Err(crate::Error::Config(format!(
+                "compression.level must be in 1..=22 (zstd range), got {}",
+                self.level
+            )));
+        }
+        if self.min_size_bytes == 0 {
+            return Err(crate::Error::Config(
+                "compression.min_size_bytes must be > 0 when compression is enabled".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Foyer LODC pipeline tunables for the rowgroup hybrid pool.
@@ -1084,6 +1158,7 @@ pin_list:
             nvme_bytes: 0,
             eviction_policy: EvictionPolicy::default(),
             disk_cache: RowGroupDiskCacheConfig::default(),
+            compression: CompressionConfig::default(),
         };
         cfg.validate_nvme().expect("zero nvme bytes must be valid");
     }
@@ -1096,6 +1171,7 @@ pin_list:
             nvme_bytes: 1,
             eviction_policy: EvictionPolicy::default(),
             disk_cache: RowGroupDiskCacheConfig::default(),
+            compression: CompressionConfig::default(),
         };
         let err = cfg.validate_nvme().unwrap_err();
         assert!(
@@ -1111,6 +1187,7 @@ pin_list:
             nvme_bytes: 1,
             eviction_policy: EvictionPolicy::default(),
             disk_cache: RowGroupDiskCacheConfig::default(),
+            compression: CompressionConfig::default(),
         };
         let err = cfg.validate_nvme().unwrap_err();
         assert!(matches!(&err, crate::Error::Config(m) if m.contains("must be absolute")));
@@ -1137,6 +1214,7 @@ pin_list:
             nvme_bytes: 1,
             eviction_policy: EvictionPolicy::default(),
             disk_cache: RowGroupDiskCacheConfig::default(),
+            compression: CompressionConfig::default(),
         };
         cfg.validate_nvme().expect("creatable dir must validate");
         assert!(dir.is_dir(), "validator must create the missing dir");
@@ -1163,9 +1241,48 @@ pin_list:
             nvme_bytes: 1,
             eviction_policy: EvictionPolicy::default(),
             disk_cache: RowGroupDiskCacheConfig::default(),
+            compression: CompressionConfig::default(),
         };
         let err = cfg.validate_nvme().unwrap_err();
         assert!(matches!(&err, crate::Error::Config(m) if m.contains("not a directory")));
         let _ = std::fs::remove_file(&path);
+    }
+
+    // **B1** — `CompressionConfig::validate` tests.
+
+    #[test]
+    fn compression_validate_disabled_is_always_ok() {
+        // Even out-of-range knobs must not block when the master
+        // switch is off — the YAML merge / serde defaults can still
+        // surface a "wild" value that the operator simply hasn't
+        // bothered to clear after disabling.
+        let cfg = CompressionConfig {
+            enabled: false,
+            level: 999,
+            min_size_bytes: 0,
+        };
+        cfg.validate().expect("disabled compression must always validate");
+    }
+
+    #[test]
+    fn compression_validate_rejects_out_of_range_level() {
+        let cfg = CompressionConfig {
+            enabled: true,
+            level: 0,
+            min_size_bytes: 256,
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(&err, crate::Error::Config(m) if m.contains("compression.level")));
+    }
+
+    #[test]
+    fn compression_validate_rejects_zero_min_size() {
+        let cfg = CompressionConfig {
+            enabled: true,
+            level: 3,
+            min_size_bytes: 0,
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(&err, crate::Error::Config(m) if m.contains("min_size_bytes")));
     }
 }

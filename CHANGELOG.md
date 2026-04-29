@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — B1 (Tier-1 cost reduction)
+
+- **`cache.pools.rowgroup.compression`** — opt-in zstd compression of
+  cached row-group payloads. Disabled by default. When enabled,
+  every byte range Foyer holds is zstd-encoded with a 1-byte version
+  header, so the same NVMe budget holds 1.4–2.5× more keys on real
+  Iceberg / Parquet workloads. At constant pod count this lifts hit
+  ratio by ~5–10 pp; at constant hit ratio it makes the StatefulSet
+  shrinkable by one pod.
+- **On-disk safety marker** — `<nvme_dir>/.shelf-compression.json`
+  records the active compression descriptor (e.g. `"zstd@3"`) and
+  the configured `min_size_bytes`. Boot aborts loudly if the
+  marker disagrees with the configured pipeline, instead of
+  corrupt-reading silently. The "switch compression mode" playbook
+  is documented inline in `charts/shelf/values.yaml`.
+- **Prometheus series** — `shelf_compress_bytes_in_total{pool}`,
+  `shelf_compress_bytes_out_total{pool}`,
+  `shelf_compress_outcomes_total{pool, outcome}` (where `outcome` ∈
+  {`compressed`, `skipped_small`, `skipped_incompressible`,
+  `decompressed_ok`, `decompressed_uncompressed`,
+  `decompress_error`}), and `shelf_compress_seconds{pool, op}`
+  (histogram, op ∈ {`encode`, `decode`}).
+- **`CompressionPipeline`** — pool-agnostic helper in
+  `shelfd::compression` exposed for re-use by the metadata pool's
+  legacy `zstd_metadata` feature gate. The metadata-pool wiring
+  remains feature-gated in v1; only the rowgroup pool is wired
+  through runtime config.
+
+<<<<<<< HEAD
 ### Added
 
 - **SHELF-46 — Bloom-aware footer admission.** Optional admission

@@ -50,6 +50,12 @@ data:
           admission_bytes_per_sec: {{ . | int64 }}
           {{- end }}
         {{- end }}
+        {{- with .Values.cache.pools.rowgroup.compression }}
+        compression:
+          enabled: {{ .enabled }}
+          level: {{ .level | int }}
+          min_size_bytes: {{ .minSizeBytes | int64 }}
+        {{- end }}
     admission:
       size_threshold_bytes: {{ mul (int64 .Values.cache.admission.sizeThresholdMiB) 1048576 }}
       pinned_bypass: {{ .Values.cache.admission.pinnedBypass }}
