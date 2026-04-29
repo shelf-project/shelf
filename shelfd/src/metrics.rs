@@ -915,6 +915,141 @@ pub static DECODED_META_DECODE_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| 
     .expect("register decoded_meta_decode_errors_total")
 });
 
+/// SHELF-45 — compaction-aware re-warm reactor event outcomes.
+///
+/// Every snapshot event the reactor consumes lands on exactly one
+/// of the labels below:
+///   `received`              — observed on the channel.
+///   `compaction_detected`   — predicate matched; rewarm scheduled.
+///   `non_compaction_skipped`— predicate did not match (append /
+///                             delete / partial / size mismatch).
+///   `replayed`              — added-files set finished re-warming.
+///   `dropped_rate_limit`    — the bounded mpsc was full at send;
+///                             the producer's `try_send` returned
+///                             `Full` and the event was discarded.
+///                             Distinct from `non_compaction_skipped`
+///                             because this one signals a *queueing*
+///                             pressure, not a classification result.
+pub static REWARM_EVENTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_rewarm_events_total",
+        "SHELF-45 compaction-aware re-warm reactor: snapshot events \
+         consumed, partitioned by lifecycle outcome.",
+        &["outcome"],
+        REGISTRY
+    )
+    .expect("register rewarm_events_total")
+});
+
+/// SHELF-45 — per-file re-warm outcomes. Splits the reactor's
+/// best-effort fetch path into:
+///   `warmed`              — `get_or_fetch` admitted the bytes.
+///   `failed`              — fetch / admission errored; reason is
+///                            classified separately by
+///                            [`REWARM_ERRORS_TOTAL`].
+///   `skipped_already_warm`— the content-addressed key was already
+///                            resident in the rowgroup pool, no
+///                            origin GET issued.
+///   `skipped_pool_full`   — the in-flight semaphore was at capacity
+///                            and `try_acquire` failed; the file is
+///                            re-queued for the next snapshot tick.
+pub static REWARM_FILES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_rewarm_files_total",
+        "SHELF-45 re-warm reactor: per-file outcomes for the rowgroup \
+         pool. `warmed` is the success path; the rest are diagnostic.",
+        &["outcome"],
+        REGISTRY
+    )
+    .expect("register rewarm_files_total")
+});
+
+/// SHELF-45 — bytes re-warmed, partitioned by `outcome`. Uses the
+/// same label domain as [`REWARM_FILES_TOTAL`] so the dashboard
+/// can join "files admitted" against "bytes admitted" without a
+/// metric rename. Excludes HTTP framing — body size only, the way
+/// `shelf_origin_request_bytes_total` already counts.
+pub static REWARM_BYTES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_rewarm_bytes_total",
+        "SHELF-45 re-warm reactor: bytes touched per outcome label.",
+        &["outcome"],
+        REGISTRY
+    )
+    .expect("register rewarm_bytes_total")
+});
+
+/// SHELF-45 — wall-clock seconds from snapshot commit (per the
+/// event's `committed_at`) until the reactor finishes warming the
+/// last added file in the snapshot. The histogram intentionally
+/// extends out to 30 min to absorb large compactions that take
+/// multiple budget windows; the dashboard's SLO is the p95.
+pub static REWARM_LAG_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec_with_registry!(
+        "shelf_rewarm_lag_seconds",
+        "SHELF-45: seconds from snapshot commit -> last added-file \
+         re-warmed. p95 is the SLO.",
+        &["outcome"],
+        prometheus::exponential_buckets(1.0, 2.0, 12)
+            .expect("rewarm bucket gen"),
+        REGISTRY
+    )
+    .expect("register rewarm_lag_seconds")
+});
+
+/// SHELF-45 — current count of re-warm fetches in flight on this
+/// pod. Bounded by the configured `max_concurrent_files` semaphore
+/// and therefore strictly small (default 4); the gauge exists so
+/// dashboards can see the reactor is alive without scraping the
+/// counter rate.
+pub static REWARM_INFLIGHT_FILES: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_rewarm_inflight_files",
+        "SHELF-45: number of re-warm fetches currently in flight.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register rewarm_inflight_files")
+});
+
+/// SHELF-45 — current depth of the bounded snapshot-event queue.
+/// Approaching the configured capacity is the leading indicator
+/// that the producer (SHELF-37 listener or polling worker) is
+/// running ahead of the reactor's fetch budget.
+pub static REWARM_QUEUE_DEPTH: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_rewarm_queue_depth",
+        "SHELF-45: depth of the snapshot-event mpsc queue feeding \
+         the reactor. Climbing toward queue_capacity = back-pressure.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register rewarm_queue_depth")
+});
+
+/// SHELF-45 — fail-open error counter. Every failure variant the
+/// reactor encounters bumps exactly one of these labels and the
+/// task itself stays alive (best-effort semantics; re-warm never
+/// propagates errors back to client traffic). `reason` domain:
+///   `iceberg_metadata`    — misshapen event (empty sets,
+///                           bad sizes, missing etag).
+///   `origin_get`          — fetcher returned `Err(_)`.
+///   `admission_rejected`  — admission policy refused the bytes.
+///   `pool_full`           — semaphore / queue capacity exhausted.
+///   `cancelled`           — task aborted via cancellation token.
+pub static REWARM_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_rewarm_errors_total",
+        "SHELF-45: per-reason failure counter for the re-warm reactor. \
+         Every increment is paired with a `failed`/`skipped_*` outcome \
+         on shelf_rewarm_files_total; this metric carves the failure \
+         reason out for paging.",
+        &["reason"],
+        REGISTRY
+    )
+    .expect("register rewarm_errors_total")
+});
+
 /// Track G-11 companion — current rolling hit ratio per pool, in
 /// basis points (0–10_000). Sampled by the same `warm_sampler`
 /// task that flips `WARM_THRESHOLD_CROSSED_SECONDS`. Exposed as
@@ -1241,6 +1376,14 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_predicate_prune_seconds",
     "shelf_page_index_cached_bytes",
     "shelf_page_index_parse_seconds",
+    // SHELF-45 — compaction-aware re-warm reactor.
+    "shelf_rewarm_events_total",
+    "shelf_rewarm_files_total",
+    "shelf_rewarm_bytes_total",
+    "shelf_rewarm_lag_seconds",
+    "shelf_rewarm_inflight_files",
+    "shelf_rewarm_queue_depth",
+    "shelf_rewarm_errors_total",
 ];
 
 #[cfg(test)]
@@ -1339,6 +1482,13 @@ mod tests {
             PREDICATE_PRUNE_SECONDS.desc(),
             PAGE_INDEX_CACHED_BYTES.desc(),
             PAGE_INDEX_PARSE_SECONDS.desc(),
+            REWARM_EVENTS_TOTAL.desc(),
+            REWARM_FILES_TOTAL.desc(),
+            REWARM_BYTES_TOTAL.desc(),
+            REWARM_LAG_SECONDS.desc(),
+            REWARM_INFLIGHT_FILES.desc(),
+            REWARM_QUEUE_DEPTH.desc(),
+            REWARM_ERRORS_TOTAL.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -1536,6 +1686,44 @@ mod tests {
         PAGE_INDEX_PARSE_SECONDS
             .with_label_values(&["ok"])
             .observe(0.0);
+        // SHELF-45 — touch every label the reactor can ever bump so
+        // dashboards see the series on a freshly booted, idle pod.
+        for outcome in [
+            "received",
+            "compaction_detected",
+            "non_compaction_skipped",
+            "replayed",
+            "dropped_rate_limit",
+        ] {
+            REWARM_EVENTS_TOTAL
+                .with_label_values(&[outcome])
+                .inc_by(0);
+        }
+        for outcome in [
+            "warmed",
+            "failed",
+            "skipped_already_warm",
+            "skipped_pool_full",
+        ] {
+            REWARM_FILES_TOTAL.with_label_values(&[outcome]).inc_by(0);
+            REWARM_BYTES_TOTAL.with_label_values(&[outcome]).inc_by(0);
+        }
+        REWARM_LAG_SECONDS
+            .with_label_values(&["replayed"])
+            .observe(0.0);
+        REWARM_INFLIGHT_FILES
+            .with_label_values(&["rowgroup"])
+            .set(0);
+        REWARM_QUEUE_DEPTH.with_label_values(&["rowgroup"]).set(0);
+        for reason in [
+            "iceberg_metadata",
+            "origin_get",
+            "admission_rejected",
+            "pool_full",
+            "cancelled",
+        ] {
+            REWARM_ERRORS_TOTAL.with_label_values(&[reason]).inc_by(0);
+        }
 
         let families = REGISTRY.gather();
         let names: HashSet<String> = families.iter().map(|f| f.name().to_owned()).collect();

@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SHELF-45 — Compaction-aware re-warm reactor.** New module
+  `shelfd/src/compaction_rewarm.rs` watches a stream of
+  `IcebergSnapshotEvent`s and proactively re-warms the new file paths
+  emitted by `replace`-class snapshots
+  (`ALTER TABLE … EXECUTE optimize`, `expire_snapshots`,
+  `remove_orphan_files`) before the cold-miss thundering herd hits
+  S3. Producer is pluggable via the `IcebergEventStream` trait; the
+  default `LoggingEventStream` stub keeps the reactor a no-op while
+  the SHELF-37 listener (PR #66) is finishing its soak. Re-warm
+  flows through the existing `FoyerStore::get_or_fetch` single-flight
+  surface, is rate-limited (default 50 MiB/s/pod) and concurrency-
+  capped (default 4 in-flight files), and stays strictly below the
+  client read budget. Adds seven Prometheus families
+  (`shelf_rewarm_events_total`, `shelf_rewarm_files_total`,
+  `shelf_rewarm_bytes_total`, `shelf_rewarm_lag_seconds`,
+  `shelf_rewarm_inflight_files`, `shelf_rewarm_queue_depth`,
+  `shelf_rewarm_errors_total`) all exercised by the regression
+  tests in `metrics.rs`. Helm chart gains `cache.rewarm.{enabled,
+  maxBytesPerSec, maxConcurrentFiles, queueCapacity,
+  snapshotLagToleranceSecs}`; `enabled: false` by default both in
+  the OSS values and operator overlays (overlay carries a
+  commented hint to flip after the Tier-1 measurement substrate is
+  green for 7 days). Design note in
+  `shelfd/docs/design-notes/SHELF-45-compaction-aware-rewarm.md`,
+  operator runbook in
+  `shelfd/docs/runbooks/SHELF-45-compaction-rewarm.md`.
+
 ### Added — B1 (Tier-1 cost reduction)
 
 - **`cache.pools.rowgroup.compression`** — opt-in zstd compression of
@@ -35,7 +64,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remains feature-gated in v1; only the rowgroup pool is wired
   through runtime config.
 
-<<<<<<< HEAD
 ### Added
 
 - **SHELF-46 — Bloom-aware footer admission.** Optional admission

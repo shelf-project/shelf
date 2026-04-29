@@ -115,3 +115,11 @@ data:
       max_manifest_entries: {{ .maxManifestEntries | default 10000 | int64 }}
       max_footer_entries: {{ .maxFooterEntries | default 10000 | int64 }}
     {{- end }}
+    {{- with .Values.cache.rewarm }}
+    rewarm:
+      enabled: {{ .enabled }}
+      max_bytes_per_sec: {{ .maxBytesPerSec | int64 }}
+      max_concurrent_files: {{ .maxConcurrentFiles | int }}
+      queue_capacity: {{ .queueCapacity | int }}
+      snapshot_lag_tolerance: {{ .snapshotLagToleranceSecs | int }}s
+    {{- end }}

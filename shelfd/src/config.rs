@@ -108,6 +108,14 @@ pub struct Config {
     /// and `shelfd/src/parquet_admit.rs` for the policy.
     #[serde(default)]
     pub bloom_admission: BloomAdmissionConfig,
+
+    /// SHELF-45 — compaction-aware re-warm reactor. Default-off
+    /// because the reactor needs the SHELF-37 listener (or an
+    /// equivalent metadata watcher) plumbed in before it sees real
+    /// events. Enabling it without an event source is harmless: the
+    /// reactor parks on an empty channel.
+    #[serde(default)]
+    pub rewarm: RewarmConfig,
 }
 
 fn default_head_lru_entries() -> u64 {
@@ -876,6 +884,104 @@ impl Default for AbTagConfig {
     }
 }
 
+/// SHELF-45 — compaction-aware re-warm reactor configuration.
+///
+/// The reactor is OFF by default. Operators flip `enabled: true`
+/// once the SHELF-37 Iceberg event-listener (or an equivalent
+/// metadata polling worker) is plugged in as the producer. With
+/// `enabled: false`, [`crate::compaction_rewarm`] does not spawn
+/// any tasks and emits no metric series beyond pre-touched zeros.
+///
+/// Defaults are conservative: 50 MiB/s/pod re-warm bandwidth,
+/// 4 concurrent files in flight, 1024-deep event queue. These
+/// keep the reactor strictly below the client read budget so a
+/// compaction-class event cannot itself become the thundering herd
+/// it is trying to absorb.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RewarmConfig {
+    /// Master switch. Default `false` (see module doc).
+    #[serde(default = "default_rewarm_enabled")]
+    pub enabled: bool,
+    /// Token-bucket refill rate, in bytes/sec, gating origin
+    /// fetches issued by the reactor. 50 MiB/s/pod is the SHELF-45
+    /// design default — small enough to never crowd out client
+    /// reads on the same shelfd, large enough to absorb a
+    /// 5–10 GiB compaction within minutes. Set `0` to pause
+    /// re-warm without disabling the loop (every byte budget
+    /// request blocks, so the reactor effectively idles).
+    #[serde(default = "default_rewarm_max_bytes_per_sec")]
+    pub max_bytes_per_sec: u64,
+    /// Maximum concurrent in-flight re-warm fetches per pod.
+    /// Defaults to `4` so the re-warm semaphore is at least
+    /// `origin.max_inflight / 4×` smaller than the client budget;
+    /// the property test in [`crate::compaction_rewarm::tests`]
+    /// pins the invariant.
+    #[serde(default = "default_rewarm_max_concurrent_files")]
+    pub max_concurrent_files: usize,
+    /// Bounded mpsc capacity for the snapshot-event channel.
+    /// Excess events are dropped with `outcome="dropped_rate_limit"`
+    /// rather than backing up the producer. Defaults to `1024`.
+    #[serde(default = "default_rewarm_queue_capacity")]
+    pub queue_capacity: usize,
+    /// Snapshot lag tolerance: events whose `committed_at`
+    /// timestamp is older than this are still re-warmed (the
+    /// next morning's queries do not care that the snapshot was
+    /// committed last week), but the lag is observed via the
+    /// `shelf_rewarm_lag_seconds` histogram. Older snapshots
+    /// suggest the producer fell behind; ops should investigate
+    /// the listener, not the reactor. Default `120 s`.
+    #[serde(
+        with = "humantime_serde",
+        default = "default_rewarm_snapshot_lag_tolerance"
+    )]
+    pub snapshot_lag_tolerance: Duration,
+    /// Compaction detector tolerance for the byte-equality check,
+    /// in basis points (1 bp = 0.01 %). Default `500` (5 %)
+    /// matches the spec's `total_bytes(added) ≈ total_bytes(removed)
+    /// ± 5%`. Lower values are stricter; bps to dodge yaml
+    /// scientific-notation surprises.
+    #[serde(default = "default_rewarm_byte_equality_tolerance_bps")]
+    pub byte_equality_tolerance_bps: u32,
+}
+
+fn default_rewarm_enabled() -> bool {
+    false
+}
+
+fn default_rewarm_max_bytes_per_sec() -> u64 {
+    50 * 1024 * 1024
+}
+
+fn default_rewarm_max_concurrent_files() -> usize {
+    4
+}
+
+fn default_rewarm_queue_capacity() -> usize {
+    1024
+}
+
+fn default_rewarm_snapshot_lag_tolerance() -> Duration {
+    Duration::from_secs(120)
+}
+
+fn default_rewarm_byte_equality_tolerance_bps() -> u32 {
+    500
+}
+
+impl Default for RewarmConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_rewarm_enabled(),
+            max_bytes_per_sec: default_rewarm_max_bytes_per_sec(),
+            max_concurrent_files: default_rewarm_max_concurrent_files(),
+            queue_capacity: default_rewarm_queue_capacity(),
+            snapshot_lag_tolerance: default_rewarm_snapshot_lag_tolerance(),
+            byte_equality_tolerance_bps: default_rewarm_byte_equality_tolerance_bps(),
+        }
+    }
+}
+
 impl Config {
     /// Load and validate a config from disk.
     ///
@@ -1219,6 +1325,49 @@ pin_list:
         cfg.validate_nvme().expect("creatable dir must validate");
         assert!(dir.is_dir(), "validator must create the missing dir");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // SHELF-45 — `RewarmConfig` plumbing. Verifies the new block is
+    // optional (existing values.yaml keeps parsing) and the docstring
+    // defaults match the constants the reactor binds.
+    #[test]
+    fn rewarm_block_defaults_when_absent() {
+        let cfg = Config::from_yaml_str(MINIMAL, None).expect("parse");
+        let rw = &cfg.rewarm;
+        assert!(!rw.enabled, "SHELF-45 default must be off");
+        assert_eq!(rw.max_bytes_per_sec, 50 * 1024 * 1024);
+        assert_eq!(rw.max_concurrent_files, 4);
+        assert_eq!(rw.queue_capacity, 1024);
+        assert_eq!(rw.snapshot_lag_tolerance, Duration::from_secs(120));
+        assert_eq!(rw.byte_equality_tolerance_bps, 500);
+    }
+
+    #[test]
+    fn rewarm_block_round_trips_when_set() {
+        let yaml = MINIMAL.to_owned()
+            + r#"
+rewarm:
+  enabled: true
+  max_bytes_per_sec: 104857600
+  max_concurrent_files: 8
+  queue_capacity: 256
+  snapshot_lag_tolerance: 30s
+  byte_equality_tolerance_bps: 250
+"#;
+        let cfg = Config::from_yaml_str(&yaml, None).expect("parse");
+        assert!(cfg.rewarm.enabled);
+        assert_eq!(cfg.rewarm.max_bytes_per_sec, 104_857_600);
+        assert_eq!(cfg.rewarm.max_concurrent_files, 8);
+        assert_eq!(cfg.rewarm.queue_capacity, 256);
+        assert_eq!(cfg.rewarm.snapshot_lag_tolerance, Duration::from_secs(30));
+        assert_eq!(cfg.rewarm.byte_equality_tolerance_bps, 250);
+    }
+
+    #[test]
+    fn rewarm_rejects_unknown_field() {
+        let yaml = MINIMAL.to_owned() + "\nrewarm:\n  bogus: true\n";
+        let err = Config::from_yaml_str(&yaml, None).unwrap_err();
+        assert!(matches!(err, crate::Error::Config(_)));
     }
 
     #[test]
