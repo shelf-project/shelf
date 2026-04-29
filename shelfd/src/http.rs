@@ -95,6 +95,42 @@ pub struct ServerState {
     /// `shelf_hits_total` / `shelf_s3_shim_response_bytes_total`
     /// series (which would blow cardinality).
     pub mv_registry: Arc<crate::mv_registry::MvRegistry>,
+    /// SHELF-23 — shared `reqwest::Client` used for peer-fetch (the
+    /// `POST /cache/contains` probe and the `GET /cache/<pool>/<key>/<range>`
+    /// body fetch on the HRW primary peer). Kept on `ServerState` so
+    /// connections to peer pods stay pooled across requests; the
+    /// alternative (per-call `Client::new()`) would burn a TLS / TCP
+    /// handshake on every cross-pod cache miss. Off-cluster tests
+    /// can substitute a `Client::new()` since this client only has
+    /// to speak plain HTTP/1.1 to in-cluster pods.
+    pub peer_http: reqwest::Client,
+    /// SHELF-23 — port the peer's data plane listens on for
+    /// `/cache/contains` and `/cache/<pool>/<key>/<range>`. The
+    /// `Member::endpoint` carried by `Router` uses
+    /// `ResolverConfig::data_port` (the s3-shim, default 9092), but
+    /// peer-fetch needs the **control-plane** port (default 9090).
+    /// We store it here so the s3_shim hot path can rewrite the
+    /// endpoint port without re-plumbing the membership resolver.
+    pub peer_stats_port: u16,
+    /// SHELF-23 — runtime kill-switch for peer-fetch. Defaults to
+    /// `true`; operator can flip it via env var or admin API
+    /// without rebuilding the binary if the racer has to be cut
+    /// out of the data plane in an incident. The s3_shim hot path
+    /// reads this via `Ordering::Relaxed` once per request.
+    pub peer_fetch_enabled: AtomicBool,
+    /// SHELF-23 — per-(bucket, key) freshness tracker for the
+    /// ETag-conditional GET path. Counts consecutive 304s and gates
+    /// whether the s3_shim hot path can skip the conditional round-
+    /// trip on a local cache hit. Sized at `2 × head_lru.capacity()`
+    /// in `with_head_lru_and_pod_id` because the cardinality model
+    /// is the same as the HEAD-LRU.
+    pub freshness: Arc<crate::freshness::FreshnessTracker>,
+    /// SHELF-23 — runtime kill-switch for ETag-conditional GET on
+    /// local cache hits. Defaults to `true`. When false, every read
+    /// behaves exactly as the pre-SHELF-23 path: cache hit returns
+    /// stored bytes without re-validating origin. Useful as a
+    /// fast-revert lever if conditional GETs reveal a hot-bug.
+    pub conditional_get_enabled: AtomicBool,
 }
 
 impl ServerState {
@@ -149,7 +185,61 @@ impl ServerState {
             filter_service: None,
             text_index: std::sync::RwLock::new(std::collections::HashMap::new()),
             mv_registry: Arc::new(crate::mv_registry::MvRegistry::new()),
+            peer_http: default_peer_http(),
+            // SHELF-23 default — matches `membership::DEFAULT_STATS_PORT`.
+            // `main` overrides this with the operator-supplied
+            // `config.membership.stats_port` before traffic arrives.
+            peer_stats_port: crate::membership::DEFAULT_STATS_PORT,
+            peer_fetch_enabled: AtomicBool::new(true),
+            // Match the head_lru capacity (passed in above) so the
+            // freshness tracker has the same population window. We
+            // can't read `head_lru.capacity()` here without losing
+            // ownership semantics, so default to 2 × the SHELF-07
+            // default. `main` does not override this — it's a small
+            // foyer cache and self-evicts.
+            freshness: Arc::new(crate::freshness::FreshnessTracker::new(20_000)),
+            conditional_get_enabled: AtomicBool::new(true),
         }
+    }
+
+    /// SHELF-23 builder: install the operator-supplied peer-fetch
+    /// HTTP client and stats port. `main` calls this from the
+    /// post-config hookup path; callers that don't need the peer
+    /// race (most unit tests) inherit the [`default_peer_http`]
+    /// client and the [`crate::membership::DEFAULT_STATS_PORT`]
+    /// fallback set by [`Self::with_head_lru_and_pod_id`].
+    pub fn with_peer_fetch(mut self, http: reqwest::Client, stats_port: u16) -> Self {
+        self.peer_http = http;
+        self.peer_stats_port = stats_port;
+        self
+    }
+
+    /// SHELF-23 — toggle peer-fetch at runtime. Returns the previous
+    /// value. Used by `main` (env var `SHELFD_PEER_FETCH_ENABLED`) and
+    /// by integration tests that need to assert the off-path still
+    /// short-circuits to origin.
+    pub fn set_peer_fetch_enabled(&self, enabled: bool) -> bool {
+        self.peer_fetch_enabled.swap(enabled, Ordering::Release)
+    }
+
+    /// SHELF-23 — read the peer-fetch toggle on the hot path.
+    pub fn is_peer_fetch_enabled(&self) -> bool {
+        self.peer_fetch_enabled.load(Ordering::Relaxed)
+    }
+
+    /// SHELF-23 — toggle ETag-conditional GET on local cache hits at
+    /// runtime. Returns the previous value. Mirrors
+    /// [`Self::set_peer_fetch_enabled`]; off means the s3_shim hot
+    /// path returns cached bytes without re-validating origin (the
+    /// pre-SHELF-23 behaviour).
+    pub fn set_conditional_get_enabled(&self, enabled: bool) -> bool {
+        self.conditional_get_enabled
+            .swap(enabled, Ordering::Release)
+    }
+
+    /// SHELF-23 — read the conditional-GET toggle on the hot path.
+    pub fn is_conditional_get_enabled(&self) -> bool {
+        self.conditional_get_enabled.load(Ordering::Relaxed)
     }
 
     /// SHELF-G4 builder hook: install a `ShelfFilterService`. Kept
@@ -189,6 +279,22 @@ impl ServerState {
         self.drain_signal = signal;
         self
     }
+}
+
+/// SHELF-23 — fallback peer-fetch HTTP client. The values mirror the
+/// production-side defaults configured in `main`: a small idle pool
+/// per host (peers are stable; we don't need a large cache), and a
+/// short request timeout so a stuck peer never extends the outer
+/// request deadline. `main` overrides this via
+/// [`ServerState::with_peer_fetch`] with a more thoroughly-tuned
+/// client; this helper exists so unit/integration tests get a
+/// sensible default without needing to construct one themselves.
+fn default_peer_http() -> reqwest::Client {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(2)
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .expect("default peer-fetch reqwest::Client")
 }
 
 /// Resolve the effective `pod_id` when none was supplied explicitly:
@@ -364,20 +470,27 @@ pub mod handlers {
     pub async fn get_cache(
         State(state): State<Arc<ServerState>>,
         Path((pool_str, key_hex, range_str)): Path<(String, String, String)>,
+        headers: axum::http::HeaderMap,
     ) -> Response {
         // SHELF-08: wrap the whole handler in a named span so a
         // Tempo trace resolves `http.get_cache → s3.get_object`.
         // `pool` / `status` / `outcome` are recorded as the handler
         // resolves them.
+        //
+        // SHELF-23: `is_peer_hop` short-circuits the peer-fetch wrapping
+        // below when the request itself is an inbound peer-fetch, so we
+        // don't bounce off a third pod. See `peer_fetch::PEER_FETCH_HEADER`.
+        let is_peer_hop = headers.get(crate::peer_fetch::PEER_FETCH_HEADER).is_some();
         let span = tracing::info_span!(
             "http.get_cache",
             otel.kind = "server",
             route = "/cache/:pool/:key/:range",
             pool = %pool_str,
+            peer_hop = is_peer_hop,
             status = field::Empty,
             outcome = field::Empty,
         );
-        async move { get_cache_inner(state, pool_str, key_hex, range_str).await }
+        async move { get_cache_inner(state, pool_str, key_hex, range_str, is_peer_hop).await }
             .instrument(span)
             .await
     }
@@ -387,6 +500,7 @@ pub mod handlers {
         pool_str: String,
         key_hex: String,
         range_str: String,
+        is_peer_hop: bool,
     ) -> Response {
         let start = std::time::Instant::now();
         let pool = match parse_pool(&pool_str) {
@@ -472,12 +586,34 @@ pub mod handlers {
         let admission = state.admission.clone();
         let bucket = origin.bucket().to_owned();
         let object_key = key_hex.clone();
-        let fetcher = async move {
+        let origin_fut = async move {
             use crate::origin::Origin;
             origin
                 .as_ref()
                 .get_range(&bucket, &object_key, offset, length)
                 .await
+        };
+
+        // SHELF-23 — race the HRW primary peer against origin on a
+        // local cache miss, *unless* this request is itself a peer
+        // hop (in which case we are the peer being probed and must
+        // not recurse).
+        let state_for_peer = state.clone();
+        let key_for_peer = key.clone();
+        let fetcher = async move {
+            if is_peer_hop {
+                origin_fut.await
+            } else {
+                crate::peer_fetch::peer_or_origin_fetch(
+                    &state_for_peer,
+                    pool,
+                    &key_for_peer,
+                    offset,
+                    length,
+                    origin_fut,
+                )
+                .await
+            }
         };
 
         let outcome = state

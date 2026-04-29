@@ -140,6 +140,27 @@ async fn run(args: Args) -> anyhow::Result<()> {
         }
     };
 
+    // SHELF-23 — peer-fetch HTTP client. Uses the membership stats
+    // timeout as a hard request ceiling so a wedged peer never
+    // extends the outer Trino request beyond the same window the
+    // membership resolver already tolerates. `pool_max_idle_per_host
+    // = 4` keeps a warm pool to each peer (typical 3-pod cluster)
+    // without consuming unnecessary file descriptors.
+    let peer_http = reqwest::Client::builder()
+        .pool_max_idle_per_host(4)
+        .timeout(config.membership.stats_timeout)
+        .build()
+        .map_err(|e| anyhow::anyhow!("peer-fetch reqwest::Client build: {e}"))?;
+    let peer_fetch_enabled = std::env::var("SHELFD_PEER_FETCH_ENABLED")
+        .map(|v| {
+            // Accept the same truthy spellings systemd / k8s use:
+            // 1 / true / yes / on (case-insensitive). Anything else
+            // disables peer-fetch — operator can flip the env var
+            // without rebuilding the binary.
+            matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(true);
+
     let mut state = ServerState::with_head_lru_and_pod_id(
         store.clone(),
         origin.clone(),
@@ -149,7 +170,14 @@ async fn run(args: Args) -> anyhow::Result<()> {
         head_lru,
         config.node.id.clone(),
     )
-    .with_drain_signal(drain_signal.clone());
+    .with_drain_signal(drain_signal.clone())
+    .with_peer_fetch(peer_http, config.membership.stats_port);
+    state.set_peer_fetch_enabled(peer_fetch_enabled);
+    tracing::info!(
+        peer_fetch_enabled,
+        peer_stats_port = config.membership.stats_port,
+        "SHELF-23 peer-fetch wired into s3_shim::handle_get_object"
+    );
     if let Some(handle) = reload_handle {
         state = state.with_reload_handle(handle);
     }

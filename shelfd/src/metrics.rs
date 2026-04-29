@@ -418,6 +418,132 @@ pub static MISSES_BY_TABLE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("register misses_by_table_total")
 });
 
+/// SHELF-23 — peer-fetch outcome counters.
+///
+/// On a local cache miss we may race a peer (the HRW primary) against
+/// origin S3. Each request increments exactly one of the four
+/// peer-fetch counters so the operator-facing payoff ratio
+/// `peer_hit_total / sum(peer_*_total)` is well-defined per pool.
+/// Wired in `s3_shim::handle_get_object` and `store::get_or_fetch`.
+pub static PEER_HIT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_peer_hit_total",
+        "Local-miss reads served from a peer pod (HRW primary) instead of origin.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register peer_hit_total")
+});
+
+/// SHELF-23 — peer probe returned `Miss` (peer does not hold the key)
+/// or its body fetch found a stale slot. Caller falls through to the
+/// already-running origin fetch.
+pub static PEER_MISS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_peer_miss_total",
+        "Local-miss reads where the HRW primary peer reported miss; \
+         caller fell through to origin.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register peer_miss_total")
+});
+
+/// SHELF-23 — peer probe deadline elapsed before a verdict. Caller
+/// falls through to origin. A high rate here usually means a peer
+/// is overloaded (probe latency > 10 ms p99 on same-AZ pod network)
+/// rather than unreachable.
+pub static PEER_TIMEOUT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_peer_timeout_total",
+        "Local-miss reads where the peer probe / fetch exceeded the \
+         configured deadline; caller fell through to origin.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register peer_timeout_total")
+});
+
+/// SHELF-23 — peer returned a non-2xx, the body decode failed, or a
+/// network-layer error short-circuited the probe. `kind` lets the
+/// dashboard split transient transport failures (`network`) from
+/// programmer-visible bugs (`decode`, `status_5xx`).
+pub static PEER_ERROR_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_peer_error_total",
+        "Local-miss reads where the peer probe / fetch failed with a \
+         non-timeout error; caller fell through to origin.",
+        &["pool", "kind"],
+        REGISTRY
+    )
+    .expect("register peer_error_total")
+});
+
+/// SHELF-23 — origin agreed our cached ETag is still current; we
+/// served from the local cache without a body transfer. This is the
+/// happy path for the cross-pod write-coherence check: a 5 ms
+/// network round-trip in exchange for snapshot-correct reads.
+pub static CONDITIONAL_NOT_MODIFIED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_conditional_not_modified_total",
+        "Local cache hits where the ETag-conditional GET to origin \
+         returned 304 Not Modified; bytes were served from cache.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register conditional_not_modified_total")
+});
+
+/// SHELF-23 — origin reported a different ETag than the one in our
+/// local cache (a cross-pod PUT, an out-of-band rewrite, or first
+/// observation of a key after restart). We invalidated the local
+/// entry and served the fresh body. A high rate here means writers
+/// are racing readers; investigate whether the freshness window
+/// is appropriate for the workload.
+pub static CONDITIONAL_MODIFIED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_conditional_modified_total",
+        "Local cache hits where the ETag-conditional GET to origin \
+         returned 200 OK with a new ETag; cache was invalidated and \
+         the fresh body was served.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register conditional_modified_total")
+});
+
+/// SHELF-23 — local cache hits where the freshness-window
+/// optimisation (≥ N consecutive 304s within the trust window) let
+/// the shim skip the conditional GET entirely. Steady-state on a
+/// hot, stable working set, this counter dominates by 1–2 orders of
+/// magnitude over `shelf_conditional_not_modified_total`.
+pub static CONDITIONAL_SKIPPED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_conditional_skipped_total",
+        "Local cache hits where the freshness window let the shim \
+         skip the ETag-conditional GET round-trip.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register conditional_skipped_total")
+});
+
+/// SHELF-23 — the conditional GET itself failed (origin error,
+/// timeout, or a malformed 304 the client couldn't classify). The
+/// shim falls back to serving the cached bytes — the prior
+/// content-addressed key is still valid until proven otherwise.
+pub static CONDITIONAL_ERROR_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_conditional_error_total",
+        "Local cache hits where the ETag-conditional GET to origin \
+         returned an error or timed out; cached bytes were served \
+         as a fallback.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register conditional_error_total")
+});
+
 /// Track G-10 — Foyer / pool engine resets that wiped in-memory or
 /// on-disk state without a process restart. The post-cutover snapshot
 /// 2026-04-27 caught `shelf_hits_total` rolling back to 0 multiple
@@ -588,6 +714,16 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_lodc_drops_total",
     "shelf_lodc_inflight_bytes",
     "shelf_lodc_queue_depth",
+    // SHELF-23 — peer-fetch outcome counters.
+    "shelf_peer_hit_total",
+    "shelf_peer_miss_total",
+    "shelf_peer_timeout_total",
+    "shelf_peer_error_total",
+    // SHELF-23 — ETag-conditional GET outcome counters.
+    "shelf_conditional_not_modified_total",
+    "shelf_conditional_modified_total",
+    "shelf_conditional_skipped_total",
+    "shelf_conditional_error_total",
 ];
 
 #[cfg(test)]
@@ -652,6 +788,14 @@ mod tests {
             LODC_DROPS_TOTAL.desc(),
             LODC_INFLIGHT_BYTES.desc(),
             LODC_QUEUE_DEPTH.desc(),
+            PEER_HIT_TOTAL.desc(),
+            PEER_MISS_TOTAL.desc(),
+            PEER_TIMEOUT_TOTAL.desc(),
+            PEER_ERROR_TOTAL.desc(),
+            CONDITIONAL_NOT_MODIFIED_TOTAL.desc(),
+            CONDITIONAL_MODIFIED_TOTAL.desc(),
+            CONDITIONAL_SKIPPED_TOTAL.desc(),
+            CONDITIONAL_ERROR_TOTAL.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -747,6 +891,26 @@ mod tests {
         LODC_DROPS_TOTAL.with_label_values(&["rowgroup"]).inc_by(0);
         LODC_INFLIGHT_BYTES.with_label_values(&["rowgroup"]).set(0);
         LODC_QUEUE_DEPTH.with_label_values(&["rowgroup"]).set(0);
+        PEER_HIT_TOTAL.with_label_values(&["metadata"]).inc_by(0);
+        PEER_MISS_TOTAL.with_label_values(&["metadata"]).inc_by(0);
+        PEER_TIMEOUT_TOTAL
+            .with_label_values(&["metadata"])
+            .inc_by(0);
+        PEER_ERROR_TOTAL
+            .with_label_values(&["metadata", "network"])
+            .inc_by(0);
+        CONDITIONAL_NOT_MODIFIED_TOTAL
+            .with_label_values(&["metadata"])
+            .inc_by(0);
+        CONDITIONAL_MODIFIED_TOTAL
+            .with_label_values(&["metadata"])
+            .inc_by(0);
+        CONDITIONAL_SKIPPED_TOTAL
+            .with_label_values(&["metadata"])
+            .inc_by(0);
+        CONDITIONAL_ERROR_TOTAL
+            .with_label_values(&["metadata"])
+            .inc_by(0);
 
         let families = REGISTRY.gather();
         let names: HashSet<String> = families.iter().map(|f| f.get_name().to_owned()).collect();
