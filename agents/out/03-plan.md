@@ -875,7 +875,10 @@ cases), `ShelfFileSystemFactoryTest` (2), new config parse cases in
 - Effort: M. Depends on: SHELF-19. Owner: k8s-eng-1.
 - Out of scope: gossip; Raft.
 
-**SHELF-21 — 3-pod StatefulSet Helm chart + NVMe PVC**
+**SHELF-21 — 3-pod StatefulSet Helm chart + NVMe PVC** — **CLOSED**
+Closed: `charts/shelf/templates/statefulset.yaml` ships the StatefulSet,
+ConfigMap, ServiceMonitor, and headless Service. Live since rc.0.
+
 Extend chart: StatefulSet (not Deployment), headless service,
 volumeClaimTemplates for 500 GiB NVMe, pod anti-affinity across AZs.
 Three pods in rep-2's cluster.
@@ -1363,5 +1366,31 @@ need human decisions on the following:
 - `adr/0010-v05-gate-beat-alluxio-on-rep2.md` — kill-switch; 7 consecutive days.
 - `adr/0011-shelf04-key-is-sha256-etag-offset-length-ordinal.md` — content-addressed key function, pinned + golden-vector tested across Rust / Java / Python.
 - `adr/0012-trino-read-path-endpoint-swap-then-blob-cache-spi.md` — Trino integration strategy: S3-endpoint swap today, `BlobCacheManagerFactory` plugin when trinodb/trino#29184 merges, `FileSystemModule` fork as last resort.
+
+---
+
+## Ticket-id mapping (plan vs git history)
+
+The plan's SHELF-NN numbering (this file) and the git-history SHELF-NN numbering
+(merge-commit titles, branch names) DIVERGED during the rep-2 cutover. Future
+agents should treat both numbering systems as authoritative for their own
+domain and consult this table when in doubt:
+
+| Number | Plan (this file)              | Git history (commit titles, branches)        |
+|--------|-------------------------------|----------------------------------------------|
+| 21     | StatefulSet Helm chart        | shim PUT/DELETE (preview-5); 21e LODC; 21f RSS |
+| 22     | S3 shim GET/HEAD              | (same — no collision)                          |
+| 23     | shelfctl CLI                  | peer-fetch ETag race (SHELF-23 PR #38)        |
+| 24     | Pin-list loader               | (same)                                          |
+| 25     | Size-threshold admission      | aws-chunked PUT decode                         |
+| 29     | (not in plan)                 | independent-queue admission limiter (PR #39)   |
+| 30     | (not in plan)                 | row-group range coalesce in s3_shim (PR #40)   |
+| 33     | (not in plan)                 | W-TinyLFU admission scope (PR #46)             |
+| 35     | (not in plan)                 | Belady oracle replay (PR #41)                  |
+| 49     | (not in plan)                 | coalesced range-GET (PR #48)                   |
+
+Treat plan SHELF-NN as the v1.0 acceptance checklist (SHELF-01 through SHELF-28).
+Treat git SHELF-NN as the implementation lineage post-v0.5. Do not assume
+1:1 correspondence without consulting this table.
 
 *End of plan.*
