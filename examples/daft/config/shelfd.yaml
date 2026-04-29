@@ -1,0 +1,50 @@
+# shelfd config for the Daft example.
+#
+# Single-pod, DRAM-only (NVMe path created but `nvme_bytes: 0`); membership
+# resolver disabled because the headless service does not exist outside k8s.
+# The S3 shim is what Daft talks to on port 9092.
+
+node:
+  id: shelf-daft-example
+
+http:
+  listen: 0.0.0.0:9090
+  request_timeout: 30s
+
+control:
+  listen: 0.0.0.0:9093
+
+origin:
+  bucket: iceberg-warehouse
+  endpoint_url: http://minio:9000
+  region: us-east-1
+  max_inflight: 64
+
+pools:
+  metadata:
+    dram_bytes: 268435456        # 256 MiB DRAM
+  rowgroup:
+    dram_bytes: 268435456        # 256 MiB DRAM
+    nvme_dir: /tmp/shelf-nvme    # ignored when nvme_bytes == 0
+    nvme_bytes: 0                # DRAM-only for this demo
+
+admission:
+  size_threshold_bytes: 1073741824   # 1 GiB per ADR-0003
+  pinned_bypass: true
+
+# Single-pod demo: skip the K8s headless DNS resolver entirely. The
+# header is still required by the schema, but `enabled: false` means
+# shelfd will serve only what it has and never look for peers.
+membership:
+  headless_service: shelf-daft-example
+  dns_refresh: 5s
+  enabled: false
+
+head_lru_entries: 4096
+
+observability: {}
+
+s3_shim:
+  enabled: true
+  bind_address: 0.0.0.0:9092
+  max_full_object_bytes: 268435456    # 256 MiB

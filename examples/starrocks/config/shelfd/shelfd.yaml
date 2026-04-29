@@ -1,0 +1,48 @@
+# shelfd config for the StarRocks example.
+#
+# Single-pod, DRAM-only — the NVMe path inside the container is a
+# 1 GiB scratch dir, fine for a 1 M-row demo. Pin list disabled because
+# we don't ship a pre-warm replay here; the bench itself populates the
+# cache on the first query.
+
+node:
+  id: shelf-starrocks-0
+
+http:
+  listen: 0.0.0.0:9090
+  request_timeout: 30s
+
+control:
+  listen: 0.0.0.0:9091
+
+origin:
+  bucket: warehouse
+  endpoint_url: http://minio:9000
+  region: us-east-1
+  max_inflight: 64
+
+pools:
+  metadata:
+    dram_bytes: 268435456        # 256 MiB
+  rowgroup:
+    dram_bytes: 536870912        # 512 MiB
+    nvme_dir: /tmp/shelf-nvme
+    nvme_bytes: 1073741824       # 1 GiB
+
+admission:
+  size_threshold_bytes: 1073741824
+  pinned_bypass: true
+
+membership:
+  headless_service: shelf-starrocks-shelfd
+  dns_refresh: 5s
+
+pin_list:
+  bucket: shelfd-pin-list
+  key: pin_list.json
+  refresh_period: 15m
+  enabled: false
+
+head_lru_entries: 4096
+
+observability: {}

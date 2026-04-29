@@ -75,6 +75,27 @@ public final class ShelfPlugin
         return new ShelfFileSystemFactory(config, delegateFactory, fetcher, resolver);
     }
 
+    /**
+     * SHELF-35 overload. Same as the four-arg variant, plus the catalog
+     * name and the raw catalog properties map so the factory can warn
+     * the operator when {@code iceberg.metadata-cache.enabled} is unset
+     * or {@code true}. The map is read once in the constructor; nothing
+     * is retained.
+     *
+     * <p>Intentionally package-private and not part of the Trino SPI.
+     */
+    ShelfFileSystemFactory buildFileSystemFactory(
+            ShelfConfig config,
+            TrinoFileSystemFactory delegateFactory,
+            RangeFetcher fetcher,
+            MembershipResolver resolver,
+            String catalogName,
+            Map<String, String> catalogProperties)
+    {
+        return new ShelfFileSystemFactory(
+                config, delegateFactory, fetcher, resolver, catalogName, catalogProperties);
+    }
+
     /** Nested EventListenerFactory so Trino can instantiate it via the SPI. */
     public static final class ShelfEventListenerFactory
             implements EventListenerFactory

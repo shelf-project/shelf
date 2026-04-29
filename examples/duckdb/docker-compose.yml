@@ -1,0 +1,159 @@
+# DuckDB-on-Shelf example.
+#
+# Spins up MinIO (origin) + iceberg-rest (catalog) + shelfd (cache),
+# runs a one-shot seed that writes a 1M-row partitioned Iceberg table
+# into MinIO, then a one-shot `bench` container that runs a DuckDB
+# query twice — cold, then warm — and prints the cache savings.
+#
+# DuckDB is the only SQL engine here; it talks S3 to `shelfd:9092`
+# (signature-agnostic shim) and Iceberg metadata to `iceberg-rest:8181`.
+# shelfd's origin is `minio:9000`, so every byte DuckDB reads either
+# served from Foyer DRAM/NVMe (warm) or proxied to MinIO (cold).
+#
+# Self-contained: nothing outside `examples/duckdb/` is modified.
+# `shelfd` is built from the repo root using the smoke harness's
+# Dockerfile so this example tracks the workspace's source tree.
+
+name: shelf-duckdb-example
+
+networks:
+  shelf-duckdb:
+    driver: bridge
+
+volumes:
+  minio-data:
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2024-12-13T22-19-12Z
+    container_name: shelf-duckdb-minio
+    networks: [shelf-duckdb]
+    ports:
+      - "127.0.0.1:${MINIO_HOST_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    command: ["server", "/data", "--console-address", ":9001"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  minio-setup:
+    image: minio/mc:latest
+    container_name: shelf-duckdb-minio-setup
+    networks: [shelf-duckdb]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      set -eu;
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing local/warehouse;
+      mc mb --ignore-existing local/shelfd-pin-list;
+      echo 'buckets ready';
+      "
+
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.6.0
+    container_name: shelf-duckdb-iceberg-rest
+    networks: [shelf-duckdb]
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+    ports:
+      - "127.0.0.1:${ICEBERG_REST_HOST_PORT:-8181}:8181"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/8181"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  seed:
+    image: python:3.12-slim
+    container_name: shelf-duckdb-seed
+    networks: [shelf-duckdb]
+    depends_on:
+      iceberg-rest:
+        condition: service_healthy
+    working_dir: /seed
+    volumes:
+      - ./init:/seed:ro
+    environment:
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      WAREHOUSE_BUCKET: warehouse
+      ICEBERG_REST_URI: http://iceberg-rest:8181
+      EVENTS_ROWS: "1000000"
+      EVENTS_DAYS: "30"
+    command: ["bash", "/seed/seed.sh"]
+
+  shelfd:
+    build:
+      context: ../..
+      dockerfile: benchmarks/smoke/Dockerfile.shelfd
+    container_name: shelf-duckdb-shelfd
+    networks: [shelf-duckdb]
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    environment:
+      RUST_LOG: info
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./config/shelfd/shelfd.yaml:/etc/shelfd/shelfd.yaml:ro
+    command: ["--config", "/etc/shelfd/shelfd.yaml"]
+    ports:
+      - "127.0.0.1:${SHELFD_DATA_HOST_PORT:-9091}:9090"  # data-plane (/metrics, /healthz, /admin)
+      - "127.0.0.1:${SHELFD_SHIM_HOST_PORT:-9092}:9092"  # S3-compat read+write shim
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9090/healthz || exit 1"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+
+  bench:
+    image: python:3.11-slim
+    container_name: shelf-duckdb-bench
+    networks: [shelf-duckdb]
+    depends_on:
+      shelfd:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+    working_dir: /work
+    volumes:
+      - ./bench:/work:ro
+    environment:
+      ICEBERG_REST_URI: http://iceberg-rest:8181
+      SHELFD_S3_ENDPOINT: shelfd:9092
+      SHELFD_METRICS_URL: http://shelfd:9090/metrics
+      SHELFD_ADMIN_URL:   http://shelfd:9090/admin
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      DUCKDB_VERSION: "1.3.1"
+      WAREHOUSE_BUCKET: warehouse
+    command: ["bash", "/work/run-bench.sh"]
+    profiles: ["bench"]

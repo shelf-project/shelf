@@ -1,0 +1,52 @@
+# shelfd config for the Spark-on-Shelf example.
+#
+# Single-pod, DRAM-only working set. The data set this example seeds
+# (1 M rows partitioned across 30 days) compresses to ~30 MiB of
+# Parquet across ~30 row groups, so a 256 MiB metadata pool + 512 MiB
+# rowgroup pool comfortably holds the entire warm working set without
+# touching the local NVMe scratch tier.
+#
+# Pin list disabled because we don't ship a pre-warm replay — the
+# bench itself populates the cache on its first (cold) run.
+
+node:
+  id: shelf-spark-0
+
+http:
+  listen: 0.0.0.0:9090
+  request_timeout: 30s
+
+control:
+  listen: 0.0.0.0:9091
+
+origin:
+  bucket: warehouse
+  endpoint_url: http://minio:9000
+  region: us-east-1
+  max_inflight: 64
+
+pools:
+  metadata:
+    dram_bytes: 268435456        # 256 MiB
+  rowgroup:
+    dram_bytes: 536870912        # 512 MiB
+    nvme_dir: /tmp/shelf-nvme
+    nvme_bytes: 1073741824       # 1 GiB scratch (DRAM tier serves the demo)
+
+admission:
+  size_threshold_bytes: 1073741824
+  pinned_bypass: true
+
+membership:
+  headless_service: shelf-spark-shelfd
+  dns_refresh: 5s
+
+pin_list:
+  bucket: shelfd-pin-list
+  key: pin_list.json
+  refresh_period: 15m
+  enabled: false
+
+head_lru_entries: 4096
+
+observability: {}
