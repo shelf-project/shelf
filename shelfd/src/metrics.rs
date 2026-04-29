@@ -965,7 +965,7 @@ mod tests {
             .inc_by(0);
 
         let families = REGISTRY.gather();
-        let names: HashSet<String> = families.iter().map(|f| f.get_name().to_owned()).collect();
+        let names: HashSet<String> = families.iter().map(|f| f.name().to_owned()).collect();
         for want in EXPOSED_SERIES {
             assert!(
                 names.contains(*want),

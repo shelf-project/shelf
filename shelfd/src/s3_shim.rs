@@ -85,7 +85,7 @@ const SHIM_MAX_PUT_BYTES: usize = 256 * 1024 * 1024;
 pub fn router(state: Arc<ServerState>) -> axum::Router {
     axum::Router::new()
         .route(
-            "/:bucket/*key",
+            "/{bucket}/{*key}",
             get(handle_get_object)
                 .head(handle_head_object)
                 .put(dispatch_put)
@@ -93,7 +93,7 @@ pub fn router(state: Arc<ServerState>) -> axum::Router {
                 .post(dispatch_post_object),
         )
         .route(
-            "/:bucket",
+            "/{bucket}",
             get(handle_list_objects_v2).post(handle_bucket_post),
         )
         .with_state(state)
