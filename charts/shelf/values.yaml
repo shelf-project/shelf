@@ -381,6 +381,56 @@ cache:
     # per-entry footprint (~4–32 KiB).
     maxFooterEntries: 10000
 
+  # -- SHELF-46 — Bloom-aware footer admission.
+  #
+  # When enabled, shelfd inspects every shim GET and forces reads
+  # that look like a Parquet footer (last `minFooterBytes` of the
+  # object) OR a known bloom-filter block (bytes whose
+  # `(offset, length)` matches a `(bloom_filter_offset,
+  # bloom_filter_length)` pair previously parsed from this object's
+  # footer for the current ETag) into the metadata pool. Column
+  # data and dictionary pages keep going through the size-threshold
+  # admission path on the rowgroup pool.
+  #
+  # Why off by default
+  # ------------------
+  # The classifier is fail-open and cheap (one atomic + a HashMap
+  # lookup) but the policy change is observable — once flipped on,
+  # the metadata pool's churn signature changes (more inserts,
+  # smaller average value size). Operators should leave this off
+  # until SHELF-49 (range coalescing) and B1 (zstd metadata
+  # compression) have soaked, then flip it on with a 24h canary on
+  # one rep before extending to the rest.
+  #
+  # Trino caveat
+  # ------------
+  # Trino + Iceberg's JVM-local `MemoryFileSystemCache` shadows
+  # shelfd for warm metadata reads, so the bloom hit counters stay
+  # at 0 unless the catalog is configured with
+  # `iceberg.metadata-cache.enabled=false` (or the JVM is cold).
+  # See `shelfd/docs/design-notes/SHELF-46-bloom-aware-footer-admission.md`.
+  #
+  # [plan §4 SHELF-46, ADR-0003 size-threshold admission, ADR-0011
+  # content-addressed keys]
+  bloom:
+    # -- Master switch. Default off — flip on as a canary after
+    # SHELF-49 + B1 are stable.
+    enabled: false
+    # -- Cap on the in-process `etag → Vec<BloomBlockRange>` LRU.
+    # Worst case is ~8 bytes/range × ~10 ranges/file × this cap, so
+    # 50 000 entries ≈ 4 MiB RSS. Bump if your working set has more
+    # distinct Iceberg snapshots in flight than this; lower if your
+    # pod has tight RSS budget.
+    maxIndexEntries: 50000
+    # -- Trailing-byte heuristic for footer detection. Any GET whose
+    # `(offset + length) >= total_size` AND `length <= minFooterBytes`
+    # is classified as a Footer read. The Parquet 1.x spec puts the
+    # footer length + PAR1 magic in the last 8 bytes; production
+    # Trino + Iceberg footers we have observed range from 2 KiB to
+    # ~48 KiB. 64 KiB is a comfortable upper bound that still lets
+    # the parser walk the trailing block once it has the bytes.
+    minFooterBytes: 65536
+
 # ---------------------------------------------------------------------------
 # Origin (S3) client — [plan §4 SHELF-05]
 # ---------------------------------------------------------------------------

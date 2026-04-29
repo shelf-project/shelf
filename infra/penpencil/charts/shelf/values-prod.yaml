@@ -132,6 +132,27 @@ cache:
   #   maxManifestEntries: 10000
   #   maxFooterEntries: 10000
 
+  # SHELF-46 — Bloom-aware footer admission. Left OFF on this overlay
+  # until both SHELF-49 (range coalescing) and B1 (zstd metadata
+  # compression) have soaked on a canary replica. The classifier is
+  # cheap when disabled (a single null check), so this default has
+  # no measurable effect on the data plane until flipped on.
+  #
+  # Rollout plan when ready (24h-per-step canary):
+  #   1. Flip on rep-2 (lowest infra failure rate post-cutover).
+  #   2. Watch `shelf_bloom_admit_total{kind=footer}` climb,
+  #      `shelf_bloom_index_entries` plateau, and
+  #      `shelf_bloom_parse_errors_total` stay near zero.
+  #   3. Re-baseline `cdp.trino_logs.trino_queries` per-replica
+  #      `physical_input_read_time_millis` and
+  #      `ICEBERG_BAD_DATA` / `ICEBERG_INVALID_METADATA` counts
+  #      against the previous 7-day window.
+  #   4. Extend to rep-1, then rep-0, then rep-3.
+  bloom:
+    enabled: false
+    maxIndexEntries: 50000
+    minFooterBytes: 65536
+
 origin:
   # Origin bucket (the data lake Trino reads).
   bucket: ""

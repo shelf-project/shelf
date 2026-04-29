@@ -241,6 +241,24 @@ async fn run(args: Args) -> anyhow::Result<()> {
     if let Some(handle) = reload_handle {
         state = state.with_reload_handle(handle);
     }
+    // SHELF-46 — wire bloom-aware footer admission. Default
+    // `enabled: false` in the OSS chart means this branch installs
+    // a `None` (s3-shim falls through to the existing path); flip
+    // `cache.bloom.enabled=true` in the values file to engage.
+    if config.bloom_admission.enabled {
+        let runtime_cfg = config.bloom_admission.to_runtime();
+        tracing::info!(
+            max_index_entries = runtime_cfg.max_index_entries,
+            min_footer_bytes = runtime_cfg.min_footer_bytes,
+            "SHELF-46 bloom-aware footer admission enabled"
+        );
+        let bloom = Arc::new(shelfd::parquet_admit::BloomAdmission::new(runtime_cfg));
+        state = state.with_bloom_admission(bloom);
+    } else {
+        tracing::debug!(
+            "SHELF-46 bloom-aware footer admission disabled (cache.bloom.enabled=false)"
+        );
+    }
     let state = Arc::new(state);
     // Phase-0: mark ready as soon as Foyer + S3 client built. The
     // origin head-bucket probe would go here once SHELF-07 lands.

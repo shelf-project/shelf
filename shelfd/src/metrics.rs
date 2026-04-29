@@ -14,7 +14,8 @@
 use once_cell::sync::Lazy;
 use prometheus::{
     register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
-    register_int_gauge_vec_with_registry, HistogramVec, IntCounterVec, IntGaugeVec,
+    register_int_gauge_vec_with_registry, register_int_gauge_with_registry, HistogramVec,
+    IntCounterVec, IntGauge, IntGaugeVec,
 };
 
 /// Global Prometheus registry.
@@ -996,6 +997,45 @@ pub static S3_DOLLARS_SAVED_RATE_CENTS_PER_SEC: Lazy<IntGaugeVec> = Lazy::new(||
     .expect("register s3_dollars_saved_rate_cents_per_sec")
 });
 
+/// SHELF-46 — bloom-aware footer admission classification counter.
+/// Bumped once per s3-shim GET request that runs through
+/// [`crate::parquet_admit::BloomAdmission::record_classification`].
+/// `kind` is one of `footer`, `bloom_block`, `not_applicable`.
+pub static BLOOM_ADMIT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_bloom_admit_total",
+        "SHELF-46 bloom-aware admission classifications. \
+         `kind` is one of `footer`, `bloom_block`, `not_applicable`.",
+        &["kind"],
+        REGISTRY
+    )
+    .expect("register bloom_admit_total")
+});
+
+/// SHELF-46 — current size of the in-process etag → bloom-block-list
+/// LRU. Capped at `cache.bloom.maxIndexEntries` (default 50 000).
+pub static BLOOM_INDEX_ENTRIES: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge_with_registry!(
+        "shelf_bloom_index_entries",
+        "SHELF-46 entries currently held in the etag → bloom-block-list LRU.",
+        REGISTRY
+    )
+    .expect("register bloom_index_entries")
+});
+
+/// SHELF-46 — Parquet footer parse failures. Fail-open: a non-zero
+/// rate means the bloom-block lookup path is dormant for the
+/// affected etags but the footer-suffix heuristic still runs.
+pub static BLOOM_PARSE_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_bloom_parse_errors_total",
+        "SHELF-46 footer parser errors, partitioned by parse-time reason.",
+        &["reason"],
+        REGISTRY
+    )
+    .expect("register bloom_parse_errors_total")
+});
+
 /// Stable list of metric series `shelfd` exposes on `/metrics` in the
 /// Phase-0 gate build. Kept as module-level data so `docs/metrics.md`
 /// and the tests can both reference a single source of truth; the
@@ -1065,6 +1105,10 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_decoded_meta_decode_seconds",
     "shelf_decoded_meta_entries",
     "shelf_decoded_meta_decode_errors_total",
+    // SHELF-46 — bloom-aware footer admission telemetry.
+    "shelf_bloom_admit_total",
+    "shelf_bloom_index_entries",
+    "shelf_bloom_parse_errors_total",
 ];
 
 #[cfg(test)]
@@ -1150,6 +1194,9 @@ mod tests {
             DECODED_META_DECODE_SECONDS.desc(),
             DECODED_META_ENTRIES.desc(),
             DECODED_META_DECODE_ERRORS_TOTAL.desc(),
+            BLOOM_ADMIT_TOTAL.desc(),
+            BLOOM_INDEX_ENTRIES.desc(),
+            BLOOM_PARSE_ERRORS_TOTAL.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -1306,6 +1353,18 @@ mod tests {
         DECODED_META_ENTRIES.with_label_values(&["manifest"]).set(0);
         DECODED_META_DECODE_ERRORS_TOTAL
             .with_label_values(&["manifest", "bad_magic"])
+            .inc_by(0);
+        // SHELF-46 — touch the new bloom-admission series.
+        BLOOM_ADMIT_TOTAL.with_label_values(&["footer"]).inc_by(0);
+        BLOOM_ADMIT_TOTAL
+            .with_label_values(&["bloom_block"])
+            .inc_by(0);
+        BLOOM_ADMIT_TOTAL
+            .with_label_values(&["not_applicable"])
+            .inc_by(0);
+        BLOOM_INDEX_ENTRIES.set(0);
+        BLOOM_PARSE_ERRORS_TOTAL
+            .with_label_values(&["bad_magic"])
             .inc_by(0);
 
         let families = REGISTRY.gather();

@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SHELF-46 — Bloom-aware footer admission.** Optional admission
+  policy that promotes Parquet footer suffix reads (last
+  `cache.bloom.minFooterBytes`, default 64 KiB) and known bloom-filter
+  byte ranges into `Pool::Metadata` (DRAM-only, longer residency)
+  regardless of the file extension's default pool routing. Both
+  classes of read get a hard `Admit` regardless of the size-threshold
+  policy, so a footer larger than `cache.admission.sizeThresholdMiB`
+  can still cache. Intended to lower S3 GET cost on Iceberg/Parquet
+  workloads where Trino's predicate pushdown re-reads bloom blocks
+  across queries.
+  - New module `shelfd::parquet_admit` carries the classifier, an
+    LRU `etag → Vec<BloomBlockRange>` index (default 50 000 entries,
+    ~4 MiB worst-case RSS), and a `FORCE_ADMIT` admission policy
+    used for footer/bloom-block reads.
+  - Three new Prometheus series, all in `EXPOSED_SERIES`:
+    `shelf_bloom_admit_total{kind=footer|bloom_block|not_applicable}`,
+    `shelf_bloom_index_entries`,
+    `shelf_bloom_parse_errors_total{reason}`.
+  - Helm values surface as `cache.bloom.{enabled,maxIndexEntries,
+    minFooterBytes}` and are rendered into the shelfd ConfigMap as
+    `bloom_admission.{enabled,max_index_entries,min_footer_bytes}`.
+  - **Default off** (`cache.bloom.enabled=false`) on the OSS chart
+    and on the penpencil overlay. Flip per replica as a 24 h canary
+    after SHELF-49 (range coalesce) and B1 (zstd metadata
+    compression) have soaked. See
+    `shelfd/docs/design-notes/SHELF-46-bloom-aware-footer-admission.md`
+    for the rollout playbook and the
+    `iceberg.metadata-cache.enabled=false` Trino caveat.
+  - Footer parser is gated behind a non-default `parquet_meta` cargo
+    feature so stock builds stay lean (the `parquet` crate adds
+    ~4 MB of compile output and ~60 s of CI time). Without the
+    feature the footer-suffix heuristic still routes trailing reads
+    to `Pool::Metadata`; only the bloom-block index is empty.
 - **SHELF-50 — Decoded metadata in-process cache.** New module
   `shelfd/src/decoded_meta.rs` exposing two parallel
   `parking_lot::Mutex<lru::LruCache<EtagKey, Arc<…>>>` caches:

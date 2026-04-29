@@ -286,3 +286,49 @@ pub async fn build_state_with_shim_cap(pod_id: &str, cap: u64) -> std::sync::Arc
         .store(cap, std::sync::atomic::Ordering::Relaxed);
     state
 }
+
+/// SHELF-46 — build a `ServerState` with bloom-aware admission enabled.
+///
+/// Mirrors [`build_state_with_pod_id`] but attaches a runtime
+/// `BloomAdmission` so the integration test can observe the
+/// classifier promoting Parquet footer suffix reads into
+/// `Pool::Metadata`. Defaults are the same as the chart
+/// (`max_index_entries = 50_000`, `min_footer_bytes = 65_536`).
+pub async fn build_state_with_bloom(pod_id: &str) -> std::sync::Arc<ServerState> {
+    unsafe {
+        std::env::set_var("AWS_ACCESS_KEY_ID", MINIO_ACCESS_KEY);
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", MINIO_SECRET_KEY);
+        std::env::set_var("AWS_REGION", "us-east-1");
+    }
+    let (origin_cfg, pools_cfg, admission_cfg) = test_config();
+    let origin = Arc::new(S3Origin::new(&origin_cfg).await.expect("origin"));
+    let store = Arc::new(FoyerStore::open(&pools_cfg).await.expect("store"));
+    let router = Arc::new(Router::new());
+    let admission = Arc::new(SizeThresholdPolicy::from_config(&admission_cfg));
+    let head_lru = Arc::new(HeadLru::new(10_000));
+    let metrics_reg = METRICS
+        .get_or_init(|| async { Arc::new(metrics::Registry::init().expect("metrics init")) })
+        .await
+        .clone();
+    let bloom = Arc::new(shelfd::parquet_admit::BloomAdmission::new(
+        shelfd::parquet_admit::BloomAdmissionConfig {
+            enabled: true,
+            max_index_entries: 50_000,
+            min_footer_bytes: 65_536,
+        },
+    ));
+    let state = Arc::new(
+        ServerState::with_head_lru_and_pod_id(
+            store,
+            origin,
+            router,
+            admission,
+            metrics_reg,
+            head_lru,
+            pod_id.to_owned(),
+        )
+        .with_bloom_admission(bloom),
+    );
+    state.mark_ready();
+    state
+}

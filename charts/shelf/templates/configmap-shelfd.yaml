@@ -53,6 +53,16 @@ data:
     admission:
       size_threshold_bytes: {{ mul (int64 .Values.cache.admission.sizeThresholdMiB) 1048576 }}
       pinned_bypass: {{ .Values.cache.admission.pinnedBypass }}
+    {{- with .Values.cache.bloom }}
+    # SHELF-46 — Bloom-aware footer admission. Default off; opt in
+    # per-replica via `cache.bloom.enabled=true` once SHELF-49 +
+    # B1 have soaked. See
+    # `shelfd/docs/design-notes/SHELF-46-bloom-aware-footer-admission.md`.
+    bloom_admission:
+      enabled: {{ .enabled | default false }}
+      max_index_entries: {{ .maxIndexEntries | default 50000 | int }}
+      min_footer_bytes: {{ .minFooterBytes | default 65536 | int64 }}
+    {{- end }}
     membership:
       headless_service: {{ include "shelf.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
       dns_refresh: 5s

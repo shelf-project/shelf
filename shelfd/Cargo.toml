@@ -87,6 +87,11 @@ percent-encoding = { workspace = true }
 # Content-Type from the asset path.
 rust-embed = { workspace = true, optional = true }
 mime_guess = { workspace = true, optional = true }
+# SHELF-46 footer-parser dep is already satisfied by the unconditional
+# `parquet = { workspace = true }` above (added by SHELF-50). The
+# `parquet_meta` feature below remains a marker feature: it toggles
+# bloom-block range extraction in `src/parquet_meta.rs` without
+# needing an extra optional crate.
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -138,10 +143,13 @@ zstd_metadata = []
 # Intended for the plugin-side query-tag path; no non-test caller in
 # shelfd's hot/control surfaces today, so off by default.
 fingerprint = []
-# SHELF-D3 phase 2 — Parquet footer/page-index extractor
-# (`src/parquet_meta.rs`). Phase-1 API landed; phase-2 wiring is still
-# pending, so the module has no non-test callers today and is off by
-# default.
+# SHELF-D3 phase 2 / SHELF-46 — Parquet footer + bloom-block-range
+# extractor (`src/parquet_meta.rs`). When off, the bloom-aware
+# admission policy (SHELF-46) still compiles and uses the trailing-
+# N-byte footer-suffix heuristic; the feature turns on full
+# `parquet::file::metadata` parsing so bloom offsets / lengths are
+# discovered instead of approximated. The `parquet` crate itself is
+# unconditional (SHELF-50 decoded-metadata cache needs it).
 parquet_meta = []
 # SHELF-G2 — durable side-bloom store (`src/side_bloom.rs`). Not to be
 # confused with the in-process `SideBloom` trait in `filter_service`

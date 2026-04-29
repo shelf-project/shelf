@@ -100,6 +100,14 @@ pub struct Config {
     /// decoded data).
     #[serde(default)]
     pub decoded_meta: DecodedMetaConfig,
+
+    /// SHELF-46 — bloom-aware footer admission. Default `enabled:
+    /// false` so the OSS chart ships with no behaviour change; flip
+    /// on via `cache.bloom.enabled=true` once the canary gate passes.
+    /// See `shelfd/docs/design-notes/SHELF-46-bloom-aware-footer-admission.md`
+    /// and `shelfd/src/parquet_admit.rs` for the policy.
+    #[serde(default)]
+    pub bloom_admission: BloomAdmissionConfig,
 }
 
 fn default_head_lru_entries() -> u64 {
@@ -457,6 +465,59 @@ pub struct AdmissionConfig {
 
 fn default_true() -> bool {
     true
+}
+
+/// SHELF-46 — bloom-aware footer admission config. Mirrors
+/// [`crate::parquet_admit::BloomAdmissionConfig`] in YAML form, with
+/// snake-case keys matching the rest of `shelfd.yaml`. The Helm
+/// chart renders camelCase keys (`maxIndexEntries`, `minFooterBytes`)
+/// onto the snake-case form here via the configmap template.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BloomAdmissionConfig {
+    /// Master switch for bloom-aware admission. Default `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Bound on the in-process etag → bloom-block-list LRU. See the
+    /// runtime [`crate::parquet_admit::BloomAdmissionConfig`] for the
+    /// memory cost model. Default 50 000.
+    #[serde(default = "default_bloom_max_index_entries")]
+    pub max_index_entries: usize,
+    /// Minimum suffix-read length (bytes) to classify as a Parquet
+    /// footer. Reads shorter than this fall through to the size-
+    /// threshold policy. Default 65 536 (64 KiB).
+    #[serde(default = "default_bloom_min_footer_bytes")]
+    pub min_footer_bytes: u64,
+}
+
+fn default_bloom_max_index_entries() -> usize {
+    50_000
+}
+
+fn default_bloom_min_footer_bytes() -> u64 {
+    64 * 1024
+}
+
+impl Default for BloomAdmissionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_index_entries: default_bloom_max_index_entries(),
+            min_footer_bytes: default_bloom_min_footer_bytes(),
+        }
+    }
+}
+
+impl BloomAdmissionConfig {
+    /// Convert the YAML schema struct into the runtime struct used by
+    /// the s3-shim hot path.
+    pub fn to_runtime(&self) -> crate::parquet_admit::BloomAdmissionConfig {
+        crate::parquet_admit::BloomAdmissionConfig {
+            enabled: self.enabled,
+            max_index_entries: self.max_index_entries,
+            min_footer_bytes: self.min_footer_bytes,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

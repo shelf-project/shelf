@@ -75,6 +75,7 @@ pub mod membership;
 pub mod metrics;
 pub mod mv_registry;
 pub mod origin;
+pub mod parquet_admit;
 #[cfg(feature = "parquet_meta")]
 pub mod parquet_meta;
 pub mod peer;
