@@ -84,3 +84,12 @@ data:
       nat_traversal_basis_points: {{ . | int }}
       {{- end }}
     {{- end }}
+    {{- with .Values.cache.abTag }}
+    # SHELF-42 — A/B tag receive path. Default off; flip
+    # `cache.abTag.enabled=true` in your overlay once Prometheus has
+    # been sized for the cap. Spec: docs/contracts/ab-tag.md.
+    ab_tag:
+      enabled: {{ .enabled }}
+      max_distinct_tags: {{ .maxDistinctTags | int }}
+      scrape_window: {{ .scrapeWindow | quote }}
+    {{- end }}

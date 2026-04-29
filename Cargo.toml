@@ -74,6 +74,11 @@ zstd = "0.13"
 # base64 so callers don't need a binary content-type handler. Kept
 # on the `0.22` line which is the last to build on our MSRV.
 base64 = "0.22"
+# SHELF-42 — URL-encode/decode the X-Shelf-Tag header payload. Already
+# present transitively via reqwest/url; pulling it forward as a direct
+# dep keeps the ab_tag module's encoder honest without rolling our own
+# percent-encoder.
+percent-encoding = "2"
 
 [profile.release]
 lto = "thin"

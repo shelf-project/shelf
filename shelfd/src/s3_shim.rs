@@ -280,6 +280,45 @@ pub(crate) fn table_label(key: &str) -> std::borrow::Cow<'static, str> {
     std::borrow::Cow::Borrowed("other")
 }
 
+/// SHELF-42 — bump the per-tag companion counters at the same site as
+/// the existing per-pool / per-table / shim counters. `tag_label` is
+/// the resolved A/B label (`Some(wire) | Some("other") | None`).
+/// `None` means "no `tag` dimension" — we still bump the counter under
+/// the [`crate::ab_tag::NO_TAG_LABEL`] sentinel so the series exists
+/// and dashboards have a stable "untagged baseline" to graph against.
+pub(crate) fn bump_per_tag_get(
+    pool_label: &'static str,
+    outcome: &'static str,
+    tag_label: Option<&str>,
+    bytes: u64,
+    is_hit: bool,
+) {
+    let tag = tag_label.unwrap_or(crate::ab_tag::NO_TAG_LABEL);
+    if is_hit {
+        crate::metrics::HITS_BY_TAG_TOTAL
+            .with_label_values(&[pool_label, tag])
+            .inc();
+    } else {
+        crate::metrics::MISSES_BY_TAG_TOTAL
+            .with_label_values(&[pool_label, tag])
+            .inc();
+    }
+    crate::metrics::S3_SHIM_RESPONSE_BYTES_BY_TAG_TOTAL
+        .with_label_values(&["get_object", outcome, tag])
+        .inc_by(bytes);
+}
+
+/// SHELF-42 — per-tag bookkeeping for a HEAD response. Only the
+/// `S3_SHIM_RESPONSE_BYTES_BY_TAG_TOTAL` series moves on a HEAD (HEAD
+/// has no hit/miss in the cache sense — the HEAD-LRU is a separate
+/// metric family).
+pub(crate) fn bump_per_tag_head(outcome: &'static str, tag_label: Option<&str>) {
+    let tag = tag_label.unwrap_or(crate::ab_tag::NO_TAG_LABEL);
+    crate::metrics::S3_SHIM_RESPONSE_BYTES_BY_TAG_TOTAL
+        .with_label_values(&["head_object", outcome, tag])
+        .inc_by(0);
+}
+
 fn is_identifier(s: &str) -> bool {
     if s.is_empty() || s.len() > 96 {
         return false;
@@ -577,8 +616,21 @@ async fn head_meta(
 pub async fn handle_head_object(
     State(state): State<Arc<ServerState>>,
     Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     let start = std::time::Instant::now();
+    // SHELF-42 — resolve the A/B tag once per HEAD as well so
+    // dashboards see HEAD-side cohort behaviour (Iceberg planning is
+    // HEAD-heavy on cold tables; tagging it lets us tell which cohort
+    // is paying that cost).
+    let tag_ctx = crate::ab_tag::extract_from_headers(
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+        &state.ab_tag,
+    );
+    let tag_label_owned: Option<String> = tag_ctx.metric_label().map(str::to_owned);
+    let tag_label_ref: Option<&str> = tag_label_owned.as_deref();
     let (response, outcome) = match head_meta(&state, &bucket, &key).await {
         Ok(Some(meta)) => {
             let mut headers = HeaderMap::new();
@@ -609,6 +661,10 @@ pub async fn handle_head_object(
         .request_seconds
         .with_label_values(&["/s3/head_object", outcome])
         .observe(start.elapsed().as_secs_f64());
+    // SHELF-42 — register a `tag` series for this HEAD even if zero
+    // bytes moved. Same `inc_by(0)` pattern the existing
+    // S3_SHIM_RESPONSE_BYTES_TOTAL uses for HEAD.
+    bump_per_tag_head(outcome, tag_label_ref);
     response
 }
 
@@ -733,6 +789,7 @@ fn finish_get_response(
     is_partial: bool,
     pool_label: &'static str,
     table_label: &str,
+    tag_label: Option<&str>,
     serve: ConditionalServe,
     start: std::time::Instant,
 ) -> Response {
@@ -763,6 +820,18 @@ fn finish_get_response(
     crate::metrics::S3_SHIM_RESPONSE_BYTES_TOTAL
         .with_label_values(&["get_object", shim_outcome])
         .inc_by(bytes.len() as u64);
+    // SHELF-42 — per-tag companion observations on the conditional
+    // path. `shim_outcome` uses the same vocabulary as the main path
+    // (`hit` | `miss`), so the `is_hit = != "miss"` rule mirrors the
+    // bump_per_tag_get site below.
+    let is_hit_path = shim_outcome != "miss";
+    bump_per_tag_get(
+        pool_label,
+        shim_outcome,
+        tag_label,
+        bytes.len() as u64,
+        is_hit_path,
+    );
 
     let mut headers = HeaderMap::new();
     stamp_common_headers(&mut headers, meta);
@@ -795,6 +864,17 @@ pub async fn handle_get_object(
     // observation in `record_get_latency` covers HEAD-LRU lookup,
     // origin HEAD (if needed), single-flight wait, and Foyer get.
     let start = std::time::Instant::now();
+    // SHELF-42 — resolve the A/B tag label once per request. Empty
+    // when the header is absent / disabled; cap-violations are
+    // counted inside `tag_label_for`.
+    let tag_ctx = crate::ab_tag::extract_from_headers(
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+        &state.ab_tag,
+    );
+    let tag_label_owned: Option<String> = tag_ctx.metric_label().map(str::to_owned);
+    let tag_label_ref: Option<&str> = tag_label_owned.as_deref();
     let range_spec = match parse_range_header(&headers) {
         Ok(r) => r,
         Err(()) => {
@@ -911,6 +991,7 @@ pub async fn handle_get_object(
                         is_partial,
                         pool_label_early,
                         table_label_cow.as_ref(),
+                        tag_label_ref,
                         resp,
                         start,
                     );
@@ -1136,6 +1217,15 @@ pub async fn handle_get_object(
             crate::metrics::S3_SHIM_RESPONSE_BYTES_TOTAL
                 .with_label_values(&["get_object", "error"])
                 .inc_by(0);
+            // SHELF-42 — error path also gets a per-tag observation
+            // so dashboards can see that a tagged cohort is failing.
+            crate::metrics::S3_SHIM_RESPONSE_BYTES_BY_TAG_TOTAL
+                .with_label_values(&[
+                    "get_object",
+                    "error",
+                    tag_label_ref.unwrap_or(crate::ab_tag::NO_TAG_LABEL),
+                ])
+                .inc_by(0);
             return record_get_latency(
                 &state,
                 start,
@@ -1147,6 +1237,17 @@ pub async fn handle_get_object(
     crate::metrics::S3_SHIM_RESPONSE_BYTES_TOTAL
         .with_label_values(&["get_object", shim_outcome])
         .inc_by(bytes.len() as u64);
+    // SHELF-42 — per-tag companion. `is_hit` follows the same rule the
+    // existing per-pool counter uses: any non-`miss` outcome label is
+    // a hit (covers `hit`, `hit_memory`, `hit_disk`).
+    let is_hit = shim_outcome != "miss";
+    bump_per_tag_get(
+        pool_label,
+        shim_outcome,
+        tag_label_ref,
+        bytes.len() as u64,
+        is_hit,
+    );
 
     let mut headers = HeaderMap::new();
     stamp_common_headers(&mut headers, &meta);

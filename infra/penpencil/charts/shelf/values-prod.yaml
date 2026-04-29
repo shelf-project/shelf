@@ -113,6 +113,15 @@ cache:
     # in your overlay and update the citation block above.
     # natTraversalBasisPoints: 0   # default; S3 VPC endpoint = no NAT charge
 
+  # SHELF-42 — A/B query tagging. Penpencil opts in: Prometheus
+  # retention is already sized for the per-tag series and the
+  # post-cutover analysis SQL relies on `shelf_arm`-style cohort
+  # labels. Spec: docs/contracts/ab-tag.md.
+  abTag:
+    enabled: true
+    maxDistinctTags: 16
+    scrapeWindow: 60s
+
 origin:
   # Origin bucket (the data lake Trino reads).
   bucket: ""

@@ -44,6 +44,7 @@
 #![allow(clippy::unnecessary_sort_by)]
 #![allow(clippy::manual_div_ceil)]
 
+pub mod ab_tag;
 pub mod admission;
 pub mod admission_limiter;
 pub mod aws_chunked;

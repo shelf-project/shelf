@@ -331,6 +331,37 @@ cache:
     # contributes zero cents.
     # natTraversalBasisPoints: 0
 
+  # ---------------------------------------------------------------------------
+  # SHELF-42 — A/B query tagging receive path.
+  #
+  # The Trino plugin attaches a URL-encoded JSON A/B tag to every
+  # shelf-bound HTTP request via the `X-Shelf-Tag` header. shelfd
+  # validates the header, enforces a per-pod cardinality cap, and
+  # exposes the resulting `tag` label on companion metrics:
+  #   shelf_hits_by_tag_total
+  #   shelf_misses_by_tag_total
+  #   shelf_s3_shim_response_bytes_by_tag_total
+  #   shelf_ab_tag_cap_violations_total
+  #
+  # Default-off so freshly deployed OSS pods do not expose tag
+  # cardinality surface area until the operator has sized Prometheus
+  # retention for the cap. Penpencil overlay flips `enabled: true`.
+  # Spec: docs/contracts/ab-tag.md.
+  # ---------------------------------------------------------------------------
+  abTag:
+    # -- Master switch on the receive side. Trino plugin forwarding
+    # is always on (metadata only, no measurable runtime cost).
+    enabled: false
+    # -- Per-pod cardinality cap. Tags above the cap fold into the
+    # sentinel label `other` and bump
+    # `shelf_ab_tag_cap_violations_total{reason="cardinality"}` once
+    # per (window, distinct offending tag).
+    maxDistinctTags: 16
+    # -- Cap-enforcement window. Defaults to 60 s — long enough to
+    # bracket a 30 s Prometheus scrape, short enough that a stale
+    # cohort eventually rolls out of the sentinel state.
+    scrapeWindow: 60s
+
 # ---------------------------------------------------------------------------
 # Origin (S3) client — [plan §4 SHELF-05]
 # ---------------------------------------------------------------------------

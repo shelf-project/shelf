@@ -13,6 +13,9 @@
  */
 package io.shelf.client;
 
+import io.shelf.tag.TagProvider;
+import io.shelf.tag.TagSet;
+
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -49,6 +52,12 @@ public final class ShelfHttpClient
 
     private final HttpClient http;
     private final Duration timeout;
+    /**
+     * SHELF-42 — extension point. Defaults to {@link TagProvider#EMPTY}
+     * so existing callers see no behaviour change. Operators inject a
+     * provider via {@link #withTagProvider(TagProvider)}.
+     */
+    private volatile TagProvider tagProvider = TagProvider.EMPTY;
 
     public ShelfHttpClient()
     {
@@ -65,6 +74,28 @@ public final class ShelfHttpClient
     {
         this.timeout = Objects.requireNonNull(timeout, "timeout");
         this.http = Objects.requireNonNull(http, "http");
+    }
+
+    /**
+     * SHELF-42 — install a {@link TagProvider}. Returns {@code this}
+     * so callers can chain construction. Passing {@code null} resets
+     * to {@link TagProvider#EMPTY}.
+     *
+     * <p>The provider is consulted on every outbound HTTP request the
+     * plugin issues. Implementations MUST NOT throw; an internal
+     * exception is caught defensively and treated as
+     * {@link TagSet#empty()}.
+     */
+    public ShelfHttpClient withTagProvider(TagProvider provider)
+    {
+        this.tagProvider = provider == null ? TagProvider.EMPTY : provider;
+        return this;
+    }
+
+    /** Read-back of the currently-installed {@link TagProvider}. */
+    public TagProvider tagProvider()
+    {
+        return tagProvider;
     }
 
     private static HttpClient buildHttpClient(Duration connectTimeout)
@@ -122,10 +153,26 @@ public final class ShelfHttpClient
             throw new ShelfUnavailableException("invalid shelfd endpoint: " + endpoint, e);
         }
 
-        HttpRequest req = HttpRequest.newBuilder(uri)
+        HttpRequest.Builder builder = HttpRequest.newBuilder(uri)
                 .timeout(timeout)
-                .GET()
-                .build();
+                .GET();
+        // SHELF-42 — stamp X-Shelf-Tag when a provider is installed and
+        // resolves a non-empty tag. Defensive try/catch to honour the
+        // fail-open contract; a provider misbehaving at most loses the
+        // tag for one request, never breaks the read.
+        try {
+            TagSet tag = tagProvider.currentTag();
+            if (tag != null && !tag.isEmpty()) {
+                String wire = tag.toWire();
+                if (wire != null) {
+                    builder = builder.header(TagSet.HEADER_NAME, wire);
+                }
+            }
+        }
+        catch (RuntimeException ignored) {
+            // intentional: see fail-open contract above.
+        }
+        HttpRequest req = builder.build();
 
         HttpResponse<byte[]> resp;
         try {

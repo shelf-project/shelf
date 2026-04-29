@@ -47,6 +47,7 @@ clients/trino/
 │   ├── client/           # ShelfHttpClient, CircuitBreaker, HashRing
 │   ├── eventlistener/    # ShelfPrefetchListener, PrefetchClient
 │   ├── config/           # ShelfConfig
+│   ├── tag/              # SHELF-42 — TagSet / TagProvider / SessionTagProvider
 │   └── plugin/           # ShelfPlugin (SPI root)
 ├── src/main/resources/META-INF/services/io.trino.spi.Plugin
 ├── src/test/java/io/shelf/   # mirrored @Disabled skeleton tests
@@ -97,3 +98,72 @@ Semantics (see [`io.shelf.client.CircuitBreaker`](src/main/java/io/shelf/client/
 Covered end-to-end by [`io.shelf.client.CircuitBreakerTest`](src/test/java/io/shelf/client/CircuitBreakerTest.java)
 (12 cases across the full state surface, including exponential-backoff bounds
 and single-probe admission in `HALF_OPEN`).
+
+## A/B query tagging (SHELF-42)
+
+Trino sessions can stamp every Shelf-bound HTTP request with an
+`X-Shelf-Tag` header that carries a small validated `{key:value}` map.
+shelfd splits its hit / miss / response-byte counters across the
+resulting `tag` label so per-cohort A/B testing of cache configurations
+(B1 compression, SHELF-46 bloom, SHELF-49 row-group pruning, SHELF-50
+metadata cache) becomes a clean `topk(...) by (tag)` query rather than a
+contaminated before/after diff.
+
+### Trino-side recipe
+
+1. Set one or more session properties prefixed with `shelf.tag.`:
+
+   ```sql
+   SET SESSION shelf.tag.experiment = 'b1_compression_on';
+   SET SESSION shelf.tag.cohort     = 'prod_rep1';
+   SET SESSION shelf.tag.epoch      = '1714512345';
+   ```
+
+2. The coordinator-side glue (or, once SHELF-37 lands, the
+   `ShelfPrefetchListener`) installs the tag into the worker thread's
+   slot before any Shelf-bound HTTP call:
+
+   ```java
+   try (AutoCloseable handle =
+            io.shelf.tag.SessionTagProvider.install(session.getSystemProperties())) {
+       // ... Trino split execution that drives ShelfHttpClient ...
+   }
+   ```
+
+3. The `ShelfHttpClient` is constructed with the matching provider:
+
+   ```java
+   ShelfHttpClient http = new ShelfHttpClient(timeout)
+           .withTagProvider(io.shelf.tag.SessionTagProvider.INSTANCE);
+   ```
+
+   Every `rangeGet(...)` then carries
+   `X-Shelf-Tag: %7B%22experiment%22%3A%22b1_compression_on%22%7D%2C...`
+   on the wire.
+
+### Wire-level guarantees
+
+- **JSON shape**: `{key:value}` only, max 8 keys, max 128 UTF-8 bytes
+  per value, max 4 KiB encoded.
+- **Keys** match `[A-Za-z_][A-Za-z0-9_]{0,63}`.
+- **Sorting** is lexicographic — Java and Rust agree byte-for-byte (see
+  `tests/fixtures/ab-tag-vectors.json`).
+- **Lifetime**: per request. Tags are not cached; cache keys are
+  content-addressed by ETag (ADR-0011) and unaffected.
+- **Fail-open**: a malformed header behaves identically to "header
+  absent" on the receive side; a misbehaving `TagProvider` is caught
+  and the request goes out without `X-Shelf-Tag` rather than failing.
+
+### Receive-side cardinality safety
+
+shelfd applies a per-pod cardinality cap (default 16 distinct tags per
+scrape window). Anything beyond that folds into the sentinel label
+`other` so the per-tag Prometheus series stays bounded; cap violations
+bump `shelf_ab_tag_cap_violations_total` once per offending tag per
+window. Operators flip the receive path on with
+`cache.abTag.enabled=true` and tune `cache.abTag.maxDistinctTags` as
+needed.
+
+See [`docs/contracts/ab-tag.md`](../../docs/contracts/ab-tag.md) for the
+full contract and `shelfd/docs/design-notes/SHELF-42-ab-query-tagging.md`
+for the lifecycle diagram.
