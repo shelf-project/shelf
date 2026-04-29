@@ -277,8 +277,9 @@ pub enum RaceOutcome<O> {
 /// - `key_hex` is the lowercase 64-char hex of the SHELF-04
 ///   content-addressed cache key, i.e. the path segment a peer
 ///   would route through `store::Key::from_hex`.
-/// - `peer_base_url` is the peer's data-plane base, e.g.
-///   `http://shelf-1.shelf-headless.alluxio.svc.cluster.local:9090`.
+/// - `peer_base_url` is the peer's data-plane base, i.e. the headless
+///   service DNS for the peer pod, e.g.
+///   `http://shelf-1.shelf-headless.<namespace>.svc.cluster.local:9090`.
 ///   The function appends `/cache/contains` and `/cache/<pool>/...`
 ///   so the caller cannot accidentally hit a stale route.
 // `too_many_arguments`: every argument is a distinct hot-path value
