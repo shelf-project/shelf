@@ -75,10 +75,14 @@ COPY rust-toolchain.toml ./
 # invalidate the build cache cleanly when only source changes.
 COPY Cargo.toml Cargo.lock ./
 
-# Both workspace members must be present for `cargo build` to resolve
-# the workspace graph, even though we only ship the shelfd bin.
+# All workspace members must be present for `cargo build` to resolve
+# the workspace graph, even though we only ship the shelfd bin. The
+# `shelf-advisor` crate joined the workspace in PR #33 (OSS feature
+# rollup) but its COPY was missed at the time, leaving the Dockerfile
+# broken on a clean checkout. Restored as part of the SHELF-29 cut.
 COPY shelfd ./shelfd
 COPY shelfctl ./shelfctl
+COPY shelf-advisor ./shelf-advisor
 
 # Overlay the freshly built UI bundle on top of the committed
 # placeholder, but only when the `ui` feature is active. When

@@ -15,7 +15,7 @@ use k8s_openapi::api::core::v1::{ConfigMap, Pod};
 use kube::api::ListParams;
 use kube::config::Kubeconfig;
 use kube::{Api, Client};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::process::Stdio;
 use tokio::process::Command as TokioCommand;
@@ -343,12 +343,12 @@ mod tests {
         let v = generate_values(&ctx_with(&["trino"], 2));
         let m = v.as_mapping().expect("root is mapping");
         let sa = m
-            .get(&serde_yaml::Value::String("serviceAccount".into()))
+            .get(serde_yaml::Value::String("serviceAccount".into()))
             .expect("serviceAccount present")
             .as_mapping()
             .unwrap();
         assert_eq!(
-            sa.get(&serde_yaml::Value::String("name".into()))
+            sa.get(serde_yaml::Value::String("name".into()))
                 .and_then(|v| v.as_str()),
             Some("shelf")
         );
@@ -359,7 +359,7 @@ mod tests {
         let v = generate_values(&ctx_with(&["trino"], 3));
         let m = v.as_mapping().unwrap();
         assert_eq!(
-            m.get(&serde_yaml::Value::String("replicaCount".into()))
+            m.get(serde_yaml::Value::String("replicaCount".into()))
                 .and_then(|v| v.as_u64()),
             Some(3)
         );
@@ -370,17 +370,17 @@ mod tests {
         let v = generate_values(&ctx_with(&["trino-a", "trino-b", "data-eng"], 1));
         let m = v.as_mapping().unwrap();
         let np = m
-            .get(&serde_yaml::Value::String("networkPolicy".into()))
+            .get(serde_yaml::Value::String("networkPolicy".into()))
             .unwrap()
             .as_mapping()
             .unwrap();
         let ingress = np
-            .get(&serde_yaml::Value::String("ingress".into()))
+            .get(serde_yaml::Value::String("ingress".into()))
             .unwrap()
             .as_mapping()
             .unwrap();
         let from = ingress
-            .get(&serde_yaml::Value::String("from".into()))
+            .get(serde_yaml::Value::String("from".into()))
             .unwrap()
             .as_sequence()
             .unwrap();
@@ -390,15 +390,15 @@ mod tests {
             .map(|e| {
                 e.as_mapping()
                     .unwrap()
-                    .get(&serde_yaml::Value::String("namespaceSelector".into()))
+                    .get(serde_yaml::Value::String("namespaceSelector".into()))
                     .unwrap()
                     .as_mapping()
                     .unwrap()
-                    .get(&serde_yaml::Value::String("matchLabels".into()))
+                    .get(serde_yaml::Value::String("matchLabels".into()))
                     .unwrap()
                     .as_mapping()
                     .unwrap()
-                    .get(&serde_yaml::Value::String(
+                    .get(serde_yaml::Value::String(
                         "kubernetes.io/metadata.name".into(),
                     ))
                     .unwrap()
@@ -440,12 +440,12 @@ ignored.key=foo
         let v = generate_values(&ctx);
         let m = v.as_mapping().unwrap();
         let trino = m
-            .get(&serde_yaml::Value::String("trino".into()))
+            .get(serde_yaml::Value::String("trino".into()))
             .unwrap()
             .as_mapping()
             .unwrap();
         let eps = trino
-            .get(&serde_yaml::Value::String("icebergEndpoints".into()))
+            .get(serde_yaml::Value::String("icebergEndpoints".into()))
             .unwrap()
             .as_sequence()
             .unwrap();
@@ -457,12 +457,6 @@ ignored.key=foo
     fn values_yaml_omits_trino_block_when_no_endpoints() {
         let v = generate_values(&ctx_with(&["trino"], 1));
         let m = v.as_mapping().unwrap();
-        assert!(m.get(&serde_yaml::Value::String("trino".into())).is_none());
+        assert!(m.get(serde_yaml::Value::String("trino".into())).is_none());
     }
 }
-
-// `BTreeMap` is referenced by `extract_iceberg_endpoints` callers in
-// the discovery flow; keep the import re-exported so a hypothetical
-// external caller of that helper has the same view.
-#[allow(dead_code)]
-type _UnusedAlias = BTreeMap<String, String>;
