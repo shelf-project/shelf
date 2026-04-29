@@ -556,7 +556,7 @@ mod tests {
         async fn spawn_mock(beh: PeerBehaviour) -> (String, tokio::task::JoinHandle<()>) {
             let app = Router::new()
                 .route("/cache/contains", post(handle_contains))
-                .route("/cache/:pool/:key/:range", get(handle_get_cache))
+                .route("/cache/{pool}/{key}/{range}", get(handle_get_cache))
                 .with_state(Arc::new(beh));
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             let addr: SocketAddr = listener.local_addr().expect("addr");

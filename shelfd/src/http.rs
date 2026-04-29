@@ -332,7 +332,7 @@ pub fn build_router(state: Arc<ServerState>) -> Router {
         .route("/readyz", get(handlers::readyz))
         .route("/metrics", get(handlers::metrics))
         .route("/stats", get(handlers::stats))
-        .route("/cache/:pool/:key/:range", get(handlers::get_cache))
+        .route("/cache/{pool}/{key}/{range}", get(handlers::get_cache))
         .route("/cache/contains", post(handlers::cache_contains))
         // SHELF-G4 — predicate → maybe_match row groups. Returns
         // `fail_open: true` when shelf has no signal for the
@@ -342,7 +342,7 @@ pub fn build_router(state: Arc<ServerState>) -> Router {
         // until an index is wired via `with_text_index`.
         .route("/textindex/probe", post(handlers::textindex_probe))
         .route(
-            "/cache/:pool/origin/:bucket/*s3_key",
+            "/cache/{pool}/origin/{bucket}/{*s3_key}",
             head(handlers::head_cache),
         )
         // SHELF-23 admin surface. We deliberately nest under
@@ -362,7 +362,7 @@ pub fn build_router(state: Arc<ServerState>) -> Router {
     let router = router
         .route("/ui", get(crate::ui::index))
         .route("/ui/", get(crate::ui::index))
-        .route("/ui/*path", get(crate::ui::asset));
+        .route("/ui/{*path}", get(crate::ui::asset));
 
     router.with_state(state)
 }
