@@ -85,7 +85,7 @@ jobs:
       shelfctl_present: ${{ steps.shelfctl.outputs.present }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Strip penpencil-cluster overlay from publish surface
         run: |
@@ -209,7 +209,7 @@ jobs:
       image: ${{ env.IMAGE_NAME }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up QEMU (arm64 emulation)
         uses: docker/setup-qemu-action@v4
@@ -433,7 +433,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Helm
         uses: azure/setup-helm@v5
@@ -569,7 +569,7 @@ jobs:
             arch: arm64
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -672,7 +672,7 @@ jobs:
       packages: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download all artefacts
         uses: actions/download-artifact@v8

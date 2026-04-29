@@ -52,7 +52,7 @@ jobs:
         backend: [shelf, fs-cache]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install tools
         run: |
@@ -118,7 +118,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download smoke artefacts
         uses: actions/download-artifact@v8
@@ -149,7 +149,7 @@ jobs:
             backend: alluxio-3-dora       # v0.5 gate comparison is vs 2.9.5
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Configure AWS creds via OIDC
         uses: aws-actions/configure-aws-credentials@v6
@@ -202,7 +202,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # TODO_SHELF-26: open machine-authored PR appending rows to RESULTS.md
       - name: Open results PR (stub)
