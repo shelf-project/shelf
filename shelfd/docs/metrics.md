@@ -39,6 +39,8 @@ covered by the `registry_exposes_documented_series` regression test.
 | `shelf_compress_bytes_out_total` | counter | `{pool}` | Bytes returned by the compression pipeline (encoded frame, including the 1-byte version header). | B1 |
 | `shelf_compress_outcomes_total` | counter | `{pool, outcome}` | Encode/decode outcome counter; `outcome` ∈ `compressed`, `skipped_small`, `skipped_incompressible`, `decompressed_ok`, `decompressed_uncompressed`, `decompress_error`. | B1 |
 | `shelf_compress_seconds` | histogram | `{pool, op}` | Compression-pipeline latency; `op` ∈ `encode`, `decode`. | B1 |
+| `shelf_wtinylfu_decisions_total` | counter | `{outcome}` | W-TinyLFU admission decisions per call. `outcome` ∈ `admit`, `reject_inner` (size or pin-list rejected before the frequency gate), `reject_freq` (size accepted but estimated frequency below admit threshold), `reject_other` (combination edge cases — e.g. pinned + inner reject). | SHELF-33 |
+| `shelf_wtinylfu_decays_total` | counter | `{component}` | W-TinyLFU window-decay events: 4-bit Count-Min Sketch halve + Bloom doorkeeper clear at every `window_size` observations. `component` ∈ `both` today (sketch + bloom decay together); kept labelled in case future work splits the cadences. | SHELF-33 |
 
 ## Planned (future tickets)
 
