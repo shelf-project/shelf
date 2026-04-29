@@ -1,0 +1,66 @@
+# shelf-advisor — origin-cluster overlay.
+#
+# This file is the ONLY place a `cdp.*` event-log table name and
+# the in-cluster shelfd /stats URLs should appear. The OSS-clean
+# default lives at shelf-advisor/config.example.yaml; values not
+# overridden here inherit from the compiled defaults.
+#
+# This file is stripped from the publish surface by the release
+# pipeline (see .github/workflows/release.yml preflight step) so
+# it does not leak into the OSS distribution. It is consumed
+# directly by the origin cluster's CronJob `shelf-advisor`
+# manifest, which mounts it at /etc/shelf-advisor/config.yaml.
+
+# Origin-cluster Iceberg-sink event-listener table. The cdp
+# catalog ships from the cluster's Hive metastore; the
+# `trino_logs` schema and the `trino_queries` table are written
+# by the SHELF-60 listener jar PR #66.
+event_log_table: cdp.trino_logs.trino_queries
+
+# 24h rolling window matches the cluster's nightly soak rhythm;
+# the `watch` mode running on a 15-min interval picks the deltas
+# inside this window. 7d is the long-window equivalent operators
+# run by hand for monthly capacity reviews.
+window: 24h
+
+# Per-pod /stats endpoints. The four-replica DNS layout is the
+# rc.2 default (`shelf-0..3.shelf.svc.cluster.local`); the
+# `:8080` port is shelfd's control-plane listener (membership
+# default in `shelfd::membership::DEFAULT_STATS_PORT`).
+shelfd_stats_urls:
+  - http://shelf-0.shelf.svc.cluster.local:8080/stats
+  - http://shelf-1.shelf.svc.cluster.local:8080/stats
+  - http://shelf-2.shelf.svc.cluster.local:8080/stats
+  - http://shelf-3.shelf.svc.cluster.local:8080/stats
+
+# Top-N per table tuned tighter on the origin cluster — the
+# operator team prefers a shorter list with higher precision.
+top_n_per_table: 5
+min_confidence: 0.6
+
+# OptimizeRecommender thresholds — the origin cluster's CDP
+# tables compact daily (Airflow `iceberg_auto_maintenance` DAG),
+# so the small-file ratio threshold is held conservative; below
+# this, the Airflow DAG would already have caught the table.
+optimize:
+  small_file_bytes: 33554432
+  small_file_ratio_min: 0.40
+  min_files_per_table: 16
+
+# PinListRecommender — pool capacity matches the rc.2 prod
+# overlay's `cache.pools.rowgroup.dramSizeBytes` (11 GiB), and
+# the min frequency is bumped to 10 so a single ad-hoc query
+# spike does not earn a pin entry.
+pin_list:
+  min_frequency: 10
+  min_confidence: 0.65
+  default_pool_capacity_bytes: 11811160064  # 11 GiB
+
+# Sibling recommenders stay disabled until their tickets land.
+bloom:
+  enabled: false
+  min_confidence: 0.7
+mv:
+  enabled: false
+  min_confidence: 0.5
+  pin_fraction: 0.25

@@ -1,10 +1,28 @@
 # SHELF-53: `shelf-advisor` full binary implementation
 
-**Status:** Draft
+**Status:** Implemented (framework + `optimize` + `pin_list`); SHELF-52 / SHELF-65 land sibling recommenders.
 **Tier:** S
 **Estimated effort:** L
-**Depends on:** SHELF-37, SHELF-34
-**Blocks:** SHELF-47, SHELF-52
+**Depends on:** SHELF-60 (formerly SHELF-37 — listener jar, tracked in PR #66), SHELF-34 (the phase-1 scaffold this PR extends).
+**Blocks:** SHELF-65 (formerly SHELF-47 — MV-aware pinning), SHELF-52 (bloom-write).
+
+> **Path note (2026-04-30):** the live workspace lays the
+> advisor crate at `shelf-advisor/` (workspace root), not
+> `crates/shelf-advisor/`. The sibling tickets and the live
+> tree are authoritative; treat any `crates/shelf-advisor/`
+> reference in the body below as a stale draft pointer.
+
+> **CLI note (2026-04-30):** the live binary ships four
+> subcommands —
+> `recommend [all|optimize|pin-list|bloom|mv]` (kebab-case at
+> the CLI per clap convention; the recommendation envelope's
+> `recommendation_type` field keeps the snake_case canonical
+> form `optimize_targets` / `pin_list_candidates` / etc.),
+> `analyze` (compat alias),
+> `watch` (periodic + `:9100/metrics`),
+> `dry-run` (fixture replay).
+> The `recommend` form is canonical; `analyze` is preserved
+> for the SHELF-34 phase-1 scaffold's CLI contract.
 
 ## Problem (OSS-cited)
 

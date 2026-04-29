@@ -1,0 +1,36 @@
+# shelf-advisor integration overlay for the SHELF_INTEGRATION-gated
+# test in `tests/it_recommend.rs::it_against_compose_stack_when_gated`.
+#
+# Composed on top of `shelfd/tests/docker-compose.yml`. Adds a tiny
+# event-log seed (a JSON fixture mounted into a sidecar that writes
+# the rows into the synthetic Iceberg catalog) and a one-shot
+# `seed-event-log` service that exits 0 once the seed is loaded.
+#
+# This file is consumed only when the integration test runs with
+# SHELF_INTEGRATION=1 and a working docker compose v2 + a `docker
+# compose -f shelfd/tests/docker-compose.yml -f compose.advisor.yml
+# up --wait` succeeded.
+services:
+  seed-event-log:
+    image: alpine:3.20
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - ../fixtures/dry_run_input.json:/seed/dry_run_input.json:ro
+    entrypoint: >
+      /bin/sh -c "
+        echo 'Seeding event log into MinIO catalog...';
+        # The advisor's IT today reads the event log from a fixture
+        # path passed to `shelf-advisor recommend --fixture`; this
+        # service is the placeholder for the future Trino-backed
+        # seeding step that the production reader ticket will
+        # populate. Until then it just prints the row count and exits 0.
+        wc -l /seed/dry_run_input.json;
+        exit 0
+      "
+    healthcheck:
+      test: ["CMD", "echo", "ok"]
+      interval: 5s
+      timeout: 2s
+      retries: 1

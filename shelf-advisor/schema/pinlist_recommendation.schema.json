@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/shelf-project/shelf/shelf-advisor/schema/pinlist_recommendation.schema.json",
+  "title": "PinListRecommendation",
+  "description": "PinListRecommender (SHELF-53) shape. Score formula is published in the rationale's `score_formula` field so consumers can re-derive without reading source.",
+  "allOf": [
+    { "$ref": "recommendation.schema.json" },
+    {
+      "properties": {
+        "recommendation_type": { "const": "pin_list_candidates" },
+        "rationale": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "frequency",
+            "wall_time_seconds",
+            "scanned_bytes",
+            "pool_capacity_bytes",
+            "score",
+            "score_formula"
+          ],
+          "properties": {
+            "frequency": { "type": "integer", "minimum": 1 },
+            "wall_time_seconds": { "type": "number", "minimum": 0 },
+            "scanned_bytes": { "type": "integer", "minimum": 0 },
+            "pool_capacity_bytes": { "type": "integer", "minimum": 1 },
+            "score": { "type": "number", "minimum": 0 },
+            "score_formula": {
+              "type": "string",
+              "const": "(scanned_bytes * wall_time_seconds * frequency) / (1 + scanned_bytes / pool_capacity)"
+            }
+          }
+        },
+        "suggested_change": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pin_list_entry", "format"],
+          "properties": {
+            "pin_list_entry": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["table", "partition_filter", "ttl", "pool"],
+              "properties": {
+                "table": { "type": "string" },
+                "partition_filter": {
+                  "anyOf": [{ "type": "null" }, { "type": "string" }]
+                },
+                "ttl": { "type": "string" },
+                "pool": {
+                  "type": "string",
+                  "enum": ["rowgroup", "metadata"]
+                }
+              }
+            },
+            "format": { "type": "string" }
+          }
+        }
+      }
+    }
+  ]
+}
