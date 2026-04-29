@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, head, post};
@@ -33,6 +33,10 @@ use tracing::{field, Instrument};
 use crate::control::{PoolStats, Stats};
 use crate::head_lru::{HeadLru, HeadMeta};
 use crate::membership::DrainSignal;
+use crate::parquet_meta::{
+    extract_page_index, predicate_prune as run_predicate_prune, validate_path, ColumnValue,
+    PageIndex, PageIndexCache, ParquetMetaError, Predicate, MAX_FOOTER_BYTES,
+};
 use crate::store::{Key, Pool, ReadOutcome, Store};
 
 /// Shared state the router hands to every handler.
@@ -162,6 +166,21 @@ pub struct ServerState {
     /// untouched. `main` builds this from `config.bloom_admission`
     /// at startup; the default Helm chart leaves it `None`.
     pub bloom_admission: Option<Arc<crate::parquet_admit::BloomAdmission>>,
+    /// SHELF-34 — operator-loaded bucket allowlist for
+    /// `/predicate-prune`. Empty by default in OSS builds; the
+    /// operator's overlay (e.g. a config file shipped via the
+    /// `infra/<operator>/` overlay path) populates it at startup.
+    /// The validator rejects every path whose bucket is not on
+    /// this list — see [`crate::parquet_meta::validate_path`].
+    pub predicate_allowlist: Arc<Vec<String>>,
+    /// SHELF-34 — in-process LRU of parsed Parquet
+    /// [`crate::parquet_meta::PageIndex`] structures, keyed by
+    /// `<etag>::page-index`. Held inside `ServerState` so a burst
+    /// of `/predicate-prune` requests against the same file shares
+    /// one parse. Sized small (256 entries) by default; the
+    /// authoritative byte cache for footer bytes is the metadata
+    /// pool.
+    pub page_index_cache: Arc<PageIndexCache>,
 }
 
 impl ServerState {
@@ -235,6 +254,12 @@ impl ServerState {
             cost: crate::cost::CostState::disabled(),
             ab_tag: crate::ab_tag::AbTagState::disabled(),
             bloom_admission: None,
+            // SHELF-34 — OSS default is an empty allowlist. The
+            // operator overlay populates this at boot via
+            // [`Self::with_predicate_allowlist`]; until then, every
+            // `/predicate-prune` request is rejected at the validator.
+            predicate_allowlist: Arc::new(Vec::new()),
+            page_index_cache: Arc::new(PageIndexCache::default()),
         }
     }
 
@@ -331,6 +356,15 @@ impl ServerState {
         admission: Arc<crate::parquet_admit::BloomAdmission>,
     ) -> Self {
         self.bloom_admission = Some(admission);
+        self
+    }
+
+    /// SHELF-34 builder: install the operator-supplied bucket
+    /// allowlist for `/predicate-prune`. `main` reads the overlay
+    /// file at startup (when present) and threads the resulting
+    /// `Vec<String>` here. Tests can pass any Vec.
+    pub fn with_predicate_allowlist(mut self, allowlist: Vec<String>) -> Self {
+        self.predicate_allowlist = Arc::new(allowlist);
         self
     }
 
@@ -434,7 +468,12 @@ pub fn build_router(state: Arc<ServerState>) -> Router {
         .route("/admin/pin", post(handlers::admin_pin))
         .route("/admin/unpin", post(handlers::admin_unpin))
         .route("/admin/evict", post(handlers::admin_evict))
-        .route("/admin/reload", post(handlers::admin_reload));
+        .route("/admin/reload", post(handlers::admin_reload))
+        // SHELF-34 — page-index aware fetching sidecar.
+        // GET /predicate-prune?path=s3://...&col=...&min=...&max=...
+        // returns `{"pages":[[offset,length], ...]}`. Allowlist is
+        // operator-loaded; OSS default empty.
+        .route("/predicate-prune", get(handlers::predicate_prune));
 
     // Embedded admin UI. Same-origin SPA at `/ui` consuming the same
     // JSON contract `shelfctl` uses. Behind a non-default feature so
@@ -1497,6 +1536,279 @@ pub mod handlers {
             },
         };
         (StatusCode::OK, axum::Json(resp)).into_response()
+    }
+
+    // -----------------------------------------------------------------
+    // SHELF-34 — `/predicate-prune` page-index sidecar handler.
+    //
+    // Wire shape:
+    //   GET /predicate-prune
+    //     ?path=s3a://<bucket>/<key.parquet>
+    //     &col=<column-path>
+    //     [&min=<lo>]
+    //     [&max=<hi>]
+    //     [&eq=<v>]      (alternate to min/max)
+    //
+    // Response shape (200 OK):
+    //   {
+    //     "path":  "...",
+    //     "column": "...",
+    //     "total_pages": 12,
+    //     "kept_pages":  3,
+    //     "pages": [[offset, length], ...]
+    //   }
+    //
+    // Failure modes (each maps to one of the four security review
+    // line items in `agents/out/SHELF-34/THREAT_MODEL.md`):
+    //   - Allowlist / path-traversal rejection -> 400 invalid_path
+    //   - Column unknown                        -> 200 with empty pages
+    //   - Footer parse failure                  -> 502 footer_parse
+    //   - Footer too large                      -> 413 footer_too_large
+    //   - Origin error / 4xx                    -> 502 (NEVER cached)
+    //
+    // PII containment: the response body is structural-only — page
+    // (offset, length) tuples plus counts. Page-level min/max byte
+    // values are computed inside shelfd but never serialized.
+    // -----------------------------------------------------------------
+
+    /// Query parameters for `/predicate-prune`. `min` / `max` build
+    /// a closed-range predicate; `eq` collapses to a single-point
+    /// predicate. Exactly one of (min, max) OR `eq` must be
+    /// supplied; an empty predicate set scans every page.
+    #[derive(Debug, Clone, serde::Deserialize)]
+    pub struct PredicatePruneQuery {
+        pub path: String,
+        pub col: String,
+        #[serde(default)]
+        pub min: Option<String>,
+        #[serde(default)]
+        pub max: Option<String>,
+        #[serde(default)]
+        pub eq: Option<String>,
+    }
+
+    /// SHELF-34 handler.
+    pub async fn predicate_prune(
+        State(state): State<Arc<ServerState>>,
+        Query(q): Query<PredicatePruneQuery>,
+    ) -> Response {
+        let span = tracing::info_span!(
+            "http.predicate_prune",
+            otel.kind = "server",
+            route = "/predicate-prune",
+            col = %q.col,
+            outcome = field::Empty,
+            status = field::Empty,
+        );
+        async move { predicate_prune_inner(state, q).await }
+            .instrument(span)
+            .await
+    }
+
+    async fn predicate_prune_inner(state: Arc<ServerState>, q: PredicatePruneQuery) -> Response {
+        let start = std::time::Instant::now();
+
+        // 1. Allowlist + path-traversal containment.
+        let parsed = match validate_path(&q.path, state.predicate_allowlist.as_ref()) {
+            Ok(p) => p,
+            Err(e) => {
+                return record_predicate_outcome(
+                    start,
+                    "error",
+                    StatusCode::BAD_REQUEST,
+                    client_error(StatusCode::BAD_REQUEST, "invalid_path", &e.to_string()),
+                );
+            }
+        };
+
+        // 2. Build the predicate. Reject a query with neither (min,
+        //    max) nor `eq` — open scans defeat the lever and would
+        //    silently flood the response with every page.
+        let predicate = match (q.min.as_deref(), q.max.as_deref(), q.eq.as_deref()) {
+            (Some(lo), Some(hi), None) => Predicate::range(
+                ColumnValue::parse_query_value(lo),
+                ColumnValue::parse_query_value(hi),
+            ),
+            (None, None, Some(v)) => Predicate::Equals(ColumnValue::parse_query_value(v)),
+            // SHELF-34 v1 keeps the wire shape strict: ambiguous
+            // pred shapes (e.g. min only, or both min/max + eq)
+            // are 400. A future open-ended GT/LT can land without
+            // breaking the wire by adding new query params.
+            _ => {
+                return record_predicate_outcome(
+                    start,
+                    "error",
+                    StatusCode::BAD_REQUEST,
+                    client_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_predicate",
+                        "supply either both `min` and `max`, or a single `eq`",
+                    ),
+                );
+            }
+        };
+
+        // 3. Fetch the page index — from the in-process LRU first,
+        //    falling through to a parse + cache populate. We use the
+        //    object's ETag (from a HEAD probe) as the key. A 4xx /
+        //    transient 403 from origin surfaces as `Err`, never a
+        //    positive negative cache.
+        use crate::origin::Origin;
+        let head = match state
+            .origin
+            .as_ref()
+            .head(&parsed.bucket, &parsed.key)
+            .await
+        {
+            Ok(Some(h)) => h,
+            Ok(None) => {
+                return record_predicate_outcome(
+                    start,
+                    "error",
+                    StatusCode::NOT_FOUND,
+                    client_error(
+                        StatusCode::NOT_FOUND,
+                        "object_not_found",
+                        "origin reports object absent",
+                    ),
+                );
+            }
+            Err(e) => {
+                return record_predicate_outcome(
+                    start,
+                    "error",
+                    StatusCode::BAD_GATEWAY,
+                    upstream_error("origin.head", &e.to_string()),
+                );
+            }
+        };
+
+        // ETag is the cache key. S3 returns ETag with surrounding
+        // double-quotes; we treat the raw bytes as the discriminant
+        // (page_index_cache_key is a plain string concat).
+        let etag = String::from_utf8_lossy(&head.etag).into_owned();
+        let mut outcome_label: &'static str = "hit";
+        let idx: Arc<PageIndex> = if let Some(idx) = state.page_index_cache.get(&etag) {
+            idx
+        } else {
+            outcome_label = "miss";
+            // 4. Cache miss: fetch the file (capped at MAX_FOOTER_BYTES
+            //    bytes — a multi-GiB Parquet file is rejected at this
+            //    point and never allocated for, per security review §2).
+            if head.content_length > MAX_FOOTER_BYTES as u64 {
+                return record_predicate_outcome(
+                    start,
+                    "error",
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    client_error(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "footer_too_large",
+                        &format!(
+                            "object size {} bytes exceeds MAX_FOOTER_BYTES ({MAX_FOOTER_BYTES})",
+                            head.content_length
+                        ),
+                    ),
+                );
+            }
+            let parse_start = std::time::Instant::now();
+            let bytes = match state
+                .origin
+                .as_ref()
+                .get_range(&parsed.bucket, &parsed.key, 0, head.content_length)
+                .await
+            {
+                Ok(b) => b,
+                Err(e) => {
+                    return record_predicate_outcome(
+                        start,
+                        "error",
+                        StatusCode::BAD_GATEWAY,
+                        upstream_error("origin.get_range", &e.to_string()),
+                    );
+                }
+            };
+            match extract_page_index(&bytes) {
+                Ok(idx) => {
+                    let arc = Arc::new(idx);
+                    state.page_index_cache.insert(&etag, arc.clone());
+                    let elapsed = parse_start.elapsed().as_secs_f64();
+                    crate::metrics::PAGE_INDEX_PARSE_SECONDS
+                        .with_label_values(&["ok"])
+                        .observe(elapsed);
+                    crate::metrics::PAGE_INDEX_CACHED_BYTES
+                        .with_label_values(&["metadata"])
+                        .set(arc.total_bytes() as i64);
+                    arc
+                }
+                Err(e) => {
+                    let elapsed = parse_start.elapsed().as_secs_f64();
+                    crate::metrics::PAGE_INDEX_PARSE_SECONDS
+                        .with_label_values(&["error"])
+                        .observe(elapsed);
+                    let (status, kind) = match &e {
+                        ParquetMetaError::FooterTooLarge { .. } => {
+                            (StatusCode::PAYLOAD_TOO_LARGE, "footer_too_large")
+                        }
+                        ParquetMetaError::TooManyBlobs { .. }
+                        | ParquetMetaError::TooManyPages { .. } => {
+                            (StatusCode::PAYLOAD_TOO_LARGE, "too_many_blobs")
+                        }
+                        ParquetMetaError::NoPageIndex => {
+                            (StatusCode::UNPROCESSABLE_ENTITY, "no_page_index")
+                        }
+                        ParquetMetaError::Parse(_) => (StatusCode::BAD_GATEWAY, "footer_parse"),
+                    };
+                    return record_predicate_outcome(
+                        start,
+                        "error",
+                        status,
+                        client_error(status, kind, &e.to_string()),
+                    );
+                }
+            }
+        };
+
+        // 5. Run the predicate. `predicate_prune` looks up by column
+        //    path; an unknown column collapses to an empty page list
+        //    (this is correct: the engine then scans nothing,
+        //    consistent with "no rows match" semantics).
+        let pages = run_predicate_prune(&idx, &q.col, &predicate);
+
+        let body = serde_json::json!({
+            "path": q.path,
+            "column": q.col,
+            "total_pages": idx.total_pages,
+            "kept_pages": pages.len(),
+            "pages": pages,
+        });
+        record_predicate_outcome(
+            start,
+            outcome_label,
+            StatusCode::OK,
+            (StatusCode::OK, axum::Json(body)).into_response(),
+        )
+    }
+
+    /// Bump SHELF-34 metrics + stamp span fields. `outcome` matches
+    /// the `shelf_predicate_prune_requests_total{outcome}` label
+    /// space: `hit` / `miss` / `error`.
+    fn record_predicate_outcome(
+        start: std::time::Instant,
+        outcome: &'static str,
+        status: StatusCode,
+        resp: Response,
+    ) -> Response {
+        let elapsed = start.elapsed().as_secs_f64();
+        crate::metrics::PREDICATE_PRUNE_REQUESTS_TOTAL
+            .with_label_values(&[outcome])
+            .inc();
+        crate::metrics::PREDICATE_PRUNE_SECONDS
+            .with_label_values(&[outcome])
+            .observe(elapsed);
+        let span = tracing::Span::current();
+        span.record("outcome", outcome);
+        span.record("status", status.as_u16());
+        resp
     }
 
     /// SHELF-G6 — `POST /textindex/probe`. Looks up an in-memory

@@ -52,6 +52,9 @@ aws-sdk-s3 = { workspace = true }
 foyer = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
+# SHELF-34 — Apache Parquet page-index parser for the
+# `/predicate-prune` sidecar. See parquet_meta.rs.
+parquet = { workspace = true }
 # SHELF E2 — Pool::Metadata compression (gated behind `zstd_metadata`
 # feature). The dep compiles fine off-feature; only the wrapper in
 # `compression.rs` is disabled.
@@ -102,9 +105,8 @@ tokio = { workspace = true }
 tempfile = "3"
 # SHELF-50 — the round-trip Parquet footer test serialises a real
 # `parquet::format::FileMetaData` via the Thrift compact protocol.
-# Pinned to the same line the upstream `parquet` crate transitively
-# uses (verified at parquet 53's `Cargo.toml`) so the two stay
-# binary-compatible.
+# Pinned to the same line the upstream `parquet` crate ships; at
+# parquet 58 the thrift interop stays stable against 0.17.
 thrift = "0.17"
 
 [features]

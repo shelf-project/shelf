@@ -74,24 +74,19 @@ zstd = "0.13"
 # base64 so callers don't need a binary content-type handler. Kept
 # on the `0.22` line which is the last to build on our MSRV.
 base64 = "0.22"
-# SHELF-42 — URL-encode/decode the X-Shelf-Tag header payload. Already
-# present transitively via reqwest/url; pulling it forward as a direct
-# dep keeps the ab_tag module's encoder honest without rolling our own
-# percent-encoder.
+# SHELF-42 — URL-encode/decode the X-Shelf-Tag header payload.
 percent-encoding = "2"
 # SHELF-50 — bounded in-process LRU for decoded Iceberg manifests
-# and Parquet footers. The `lru` crate is ~700 LOC of pure-Rust,
-# `no_std`-capable code with one transitive dep (`hashbrown` —
-# already in the tree via `dashmap`). Wrapped in `parking_lot::Mutex`
-# at the call site per the SHELF-50 design note.
+# and Parquet footers.
 lru = "0.12"
-# SHELF-50 — Parquet footer parsing for the decoded metadata cache.
-# `default-features = false` keeps the transitive tree small (no
-# arrow_array, no async tokio bindings, no zstd/snap codecs); we
-# only need `ParquetMetaDataReader` + `ParquetMetaData`. The crate
-# is also pulled by the shelfd dev-dependency block so the
-# round-trip test can build a real footer with the writer surface.
-parquet = { version = "53", default-features = false }
+# SHELF-34 + SHELF-50 — Apache Parquet footer / page-index extractor.
+# `default-features = false` cuts the arrow-* tree (~3 MB compile
+# output); SHELF-34 upgrades the line from 53 → 58 for the richer
+# page-index API. SHELF-50's decoded-metadata cache uses the same
+# crate via the workspace pin — pre-existing call sites (struct
+# literal construction for FileMetaData / SchemaElement in tests)
+# stay compatible across 53→58.
+parquet = { version = "58", default-features = false }
 
 [profile.release]
 lto = "thin"
