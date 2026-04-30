@@ -76,13 +76,16 @@ COPY rust-toolchain.toml ./
 COPY Cargo.toml Cargo.lock ./
 
 # All workspace members must be present for `cargo build` to resolve
-# the workspace graph, even though we only ship the shelfd bin. The
-# `shelf-advisor` crate joined the workspace in PR #33 (OSS feature
-# rollup) but its COPY was missed at the time, leaving the Dockerfile
-# broken on a clean checkout. Restored as part of the SHELF-29 cut.
+# the workspace graph, even though we only ship the shelfd bin. Every
+# entry in `Cargo.toml#workspace.members` MUST have a matching COPY
+# below — `crates/shelf-cost` joined the workspace in PR #68 and its
+# COPY was missed on `main` (the rc.5 release-prep branch carries the
+# fix but had not been merged when the tripwire landed). The
+# `dockerfile-tripwire.yml` workflow now enforces this on every PR.
 COPY shelfd ./shelfd
 COPY shelfctl ./shelfctl
 COPY shelf-advisor ./shelf-advisor
+COPY crates ./crates
 
 # Overlay the freshly built UI bundle on top of the committed
 # placeholder, but only when the `ui` feature is active. When
