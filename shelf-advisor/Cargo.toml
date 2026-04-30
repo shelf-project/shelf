@@ -21,12 +21,30 @@ path = "src/main.rs"
 name = "shelf_advisor"
 path = "src/lib.rs"
 
+[features]
+default = []
+# SHELF-65 — flips `cost_savings_per_refresh` from a `cost_model_unavailable`
+# null to an actual `Cents` figure, computed via the `shelf-dollars-saved`
+# crate landed by SHELF-61 (PR #68). Off by default while #68 is in flight;
+# the feature flip is the cutover point for the dependency. See
+# `shelf-advisor/docs/recommenders.md` §MV-pinning > Cost model wiring.
+shelf_dollars_saved = []
+# SHELF-65 — opt-in cargo feature for the live integration test that
+# drives a fixture-backed recommender end-to-end. The strict gate is
+# *both* this feature AND the `SHELF_INTEGRATION=1` env var; the test
+# panics rather than silent-skipping if either is missing once the
+# binary is built. See plan §8 (SHELF-09 trap).
+integration = []
+
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+hex = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -38,11 +56,6 @@ reqwest = { workspace = true }
 # the CLI keeps its own tiny parser (see `parse_window`) so the
 # `--window` flag stays free of dep churn.
 humantime-serde = { workspace = true }
-# SHELF-52 — predicate-column extraction over `query_text`. The
-# regex crate is already pulled transitively via tracing-subscriber
-# (env-filter), so this declaration does not bump Cargo.lock.
-regex = "1"
-
 [dev-dependencies]
 # `assert_cmd` drives the compiled `shelf-advisor` binary from the
 # integration tests. `tempfile` gives them a writable workspace.

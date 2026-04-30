@@ -1,0 +1,27 @@
+{
+  "cdp.bronze.events": [
+    {
+      "path": "s3://bronze/events/2026-04-29/00000-data.parquet",
+      "file_size_bytes": 134217728,
+      "record_count": 850000,
+      "spec_id": 0
+    },
+    {
+      "path": "s3://bronze/events/2026-04-29/00001-data.parquet",
+      "file_size_bytes": 121634816,
+      "record_count": 740000,
+      "spec_id": 0
+    }
+  ],
+  "cdp.bronze.users": [
+    {
+      "path": "s3://bronze/users/2026-04-29/00000-data.parquet",
+      "file_size_bytes": 67108864,
+      "record_count": 480000,
+      "spec_id": 0
+    }
+  ],
+  "cdp.gold.mv_dau": [],
+  "cdp.gold.mv_orders": [],
+  "cdp.gold.materialized_revenue": []
+}

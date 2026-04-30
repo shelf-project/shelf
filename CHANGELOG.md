@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — SHELF-65 MV-aware pinning recommender
+
+- **`MaterializedViewPinningRecommender`** (`kind() == "mv_pinning"`).
+  Replaces the `MaterializedViewRecommender` SHELF-47 stub at
+  `shelf-advisor/src/recommenders/mv.rs`. Detects materialized views
+  via a 3-way OR-union (name regex + Trino-Iceberg property +
+  Iceberg `is_materialized_view = true`), groups recent refreshes
+  into windows via a 2-way OR-union (`REFRESH MATERIALIZED VIEW`
+  SQL pattern + `airflow_*` user-pattern), and emits per
+  `(base_table, refresh_window)` recommendations carrying ADR-0011
+  pin-keys, severity tiers (info / warn / critical at $1 / $10
+  thresholds), and aggregate cap protection that downgrades severity
+  + tags `pin_bytes_too_large` when the run's pin-set exceeds NVMe ×
+  `max_pin_bytes_pct` (default 0.5). Knobs configurable under
+  `mv_pinning.*` in `shelf-advisor/config.example.yaml`; deployer
+  overlays may widen `refresh_user_pattern`. New cargo features
+  `shelf_dollars_saved` (cost-model dependency cutover for SHELF-61 /
+  PR #68; off by default — emits `cost_savings_per_refresh: null` plus
+  a `cost_model_unavailable` flag while #68 is in flight) and
+  `integration` (gates the strict double-gated live smoke at
+  `tests/it_mv_pinning_live.rs`). Design note at
+  `shelfd/docs/design-notes/SHELF-47-mv-aware-pinning.md` (filename
+  retains the legacy SHELF-47 prefix per the cost-reduction plan's
+  renumber convention; ticket ID in the body is SHELF-65);
+  recommender-level docs at `shelf-advisor/docs/recommenders.md`.
+
+<<<<<<< HEAD
 ### Added — SHELF-52 bloom-write advisor
 
 - **`shelf-advisor::recommenders::bloom_write::BloomWriteRecommender`**

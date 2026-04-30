@@ -1,0 +1,34 @@
+[
+  {
+    "query_id": "20260429_010000_000aa_demo",
+    "user": "airflow_etl_dau",
+    "query_sql": "REFRESH MATERIALIZED VIEW cdp.gold.mv_dau",
+    "written_table": "cdp.gold.mv_dau",
+    "base_tables": ["cdp.bronze.events", "cdp.bronze.users"],
+    "started_at_unix_seconds": 1714374000
+  },
+  {
+    "query_id": "20260429_020000_000bb_demo",
+    "user": "airflow_etl_dau",
+    "query_sql": "REFRESH MATERIALIZED VIEW cdp.gold.mv_dau",
+    "written_table": "cdp.gold.mv_dau",
+    "base_tables": ["cdp.bronze.events", "cdp.bronze.users"],
+    "started_at_unix_seconds": 1714377600
+  },
+  {
+    "query_id": "20260429_023000_000cc_demo",
+    "user": "airflow_etl_orders",
+    "query_sql": "REFRESH MATERIALIZED VIEW cdp.gold.mv_orders",
+    "written_table": "cdp.gold.mv_orders",
+    "base_tables": ["cdp.bronze.events"],
+    "started_at_unix_seconds": 1714379400
+  },
+  {
+    "query_id": "20260429_030000_000dd_demo",
+    "user": "airflow_etl_revenue",
+    "query_sql": "INSERT INTO cdp.gold.materialized_revenue SELECT * FROM cdp.bronze.events",
+    "written_table": "cdp.gold.materialized_revenue",
+    "base_tables": ["cdp.bronze.events"],
+    "started_at_unix_seconds": 1714381200
+  }
+]
