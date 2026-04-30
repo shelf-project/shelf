@@ -2,6 +2,7 @@
 
 - Ticket: SHELF-32 — Sieve eviction on rowgroup pool (REQUIRES Foyer bump 0.12.2 → ≥ 0.18; PR #22 to 0.22.3 is the vehicle)
 - Status: **Proposed (gated)** — ships only after Dependabot PR [shelf-project/shelf#22](https://github.com/shelf-project/shelf/pull/22) (Foyer 0.12.2 → 0.22.3) merges and post-merge `cargo test -p shelfd --lib` is green.
+- Priority: **P2-conditional** (re-tiered from P0 on 2026-04-30 per F2 deep-research finding).
 - Author: AI agent on behalf of orchestrator
 - Date: 2026-04-30 (UTC+5:30)
 - Supersedes: ADR-0009 (foyer-s3-fifo-over-gl-cache-custom) for the rowgroup pool only; the metadata pool inherits no change.
@@ -43,6 +44,24 @@ already shadows the warm metadata path (workspace memory + ADR-0012).
 | Keep LRU | Default since preview-4; stable; zero risk | Sieve papers + every published large-block-cache benchmark show 5–15 pp headroom over LRU; LRU is the floor, not the ceiling | Acceptable status quo, but leaves measurable lift on the table once the bump is in. |
 | W-TinyLFU on rowgroup pool (SHELF-33) | Caffeine-class admission gate; complementary to eviction | Different layer (admission, not eviction); already separately tracked | Not exclusive; SHELF-32 + SHELF-33 stack (admission gate in front of Sieve eviction). |
 | 3L-Cache learned (SHELF-36) | Best published byte-miss ratio on FAST 2025 traces | 6.4× LRU CPU on small caches; complex; gated on SHELF-35 ≥ 5 pp | Out of scope for SHELF-32; tracked separately under ADR-0018. |
+
+## Gate
+
+Requires SHELF-35 replay showing ≥ 5 pp hit-ratio lift over tuned-S3-FIFO
+(SHELF-67) baseline before P0 promotion. F2 finding (deep-research
+2026-04-30).
+
+Concretely: the Belady replay harness (SHELF-35) must re-play a 7-day
+slice of `cdp.trino_logs.trino_queries` against two simulators —
+tuned-S3-FIFO with SHELF-67's `small_queue_capacity_ratio = 10 %` /
+`promotion_threshold = 2` on the rowgroup pool, and Sieve with the
+`SieveConfig::default()` envelope from Foyer 0.18+. Sieve must win
+by ≥ 5 pp *measured* hit ratio on the cached-byte trace for the same
+working-set budget, not the published 5–15 pp envelope. If the
+measured delta is < 5 pp, Sieve stays at P2-conditional and this ADR
+goes back in the P2 backlog; Foyer 0.22.3 still ships on its own
+merits (CVE / API surface), but the rowgroup pool stays on tuned
+S3-FIFO.
 
 ## Gate to ship
 
