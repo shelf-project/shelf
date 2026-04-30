@@ -19,6 +19,17 @@ generic API-key shapes, AWS access tokens, JWTs, etc. across the full
 commit graph reachable from `HEAD`. Every hit is reviewed by hand; the
 verdict is recorded below.
 
+> **Note on the JSON.** The committed [history-audit.json](./history-audit.json)
+> is the gitleaks output with the `Message` field (commit-message body)
+> stripped from each entry. We keep `RuleID`, `Description`, `File`,
+> `StartLine`, `Commit`, `Author`, `Date`, `Match`, and `Secret` (the
+> last two are already `--redact`'d by gitleaks). The bodies are
+> stripped because some commit messages on `main` cite the in-house
+> deployment overlay path by name, which would land in the OSS surface
+> verbatim and trip the release.yml hygiene tripwire on every future
+> tag. Re-running gitleaks regenerates a complete report locally for
+> any auditor who wants to see the full context.
+
 ## Result — 10 hits, all false positives
 
 The raw report is in [history-audit.json](./history-audit.json). All
