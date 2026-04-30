@@ -52,7 +52,7 @@ humantime-serde = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
 # Foyer DRAM + NVMe cache — SHELF-03, SHELF-17, SHELF-18.
-foyer = "0.12"
+foyer = "0.22"
 # Control plane — SHELF-23 admin surface. Phase 0 ships an HTTP stub;
 # tonic is wired in as an optional dep for when SHELF-23 lands.
 tonic = { version = "0.12", features = ["tls", "gzip"] }
