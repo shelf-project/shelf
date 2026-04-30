@@ -317,6 +317,41 @@ impl AdvisorConfig {
     }
 }
 
+impl BloomWriteConfig {
+    /// SHELF-52 design-note default: a table must have ≥ 50 queries
+    /// in the lookback window AND average ≥ 1 GiB scanned per query
+    /// to be considered a candidate. Selectivity defaults to 0.1
+    /// (90 % skip projection) when no Iceberg NDV is available.
+    pub fn defaults() -> Self {
+        Self {
+            min_query_count: 50,
+            min_query_bytes: 1024 * 1024 * 1024, // 1 GiB
+            default_selectivity: 0.1,
+            cost_cents_per_gib: S3_REWRITE_TARIFF_CENTS_PER_GIB,
+            top_n_columns: 5,
+            predicate_column_regex: DEFAULT_PREDICATE_COLUMN_REGEX.to_string(),
+        }
+    }
+}
+
+impl Default for BloomWriteConfig {
+    fn default() -> Self {
+        Self::defaults()
+    }
+}
+
+/// Default predicate-column extraction regex.
+///
+/// Captures column identifiers on the LHS of equality predicates
+/// (`WHERE col = '…'` or `AND tbl.col = 42`). Capture group 1 is
+/// the bare column name (table qualifier stripped). Designed to
+/// be greedy on identifiers and conservative on literals — it
+/// will miss, not over-match, on any fancy expression. See
+/// `docs/design-notes/SHELF-52-bloom-write-advisor.md` for the
+/// limitations table.
+pub const DEFAULT_PREDICATE_COLUMN_REGEX: &str =
+    r"(?i)\b(?:WHERE|AND)\s+(?:[a-zA-Z_][a-zA-Z0-9_]*\.)?([a-zA-Z_][a-zA-Z0-9_]*)\s*=";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,38 +398,3 @@ pin_list:
         assert_eq!(cfg.pin_list.min_frequency, 10);
     }
 }
-
-impl BloomWriteConfig {
-    /// SHELF-52 design-note default: a table must have ≥ 50 queries
-    /// in the lookback window AND average ≥ 1 GiB scanned per query
-    /// to be considered a candidate. Selectivity defaults to 0.1
-    /// (90 % skip projection) when no Iceberg NDV is available.
-    pub fn defaults() -> Self {
-        Self {
-            min_query_count: 50,
-            min_query_bytes: 1024 * 1024 * 1024, // 1 GiB
-            default_selectivity: 0.1,
-            cost_cents_per_gib: S3_REWRITE_TARIFF_CENTS_PER_GIB,
-            top_n_columns: 5,
-            predicate_column_regex: DEFAULT_PREDICATE_COLUMN_REGEX.to_string(),
-        }
-    }
-}
-
-impl Default for BloomWriteConfig {
-    fn default() -> Self {
-        Self::defaults()
-    }
-}
-
-/// Default predicate-column extraction regex.
-///
-/// Captures column identifiers on the LHS of equality predicates
-/// (`WHERE col = '…'` or `AND tbl.col = 42`). Capture group 1 is
-/// the bare column name (table qualifier stripped). Designed to
-/// be greedy on identifiers and conservative on literals — it
-/// will miss, not over-match, on any fancy expression. See
-/// `docs/design-notes/SHELF-52-bloom-write-advisor.md` for the
-/// limitations table.
-pub const DEFAULT_PREDICATE_COLUMN_REGEX: &str =
-    r"(?i)\b(?:WHERE|AND)\s+(?:[a-zA-Z_][a-zA-Z0-9_]*\.)?([a-zA-Z_][a-zA-Z0-9_]*)\s*=";

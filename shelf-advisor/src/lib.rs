@@ -167,6 +167,7 @@ mod tests {
                 table: "demo.events.purchases".to_string(),
                 equality_predicate_columns: vec![],
                 wall_time: Duration::from_secs(1000),
+                query_text: String::new(),
                 physical_input_bytes: 100 * 1024 * 1024,
             })
             .collect();

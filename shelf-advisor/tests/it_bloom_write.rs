@@ -29,9 +29,11 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use shelf_advisor::{
-    default_recommenders, run_pipeline, AdvisorConfig, BloomWriteConfig, DataFile,
-    IcebergEventLogReader, IcebergManifestReader, QueryRecord, Recommendation, GIB,
+    default_recommenders, render_rfc3339_utc, run_pipeline, AdvisorConfig, AnalysisContext,
+    DataFile, FixtureShelfdStatsReader, IcebergEventLogReader, IcebergManifestReader, QueryRecord,
+    Recommendation, GIB,
 };
+use std::time::SystemTime;
 
 // --- shared fixture --------------------------------------------------------
 
@@ -110,27 +112,41 @@ fn load_expected_json() -> String {
 }
 
 fn run_default_pipeline_against_fixture() -> Vec<Recommendation> {
-    let cfg = AdvisorConfig {
-        event_log_table: "shelf.advisor.trino_queries".to_string(),
-        output_path: PathBuf::from("/dev/null"),
-        window: Duration::from_secs(60 * 60 * 24 * 7),
-        top_n_per_table: 8,
-        bloom_write: BloomWriteConfig::defaults(),
-    };
+    let cfg = AdvisorConfig::defaults(
+        PathBuf::from("/dev/null"),
+        Duration::from_secs(60 * 60 * 24 * 7),
+    );
     let log = FixtureLog {
         records: load_fixture_records(),
     };
-    let mut recs = run_pipeline(&cfg, &log, &FixtureManifests, &default_recommenders())
-        .expect("pipeline succeeds");
+    let manifests = FixtureManifests;
+    let stats = FixtureShelfdStatsReader::empty();
+    // Surface the fixture table to the recommenders; the bloom_write
+    // recommender derives candidates from the event log, but other
+    // recommenders in the default set rely on `tables` for iteration.
+    let tables: Vec<String> = vec!["cat.s.t".to_string()];
+    let ctx = AnalysisContext {
+        config: &cfg,
+        event_log: &log,
+        manifests: &manifests,
+        shelfd_stats: &stats,
+        tables: &tables,
+    };
+    let mut envelope = run_pipeline(
+        &ctx,
+        &default_recommenders(),
+        render_rfc3339_utc(SystemTime::UNIX_EPOCH),
+    )
+    .expect("pipeline succeeds");
     // Stable order — other recommenders return empty arrays today,
     // but if/when they start producing rows the snapshot test still
     // wants a deterministic ordering.
-    recs.sort_by(|a, b| {
+    envelope.recommendations.sort_by(|a, b| {
         a.recommendation_type
             .cmp(&b.recommendation_type)
             .then_with(|| a.table.cmp(&b.table))
     });
-    recs
+    envelope.recommendations
 }
 
 // --- snapshot --------------------------------------------------------------
@@ -149,16 +165,14 @@ fn bloom_write_matches_committed_fixture() {
         .filter(|r| r.recommendation_type == "bloom_write")
         .collect();
 
-    let actual_value: serde_json::Value =
-        serde_json::to_value(&bloom_only).expect("serializable");
+    let actual_value: serde_json::Value = serde_json::to_value(&bloom_only).expect("serializable");
     let expected_text = load_expected_json();
     let expected_value: serde_json::Value =
         serde_json::from_str(&expected_text).expect("expected fixture parses");
 
     if actual_value != expected_value {
         if std::env::var("UPDATE_SNAPSHOTS").as_deref() == Ok("1") {
-            let pretty = serde_json::to_string_pretty(&bloom_only).expect("json")
-                + "\n";
+            let pretty = serde_json::to_string_pretty(&bloom_only).expect("json") + "\n";
             let path = fixtures_dir().join("expected.json");
             fs::write(&path, &pretty).expect("write updated fixture");
             eprintln!("[SHELF-52] UPDATE_SNAPSHOTS=1 → wrote {}", path.display());
@@ -169,9 +183,7 @@ fn bloom_write_matches_committed_fixture() {
             "--- actual ---\n{}",
             serde_json::to_string_pretty(&bloom_only).expect("json")
         );
-        panic!(
-            "bloom_write snapshot mismatch (re-run with UPDATE_SNAPSHOTS=1 to refresh)"
-        );
+        panic!("bloom_write snapshot mismatch (re-run with UPDATE_SNAPSHOTS=1 to refresh)");
     }
 }
 

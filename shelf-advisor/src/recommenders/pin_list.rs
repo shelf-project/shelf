@@ -245,6 +245,7 @@ mod tests {
             equality_predicate_columns: vec![],
             wall_time: Duration::from_secs(wall_secs),
             physical_input_bytes: bytes,
+            query_text: String::new(),
         }
     }
 

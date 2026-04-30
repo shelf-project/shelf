@@ -49,10 +49,14 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use crate::config::{AdvisorConfig, BloomWriteConfig};
+#[cfg(test)]
+use crate::config::AdvisorConfig;
+use crate::config::BloomWriteConfig;
 use crate::cost::Cents;
 use crate::error::Result;
-use crate::input::{IcebergEventLogReader, IcebergManifestReader, QueryRecord};
+use crate::input::QueryRecord;
+#[cfg(test)]
+use crate::input::{IcebergEventLogReader, IcebergManifestReader};
 use crate::output::Recommendation;
 use crate::recommenders::Recommender;
 
@@ -76,10 +80,11 @@ impl Recommender for BloomWriteRecommender {
 
     fn analyze(
         &self,
-        config: &AdvisorConfig,
-        event_log: &dyn IcebergEventLogReader,
-        manifests: &dyn IcebergManifestReader,
+        ctx: &crate::recommenders::AnalysisContext<'_>,
     ) -> Result<Vec<Recommendation>> {
+        let config = ctx.config;
+        let event_log = ctx.event_log;
+        let manifests = ctx.manifests;
         let cfg = &config.bloom_write;
         let records = event_log.read_window(config.window)?;
         let agg = aggregate_by_table(&records);
@@ -107,8 +112,7 @@ impl Recommender for BloomWriteRecommender {
             }
 
             let table_files = manifests.list_files(&table).unwrap_or_default();
-            let table_total_bytes: u64 =
-                table_files.iter().map(|f| f.file_size_bytes).sum();
+            let table_total_bytes: u64 = table_files.iter().map(|f| f.file_size_bytes).sum();
             // Operators sometimes run the advisor against tables the
             // manifest reader can't open (mismatched catalog, bad
             // creds, etc.) — fall back to the largest observed query
@@ -127,17 +131,14 @@ impl Recommender for BloomWriteRecommender {
             let ndv = manifests.ndv(&table, &primary)?;
             let selectivity = selectivity_estimate(ndv, stats.row_count_hint(), cfg);
 
-            let saving_per_query_bytes = projected_saving_bytes(
-                stats.avg_input_bytes(),
-                selectivity,
-            );
+            let saving_per_query_bytes =
+                projected_saving_bytes(stats.avg_input_bytes(), selectivity);
             let rewrite_bytes = table_total_bytes.saturating_mul(2);
             let payback = payback_queries(rewrite_bytes, saving_per_query_bytes);
             let severity = Severity::from_payback(payback);
             let confidence = severity.confidence();
 
-            let rewrite_cents =
-                Cents::from_bytes_rewrite(rewrite_bytes, cfg.cost_cents_per_gib);
+            let rewrite_cents = Cents::from_bytes_rewrite(rewrite_bytes, cfg.cost_cents_per_gib);
 
             out.push(build_recommendation(
                 &table,
@@ -173,8 +174,9 @@ pub(crate) struct TableStats {
 impl TableStats {
     fn add(&mut self, rec: &QueryRecord) {
         self.query_count = self.query_count.saturating_add(1);
-        self.total_input_bytes =
-            self.total_input_bytes.saturating_add(rec.physical_input_bytes as u128);
+        self.total_input_bytes = self
+            .total_input_bytes
+            .saturating_add(rec.physical_input_bytes as u128);
         self.max_input_bytes = self.max_input_bytes.max(rec.physical_input_bytes);
         self.total_wall_time_ms = self
             .total_wall_time_ms
@@ -293,9 +295,8 @@ pub(crate) fn selectivity_estimate(
     }
 }
 
-/// `expected_bytes_saved_per_query = total_query_input_bytes
-/// * (1 - selectivity)`. Saturating cast back to `u64` so a
-/// pathological selectivity of 0 doesn't overflow.
+/// `expected_bytes_saved_per_query = total_query_input_bytes * (1 - selectivity)`.
+/// Saturating cast back to `u64` so a pathological selectivity of 0 doesn't overflow.
 pub(crate) fn projected_saving_bytes(avg_input_bytes: u64, selectivity: f64) -> u64 {
     let s = selectivity.clamp(0.0, 1.0);
     let saved = (avg_input_bytes as f64) * (1.0 - s);
@@ -639,7 +640,7 @@ mod tests {
     #[test]
     fn projected_saving_at_selectivity_050() {
         let saved = projected_saving_bytes(2 * GIB, 0.5);
-        assert_eq!(saved, (2 * GIB as f64 * 0.5) as u64);
+        assert_eq!(saved, ((2 * GIB) as f64 * 0.5) as u64);
     }
 
     #[test]
@@ -765,16 +766,19 @@ mod tests {
                 )
             })
             .collect();
-        let cfg = AdvisorConfig {
-            event_log_table: "x".into(),
-            output_path: "/dev/null".into(),
-            window: Duration::from_secs(86_400),
-            top_n_per_table: 8,
-            bloom_write: BloomWriteConfig::defaults(),
+        let cfg = AdvisorConfig::defaults("/dev/null".into(), Duration::from_secs(86_400));
+        let log = StubLog { recs };
+        let manifests = StubManifests;
+        let stats = crate::input::FixtureShelfdStatsReader::empty();
+        let tables: Vec<String> = vec!["cat.s.t".to_string()];
+        let ctx = crate::recommenders::AnalysisContext {
+            config: &cfg,
+            event_log: &log,
+            manifests: &manifests,
+            shelfd_stats: &stats,
+            tables: &tables,
         };
-        let r = BloomWriteRecommender::new()
-            .analyze(&cfg, &StubLog { recs }, &StubManifests)
-            .unwrap();
+        let r = BloomWriteRecommender::new().analyze(&ctx).unwrap();
         assert!(r.is_empty());
     }
 
@@ -813,16 +817,19 @@ mod tests {
             })
             .collect();
 
-        let cfg = AdvisorConfig {
-            event_log_table: "x".into(),
-            output_path: "/dev/null".into(),
-            window: Duration::from_secs(86_400),
-            top_n_per_table: 8,
-            bloom_write: BloomWriteConfig::defaults(),
+        let cfg = AdvisorConfig::defaults("/dev/null".into(), Duration::from_secs(86_400));
+        let log = StubLog { recs };
+        let manifests = StubManifests;
+        let stats = crate::input::FixtureShelfdStatsReader::empty();
+        let tables: Vec<String> = vec!["cat.s.t".to_string()];
+        let ctx = crate::recommenders::AnalysisContext {
+            config: &cfg,
+            event_log: &log,
+            manifests: &manifests,
+            shelfd_stats: &stats,
+            tables: &tables,
         };
-        let r = BloomWriteRecommender::new()
-            .analyze(&cfg, &StubLog { recs }, &StubManifests)
-            .unwrap();
+        let r = BloomWriteRecommender::new().analyze(&ctx).unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].recommendation_type, "bloom_write");
         assert_eq!(r[0].table, "cat.s.t");
@@ -876,16 +883,19 @@ mod tests {
                 )
             })
             .collect();
-        let cfg = AdvisorConfig {
-            event_log_table: "x".into(),
-            output_path: "/dev/null".into(),
-            window: Duration::from_secs(86_400),
-            top_n_per_table: 8,
-            bloom_write: BloomWriteConfig::defaults(),
+        let cfg = AdvisorConfig::defaults("/dev/null".into(), Duration::from_secs(86_400));
+        let log = StubLog { recs };
+        let manifests = StubManifests;
+        let stats = crate::input::FixtureShelfdStatsReader::empty();
+        let tables: Vec<String> = vec!["cat.s.t".to_string()];
+        let ctx = crate::recommenders::AnalysisContext {
+            config: &cfg,
+            event_log: &log,
+            manifests: &manifests,
+            shelfd_stats: &stats,
+            tables: &tables,
         };
-        let r = BloomWriteRecommender::new()
-            .analyze(&cfg, &StubLog { recs }, &StubManifests)
-            .unwrap();
+        let r = BloomWriteRecommender::new().analyze(&ctx).unwrap();
         assert_eq!(r.len(), 1);
         let ev = &r[0].rationale["evidence"];
         let selectivity = ev
@@ -935,25 +945,29 @@ mod tests {
                 )
             })
             .collect();
-        let cfg = AdvisorConfig {
-            event_log_table: "x".into(),
-            output_path: "/dev/null".into(),
-            window: Duration::from_secs(86_400),
-            top_n_per_table: 8,
-            bloom_write: BloomWriteConfig::defaults(),
+        let cfg = AdvisorConfig::defaults("/dev/null".into(), Duration::from_secs(86_400));
+        let stats = crate::input::FixtureShelfdStatsReader::empty();
+        let tables: Vec<String> = vec!["cat.s.t".to_string()];
+        let log1 = StubLog { recs: recs.clone() };
+        let manifests1 = StubManifests;
+        let ctx1 = crate::recommenders::AnalysisContext {
+            config: &cfg,
+            event_log: &log1,
+            manifests: &manifests1,
+            shelfd_stats: &stats,
+            tables: &tables,
         };
-        let r1 = BloomWriteRecommender::new()
-            .analyze(
-                &cfg,
-                &StubLog {
-                    recs: recs.clone(),
-                },
-                &StubManifests,
-            )
-            .unwrap();
-        let r2 = BloomWriteRecommender::new()
-            .analyze(&cfg, &StubLog { recs }, &StubManifests)
-            .unwrap();
+        let r1 = BloomWriteRecommender::new().analyze(&ctx1).unwrap();
+        let log2 = StubLog { recs };
+        let manifests2 = StubManifests;
+        let ctx2 = crate::recommenders::AnalysisContext {
+            config: &cfg,
+            event_log: &log2,
+            manifests: &manifests2,
+            shelfd_stats: &stats,
+            tables: &tables,
+        };
+        let r2 = BloomWriteRecommender::new().analyze(&ctx2).unwrap();
         let j1 = serde_json::to_string(&r1).unwrap();
         let j2 = serde_json::to_string(&r2).unwrap();
         assert_eq!(j1, j2, "two analyze runs must be byte-identical");

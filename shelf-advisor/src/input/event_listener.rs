@@ -149,6 +149,7 @@ mod tests {
             equality_predicate_columns: vec!["user_id".to_string()],
             wall_time: Duration::from_secs(7),
             physical_input_bytes: 1_234_567,
+            query_text: String::new(),
         };
         let json = serde_json::to_string(std::slice::from_ref(&row)).expect("encode");
         let decoded: Vec<QueryRecord> = serde_json::from_str(&json).expect("decode");
@@ -165,6 +166,7 @@ mod tests {
             equality_predicate_columns: vec![],
             wall_time: Duration::from_secs(1),
             physical_input_bytes: 1,
+            query_text: String::new(),
         }]);
         let a = r.read_window(Duration::from_secs(60)).unwrap();
         let b = r.read_window(Duration::from_secs(86_400)).unwrap();
