@@ -180,7 +180,9 @@ impl ShelfdStatsReader for HttpShelfdStatsReader {
                 {
                     Ok(resp) => match resp.json::<PodStats>().await {
                         Ok(p) => out.push(p),
-                        Err(e) => tracing::warn!(url = %u, error = %e, "shelfd /stats decode failed"),
+                        Err(e) => {
+                            tracing::warn!(url = %u, error = %e, "shelfd /stats decode failed")
+                        }
                     },
                     Err(e) => {
                         tracing::warn!(url = %u, error = %e, "shelfd /stats fetch failed");

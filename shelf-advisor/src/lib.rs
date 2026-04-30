@@ -140,25 +140,27 @@ mod tests {
     fn pipeline_is_deterministic_byte_for_byte() {
         let cfg = AdvisorConfig::defaults(PathBuf::from("/tmp/x"), Duration::from_secs(86_400));
         // One table with 16 1-MiB files → optimize triggers;
-        // 8 hot queries × 50s × 100 MiB scanned → pin_list triggers.
+        // 16 hot queries × 1000s × 100 MiB scanned → pin_list triggers
+        // (frequency × wall_secs = 1.6e4 → confidence ≈ 0.61, just
+        // above the 0.6 default `pin_list.min_confidence` floor).
         let mut manifests: HashMap<String, Vec<DataFile>> = HashMap::new();
         manifests.insert(
             "demo.events.purchases".to_string(),
             (0..16)
                 .map(|i| DataFile {
                     path: format!("s3://x/p/{i}.parquet"),
-                    file_size_bytes: 1 * 1024 * 1024,
+                    file_size_bytes: 1024 * 1024,
                     record_count: 1,
                     spec_id: 0,
                 })
                 .collect(),
         );
-        let rows: Vec<QueryRecord> = (0..8)
+        let rows: Vec<QueryRecord> = (0..16)
             .map(|i| QueryRecord {
                 query_id: format!("q-{i}"),
                 table: "demo.events.purchases".to_string(),
                 equality_predicate_columns: vec![],
-                wall_time: Duration::from_secs(50),
+                wall_time: Duration::from_secs(1000),
                 physical_input_bytes: 100 * 1024 * 1024,
             })
             .collect();
@@ -170,8 +172,12 @@ mod tests {
             shelfd_stats: &s1,
             tables: &t1,
         };
-        let env1 = run_pipeline(&ctx1, &default_recommenders(), "2026-04-30T00:00:00Z".into())
-            .expect("run 1");
+        let env1 = run_pipeline(
+            &ctx1,
+            &default_recommenders(),
+            "2026-04-30T00:00:00Z".into(),
+        )
+        .expect("run 1");
         let (e2, m2, s2, t2) = empty_ctx_inner(&cfg, rows, manifests, vec![]);
         let ctx2 = AnalysisContext {
             config: &cfg,
@@ -180,8 +186,12 @@ mod tests {
             shelfd_stats: &s2,
             tables: &t2,
         };
-        let env2 = run_pipeline(&ctx2, &default_recommenders(), "2026-04-30T00:00:00Z".into())
-            .expect("run 2");
+        let env2 = run_pipeline(
+            &ctx2,
+            &default_recommenders(),
+            "2026-04-30T00:00:00Z".into(),
+        )
+        .expect("run 2");
         let j1 = serde_json::to_string_pretty(&env1).unwrap();
         let j2 = serde_json::to_string_pretty(&env2).unwrap();
         assert_eq!(j1, j2);

@@ -98,11 +98,7 @@ impl OptimizeRecommender {
             .filter(|f| f.file_size_bytes < small_file_bytes)
             .map(|f| f.file_size_bytes)
             .sum();
-        let avg_file_bytes = if total_files == 0 {
-            0
-        } else {
-            total_bytes / total_files
-        };
+        let avg_file_bytes = total_bytes.checked_div(total_files).unwrap_or(0);
         let confidence = round_conf(ratio.clamp(0.5, 0.95));
         Some(Recommendation {
             recommendation_type: Self::KIND.to_string(),
@@ -216,7 +212,7 @@ mod tests {
     fn high_small_file_ratio_emits() {
         // 12 files, 10 of which are 1 MiB → ratio ~0.83.
         let r = OptimizeRecommender::new();
-        let mut files: Vec<DataFile> = (0..10).map(|_| df(1 * 1024 * 1024)).collect();
+        let mut files: Vec<DataFile> = (0..10).map(|_| df(1024 * 1024)).collect();
         files.extend((0..2).map(|_| df(64 * 1024 * 1024)));
         let out = r
             .score_table("demo.t", &files, 32 * 1024 * 1024, 0.3, 8)
@@ -234,7 +230,7 @@ mod tests {
     fn ratio_just_below_threshold_skipped() {
         // 10 files, 2 small → ratio 0.20, below 0.30 threshold.
         let r = OptimizeRecommender::new();
-        let mut files: Vec<DataFile> = (0..2).map(|_| df(1 * 1024 * 1024)).collect();
+        let mut files: Vec<DataFile> = (0..2).map(|_| df(1024 * 1024)).collect();
         files.extend((0..8).map(|_| df(64 * 1024 * 1024)));
         let out = r.score_table("demo.t", &files, 32 * 1024 * 1024, 0.3, 8);
         assert!(out.is_none());
@@ -244,7 +240,7 @@ mod tests {
     fn confidence_clamped_below_max() {
         // 100 % small files → confidence clamped at 0.95.
         let r = OptimizeRecommender::new();
-        let files: Vec<DataFile> = (0..16).map(|_| df(1 * 1024 * 1024)).collect();
+        let files: Vec<DataFile> = (0..16).map(|_| df(1024 * 1024)).collect();
         let out = r
             .score_table("demo.t", &files, 32 * 1024 * 1024, 0.3, 8)
             .expect("emit");

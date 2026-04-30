@@ -188,10 +188,7 @@ pub(crate) fn aggregate_pool_capacity(pods: &[PodStats]) -> Option<u64> {
     if pods.is_empty() {
         return None;
     }
-    let total: u64 = pods
-        .iter()
-        .map(|p| p.rowgroup_pool.capacity_bytes)
-        .sum();
+    let total: u64 = pods.iter().map(|p| p.rowgroup_pool.capacity_bytes).sum();
     if total == 0 {
         None
     } else {
@@ -253,11 +250,7 @@ mod tests {
 
     #[test]
     fn aggregate_groups_by_table() {
-        let rows = vec![
-            row("a", 1, 100),
-            row("b", 2, 200),
-            row("a", 3, 300),
-        ];
+        let rows = vec![row("a", 1, 100), row("b", 2, 200), row("a", 3, 300)];
         let aggs = PinListRecommender::aggregate(&rows);
         assert_eq!(aggs.len(), 2);
         let a = aggs.iter().find(|x| x.table == "a").unwrap();
@@ -320,8 +313,8 @@ mod tests {
     fn confidence_floor_and_ceiling() {
         // Floor: 1 query × 0.001s gives raw ≈ 0.4 - 0.15 = 0.25 → clamped to 0.5.
         assert!((pin_list_confidence(1, 0.001) - 0.5).abs() < 1e-3);
-        // Ceiling: huge product → clamped to 0.95.
-        assert!((pin_list_confidence(1_000_000, 1_000.0) - 0.95).abs() < 1e-3);
+        // Ceiling: f × w = 1e18 → raw = 0.4 + 0.9 = 1.3 → clamped to 0.95.
+        assert!((pin_list_confidence(1_000_000_000, 1.0e9) - 0.95).abs() < 1e-3);
     }
 
     #[test]

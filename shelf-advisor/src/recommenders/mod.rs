@@ -121,8 +121,7 @@ mod tests {
 
     #[test]
     fn default_set_has_four_kinds() {
-        let kinds: Vec<&'static str> =
-            default_recommenders().iter().map(|r| r.kind()).collect();
+        let kinds: Vec<&'static str> = default_recommenders().iter().map(|r| r.kind()).collect();
         assert!(kinds.contains(&"optimize_targets"));
         assert!(kinds.contains(&"pin_list_candidates"));
         assert!(kinds.contains(&"bloom_filter_columns"));

@@ -155,7 +155,11 @@ fn dry_run_matches_golden_snapshot() {
             (lc - sc).abs() < 0.001,
             "[{i}] confidence drifted: live={lc} snap={sc}"
         );
-        compare_numeric_object(&l["rationale"], &s["rationale"], &format!("rec[{i}].rationale"));
+        compare_numeric_object(
+            &l["rationale"],
+            &s["rationale"],
+            &format!("rec[{i}].rationale"),
+        );
         // Suggested change is structurally exact (string equality).
         assert_eq!(
             l["suggested_change"], s["suggested_change"],

@@ -36,7 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `shelf-advisor/docs/recommenders.md`.
 
 ### Added
-<<<<<<< HEAD
 
 - **SHELF-45 — Compaction-aware re-warm reactor.** New module
   `shelfd/src/compaction_rewarm.rs` watches a stream of

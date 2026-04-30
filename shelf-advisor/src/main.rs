@@ -29,11 +29,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
 use shelf_advisor::{
-    default_recommenders, render_rfc3339_utc, run_pipeline, run_pipeline_bare,
-    write_envelope_json, write_per_kind_dir, write_recommendations_json, AdvisorConfig,
-    AnalysisContext, DataFile, FixtureEventLogReader, FixtureManifestReader,
-    FixtureShelfdStatsReader, HttpShelfdStatsReader, IcebergEventLogReader, IcebergManifestReader,
-    PodStats, QueryRecord, ShelfdStatsReader,
+    default_recommenders, render_rfc3339_utc, run_pipeline, run_pipeline_bare, write_envelope_json,
+    write_per_kind_dir, write_recommendations_json, AdvisorConfig, AnalysisContext, DataFile,
+    FixtureEventLogReader, FixtureManifestReader, FixtureShelfdStatsReader, HttpShelfdStatsReader,
+    IcebergEventLogReader, IcebergManifestReader, PodStats, QueryRecord, ShelfdStatsReader,
 };
 
 /// CLI form of the recommendation-type discriminator. clap's
@@ -253,9 +252,8 @@ async fn main() -> Result<()> {
             };
 
             if let Some(out) = output {
-                write_envelope_json(&out, &env).with_context(|| {
-                    format!("failed to write envelope to {}", out.display())
-                })?;
+                write_envelope_json(&out, &env)
+                    .with_context(|| format!("failed to write envelope to {}", out.display()))?;
                 tracing::info!(
                     count = env.recommendations.len(),
                     output = %out.display(),
@@ -374,8 +372,8 @@ fn load_base_config(explicit: Option<&std::path::Path>) -> Result<AdvisorConfig>
     };
     if let Some(p) = path {
         if p.exists() {
-            return Ok(AdvisorConfig::from_yaml_file(&p)
-                .with_context(|| format!("loading config from {}", p.display()))?);
+            return AdvisorConfig::from_yaml_file(&p)
+                .with_context(|| format!("loading config from {}", p.display()));
         }
     }
     Ok(AdvisorConfig::defaults(
@@ -433,7 +431,7 @@ async fn run_against_live(
         tables: &tables,
     };
     let pin = as_of.unwrap_or_else(|| render_rfc3339_utc(SystemTime::now()));
-    Ok(run_pipeline(&ctx, &default_recommenders(), pin)?)
+    run_pipeline(&ctx, &default_recommenders(), pin)
 }
 
 async fn run_against_live_bare(cfg: &AdvisorConfig) -> Result<Vec<shelf_advisor::Recommendation>> {
@@ -448,7 +446,7 @@ async fn run_against_live_bare(cfg: &AdvisorConfig) -> Result<Vec<shelf_advisor:
         shelfd_stats: stats.as_ref(),
         tables: &tables,
     };
-    Ok(run_pipeline_bare(&ctx, &default_recommenders())?)
+    run_pipeline_bare(&ctx, &default_recommenders())
 }
 
 fn build_live_stats_reader(cfg: &AdvisorConfig) -> Result<Box<dyn ShelfdStatsReader>> {
@@ -519,8 +517,7 @@ fn run_against_fixture(
     path: &std::path::Path,
     as_of: Option<String>,
 ) -> Result<shelf_advisor::Envelope> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("read fixture {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("read fixture {}", path.display()))?;
     let doc: FixtureDoc = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse fixture {}", path.display()))?;
 
@@ -543,7 +540,7 @@ fn run_against_fixture(
         tables: &tables,
     };
     let pin = as_of.unwrap_or_else(|| render_rfc3339_utc(SystemTime::now()));
-    Ok(run_pipeline(&ctx, &default_recommenders(), pin)?)
+    run_pipeline(&ctx, &default_recommenders(), pin)
 }
 
 #[derive(Debug, serde::Deserialize)]

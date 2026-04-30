@@ -135,7 +135,7 @@ mod tests {
             wall_time: Duration::from_secs(7),
             physical_input_bytes: 1_234_567,
         };
-        let json = serde_json::to_string(&[row.clone()]).expect("encode");
+        let json = serde_json::to_string(std::slice::from_ref(&row)).expect("encode");
         let decoded: Vec<QueryRecord> = serde_json::from_str(&json).expect("decode");
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].query_id, row.query_id);

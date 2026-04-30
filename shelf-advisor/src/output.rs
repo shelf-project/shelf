@@ -132,14 +132,10 @@ pub struct Envelope {
 
 impl Envelope {
     /// Build an envelope from already-finalised recommendations
-    /// + an `as_of` timestamp. The timestamp is the only piece
-    /// of wall-clock state in the output; everything else is a
-    /// pure function of the inputs.
-    pub fn new(
-        as_of: String,
-        inputs: Inputs,
-        mut recommendations: Vec<Recommendation>,
-    ) -> Self {
+    /// plus an `as_of` timestamp. The timestamp is the only
+    /// piece of wall-clock state in the output; everything else
+    /// is a pure function of the inputs.
+    pub fn new(as_of: String, inputs: Inputs, mut recommendations: Vec<Recommendation>) -> Self {
         sort_for_emission(&mut recommendations);
         Self {
             generator: "shelf-advisor".to_string(),
@@ -355,11 +351,7 @@ mod tests {
             rec("optimize_targets", "t1", 0.9, "small_file_ratio", 50),
             rec("pin_list_candidates", "t2", 0.7, "freq", 100),
         ];
-        let env = Envelope::new(
-            "2026-04-30T00:00:00Z".to_string(),
-            Inputs::default(),
-            recs,
-        );
+        let env = Envelope::new("2026-04-30T00:00:00Z".to_string(), Inputs::default(), recs);
         let opt = env.for_kind("optimize_targets");
         assert_eq!(opt.recommendations.len(), 1);
         assert_eq!(opt.recommendations[0].table, "t1");
