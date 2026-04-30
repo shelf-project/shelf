@@ -17,7 +17,28 @@ Shelf follows [Semantic Versioning 2.0](https://semver.org/spec/v2.0.0.html).
   surface.
 
 Pre-1.0 releases (`v0.x`) explicitly do *not* carry SemVer guarantees;
-the v0.5 line is the v1.0 release candidate (see `ROADMAP.md`).
+the v0.5 line was the v1.0 release candidate (see `ROADMAP.md`). v1.0
+shipped on 2026-04-30 (see `CHANGELOG.md`); from this tag onward every
+release adheres to SemVer 2.0.
+
+## Soak gates and BDFL override
+
+Major releases (`vX.0.0`) default to a **14-day post-rollout soak**
+between the final release candidate and the GA tag. The soak is
+operator-facing: a real cluster runs the RC, real users hit the path,
+real metrics show stability before the API surface is locked.
+
+The BDFL (year-1 governance, see `MAINTAINERS.md`) may **waive** the
+soak gate when alternative evidence is in hand — typically when an RC
+already soaked on the origin cluster under a stable runtime, and the
+GA tag ships a byte-identical runtime tree (only version metadata
+bumped). When the override is exercised, the substitute evidence
+**must** be documented in `CHANGELOG.md` under the GA release
+heading: which RC soaked, on which workload, for how long, with which
+quantitative outcome. Audit-ready, not "trust me".
+
+Patch and minor releases do not have a soak gate; they ship on the
+patch / minor cadence below.
 
 ## Release branches
 
