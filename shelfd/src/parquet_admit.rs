@@ -43,7 +43,7 @@
 //!    a cleanliness invariant — false hits would cache as the wrong
 //!    `Pool::Metadata` slot, not corrupt bytes.
 //! 5. **Default off.** `cache.bloom.enabled=false` ships in the OSS
-//!    chart; the penpencil overlay flips it on AFTER the canary gate.
+//!    chart; operator overlays flip it on AFTER the canary gate.
 //!
 //! ## Interaction with `iceberg.metadata-cache.enabled=false`
 //!

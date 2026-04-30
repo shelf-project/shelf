@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     minFooterBytes}` and are rendered into the shelfd ConfigMap as
     `bloom_admission.{enabled,max_index_entries,min_footer_bytes}`.
   - **Default off** (`cache.bloom.enabled=false`) on the OSS chart
-    and on the penpencil overlay. Flip per replica as a 24 h canary
+    and on operator overlays. Flip per replica as a 24 h canary
     after SHELF-49 (range coalesce) and B1 (zstd metadata
     compression) have soaked. See
     `shelfd/docs/design-notes/SHELF-46-bloom-aware-footer-admission.md`
