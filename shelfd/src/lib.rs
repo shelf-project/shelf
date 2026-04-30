@@ -47,6 +47,7 @@
 pub mod ab_tag;
 pub mod admission;
 pub mod admission_limiter;
+pub mod admission_wtinylfu;
 pub mod aws_chunked;
 pub mod coalesce;
 // Dormant modules — present in the tree but with zero non-test callers

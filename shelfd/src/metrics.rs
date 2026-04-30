@@ -1084,6 +1084,28 @@ pub static COMPRESS_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("register compress_seconds")
 });
 
+/// SHELF-33 — W-TinyLFU admission gate decisions, per outcome.
+pub static WTINYLFU_DECISIONS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_wtinylfu_decisions_total",
+        "W-TinyLFU admission decisions, by outcome label.",
+        &["outcome"],
+        REGISTRY
+    )
+    .expect("register wtinylfu_decisions_total")
+});
+
+/// SHELF-33 — W-TinyLFU sketch / doorkeeper decay events.
+pub static WTINYLFU_DECAYS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_wtinylfu_decays_total",
+        "W-TinyLFU window-decay events (sketch + doorkeeper halve / clear).",
+        &["component"],
+        REGISTRY
+    )
+    .expect("register wtinylfu_decays_total")
+});
+
 /// Stable list of metric series `shelfd` exposes on `/metrics` in the
 /// Phase-0 gate build. Kept as module-level data so `docs/metrics.md`
 /// and the tests can both reference a single source of truth; the
@@ -1129,6 +1151,9 @@ pub const EXPOSED_SERIES: &[&str] = &[
     // SHELF-29 — independent-queue admission rate-limiter.
     "shelf_lodc_admit_tokens_available",
     "shelf_lodc_admit_burst_capacity",
+    // SHELF-33 — W-TinyLFU admission gate observability.
+    "shelf_wtinylfu_decisions_total",
+    "shelf_wtinylfu_decays_total",
     // SHELF-23 — peer-fetch outcome counters.
     "shelf_peer_hit_total",
     "shelf_peer_miss_total",
@@ -1162,6 +1187,9 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_compress_bytes_out_total",
     "shelf_compress_outcomes_total",
     "shelf_compress_seconds",
+    // SHELF-33 — W-TinyLFU admission gate telemetry.
+    "shelf_wtinylfu_decisions_total",
+    "shelf_wtinylfu_decays_total",
 ];
 
 #[cfg(test)]
@@ -1228,6 +1256,8 @@ mod tests {
             LODC_QUEUE_DEPTH.desc(),
             LODC_ADMIT_TOKENS_AVAILABLE.desc(),
             LODC_ADMIT_BURST_CAPACITY.desc(),
+            WTINYLFU_DECISIONS_TOTAL.desc(),
+            WTINYLFU_DECAYS_TOTAL.desc(),
             PEER_HIT_TOTAL.desc(),
             PEER_MISS_TOTAL.desc(),
             PEER_TIMEOUT_TOTAL.desc(),
@@ -1360,6 +1390,10 @@ mod tests {
         LODC_ADMIT_BURST_CAPACITY
             .with_label_values(&["rowgroup"])
             .set(0);
+        WTINYLFU_DECISIONS_TOTAL
+            .with_label_values(&["admit"])
+            .inc_by(0);
+        WTINYLFU_DECAYS_TOTAL.with_label_values(&["both"]).inc_by(0);
         PEER_HIT_TOTAL.with_label_values(&["metadata"]).inc_by(0);
         PEER_MISS_TOTAL.with_label_values(&["metadata"]).inc_by(0);
         PEER_TIMEOUT_TOTAL
