@@ -467,6 +467,49 @@ cache:
     # the parser walk the trailing block once it has the bytes.
     minFooterBytes: 65536
 
+  # ---------------------------------------------------------------------------
+  # SHELF-45 — compaction-aware re-warm reactor.
+  #
+  # When an Iceberg table is compacted (`ALTER TABLE … EXECUTE optimize`,
+  # `expire_snapshots`, `remove_orphan_files`), shelf's content-addressed
+  # keys (per ADR-0011) automatically invalidate, but every key the next
+  # query asks for is cold — which becomes the morning's largest S3
+  # spike. The reactor watches the Iceberg metadata stream, detects
+  # compaction-class events, and proactively re-warms the new file paths
+  # into the rowgroup pool BEFORE the cold-miss thundering herd hits.
+  #
+  # Default OFF: the reactor needs the SHELF-37 listener (or an
+  # equivalent metadata polling worker) plumbed in as a producer before
+  # it sees real events. Enabling it without an event source is
+  # harmless — the reactor parks on an empty channel.
+  #
+  # Rate-limit math: 50 MiB/s/pod × 60 s = ~3 GiB/min/pod re-warm
+  # bandwidth, which absorbs a 5-10 GiB compaction in a few minutes
+  # without ever crowding out client reads (origin.pool.maxConnections
+  # = 128 worst-case concurrent client GETs ≫ 4 reactor GETs).
+  # ---------------------------------------------------------------------------
+  rewarm:
+    # -- Master switch. Off by default; flip after the SHELF-37 listener
+    # (PR #66) is plumbed in as the event producer.
+    enabled: false
+    # -- Token-bucket refill rate, bytes/sec. 50 MiB/s/pod default.
+    # Set 0 to pause re-warm without disabling the loop (kill-switch).
+    maxBytesPerSec: 52428800
+    # -- Maximum concurrent in-flight re-warm fetches per pod. 4 keeps
+    # the re-warm semaphore at least 4× smaller than the client budget
+    # (origin.pool.maxConnections = 128 in chart default). The
+    # property test in `shelfd/src/compaction_rewarm.rs` pins the
+    # invariant.
+    maxConcurrentFiles: 4
+    # -- Bounded mpsc capacity for the snapshot-event queue. Excess
+    # events are dropped with `outcome="dropped_rate_limit"` rather
+    # than back-pressuring the producer.
+    queueCapacity: 1024
+    # -- Snapshot lag tolerance: if the producer's `committed_at`
+    # exceeds this, a warning is logged and the lag is observed via
+    # `shelf_rewarm_lag_seconds`. Older snapshots still get re-warmed.
+    snapshotLagToleranceSecs: 120
+
 # ---------------------------------------------------------------------------
 # Origin (S3) client — [plan §4 SHELF-05]
 # ---------------------------------------------------------------------------

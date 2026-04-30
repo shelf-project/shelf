@@ -50,6 +50,10 @@ pub mod admission_limiter;
 pub mod admission_wtinylfu;
 pub mod aws_chunked;
 pub mod coalesce;
+// SHELF-45 — compaction-aware re-warm reactor. Default-off via
+// config; the module is always compiled so EXPOSED_SERIES sees the
+// Prometheus families on every build.
+pub mod compaction_rewarm;
 // Dormant modules — present in the tree but with zero non-test callers
 // in the current hot/control paths. Gated behind off-by-default Cargo
 // features so default `shelfd` builds ship a smaller binary; the source
