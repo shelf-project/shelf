@@ -152,6 +152,19 @@ pub fn test_config() -> (OriginConfig, PoolsConfig, AdmissionConfig) {
 static METRICS: tokio::sync::OnceCell<Arc<metrics::Registry>> = tokio::sync::OnceCell::const_new();
 
 pub async fn build_state_with_pod_id(pod_id: &str) -> Arc<ServerState> {
+    build_state_with_pod_id_and_cost(pod_id, shelfd::cost::CostState::disabled()).await
+}
+
+/// SHELF-40 — variant that lets the integration tests opt into a
+/// real `CostState` so the dollars-saved counter actually bumps.
+/// Most tests use the disabled sentinel via [`build_state_with_pod_id`]
+/// to avoid touching the global Prometheus registry from unrelated
+/// suites; the SHELF-40 integration test uses this to assert the
+/// counter advances by an exact cents amount.
+pub async fn build_state_with_pod_id_and_cost(
+    pod_id: &str,
+    cost: shelfd::cost::CostState,
+) -> Arc<ServerState> {
     // SAFETY: tests share process-global env; we write the same
     // MinIO credentials on every call, so the writes are idempotent
     // under `--test-threads=N`.
@@ -170,15 +183,18 @@ pub async fn build_state_with_pod_id(pod_id: &str) -> Arc<ServerState> {
         .get_or_init(|| async { Arc::new(metrics::Registry::init().expect("metrics init")) })
         .await
         .clone();
-    let state = Arc::new(ServerState::with_head_lru_and_pod_id(
-        store,
-        origin,
-        router,
-        admission,
-        metrics_reg,
-        head_lru,
-        pod_id.to_owned(),
-    ));
+    let state = Arc::new(
+        ServerState::with_head_lru_and_pod_id(
+            store,
+            origin,
+            router,
+            admission,
+            metrics_reg,
+            head_lru,
+            pod_id.to_owned(),
+        )
+        .with_cost_state(cost),
+    );
     state.mark_ready();
     state
 }

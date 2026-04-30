@@ -143,6 +143,13 @@ pub struct ServerState {
     /// as a fast-revert lever if the coalescer ever ships a
     /// correctness regression in the wild.
     pub coalesce_enabled: AtomicBool,
+    /// SHELF-40 — audit-able $-saved attribution for every cache
+    /// hit. Defaults to a [`crate::cost::CostState::disabled`]
+    /// sentinel so the unit-test harness never accidentally
+    /// publishes synthetic cents. `main` overrides via
+    /// [`Self::with_cost_state`] from the operator-supplied
+    /// `cache.cost.*` config block.
+    pub cost: crate::cost::CostState,
 }
 
 impl ServerState {
@@ -213,6 +220,7 @@ impl ServerState {
             conditional_get_enabled: AtomicBool::new(true),
             coalescer: crate::coalesce::RangeCoalescer::new(),
             coalesce_enabled: AtomicBool::new(true),
+            cost: crate::cost::CostState::disabled(),
         }
     }
 
@@ -225,6 +233,16 @@ impl ServerState {
     pub fn with_peer_fetch(mut self, http: reqwest::Client, stats_port: u16) -> Self {
         self.peer_http = http;
         self.peer_stats_port = stats_port;
+        self
+    }
+
+    /// SHELF-40 builder: install the operator-supplied cost
+    /// model. `main` calls this from the post-config hookup path;
+    /// callers that omit it stay on the [`crate::cost::CostState::disabled`]
+    /// sentinel so test fixtures never accidentally publish
+    /// synthetic dollars.
+    pub fn with_cost_state(mut self, cost: crate::cost::CostState) -> Self {
+        self.cost = cost;
         self
     }
 

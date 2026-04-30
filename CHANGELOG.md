@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SHELF-40 — `shelf_s3_dollars_saved_total` counter and shared `shelf-cost` crate.**
+  New cargo workspace member at `crates/shelf-cost/` exposes a
+  region-aware `CostModel` that converts cache hits into integer-cents of
+  S3 GET + EC2 cross-AZ data-transfer + (opt-in) NAT-gateway data-processing
+  spend avoided. `shelfd` registers two new Prometheus series wired from
+  the existing `s3_shim` / `peer_fetch` hot paths via `ReadOutcome`:
+    - `shelf_s3_dollars_saved_total{region, outcome}` — `IntCounterVec`,
+      unit **cents**. `outcome ∈ {hit_memory, hit_disk, peer}`.
+    - `shelf_s3_dollars_saved_rate_cents_per_sec{region, outcome}` —
+      `IntGaugeVec`, 60 s rolling rate published by an in-process updater
+      task so dashboards don't have to `rate(... [60s]) * 0.01` themselves.
+  Default coefficients match the published AWS price list for `us-east-1`
+  and `ap-south-1` (S3 GET `$0.0004 / 1k`, cross-AZ data transfer
+  `$0.01 / GiB`, NAT processing `$0.045 / GiB`); see
+  [`crates/shelf-cost/README.md`](crates/shelf-cost/README.md) for the
+  citation table and the quarterly refresh runbook. The counter is
+  on by default; flip `cache.cost.enabled: false` in your overlay to
+  disable. Dashboard `charts/shelf/grafana/dashboards/shelf-read-path.json`
+  gains "S3 cost saved (cents/sec, last 60s)" and "S3 cost saved this
+  month (running)" panels. Design note:
+  [`shelfd/docs/design-notes/SHELF-40-dollars-saved-counter.md`](shelfd/docs/design-notes/SHELF-40-dollars-saved-counter.md).
+
 ## [1.0.0-rc.4] — 2026-04-29
 
 Admission-side back-pressure follow-on to rc.3, plus the post-org-migration

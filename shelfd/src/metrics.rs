@@ -769,6 +769,67 @@ pub static ROLLING_HIT_RATIO_BPS: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("register rolling_hit_ratio_bps")
 });
 
+/// SHELF-40 — cumulative S3 + data-transfer cents *saved* by serving
+/// reads out of cache instead of origin S3.
+///
+/// **Unit is integer cents**, not dollars. Dashboards multiply by
+/// `0.01` explicitly when rendering — any panel that drops the
+/// multiplier reads off by a factor of 100, which is exactly the
+/// "lying to operators by calling the unit dollars" failure mode
+/// SHELF-40 acceptance forbids. The series carries `region`
+/// (`us-east-1`, `ap-south-1`, …) and `outcome` (`hit_memory`,
+/// `hit_disk`, `peer`) labels so a multi-region cluster can split
+/// savings by region while a single-region cluster gets a
+/// constant `region` label that compresses cleanly in PromQL.
+///
+/// Values come from `shelf_cost::CostModel::dollars_saved` —
+/// the audit-able formula lives in `crates/shelf-cost/`. The
+/// counter never decrements; rollback is "delete the series" via
+/// a Prometheus relabel, not a runtime knob.
+pub static S3_DOLLARS_SAVED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_s3_dollars_saved_total",
+        "Cumulative S3 + cross-AZ + NAT dollars *saved* by serving \
+         from shelf, in **integer cents**. Multiply by 0.01 to \
+         render dollars. Region + outcome carry the same shape as \
+         shelf_hits_total / hit_memory|hit_disk plus the SHELF-23 \
+         `peer` outcome. Source formula: crates/shelf-cost/.",
+        &["region", "outcome"],
+        REGISTRY
+    )
+    .expect("register s3_dollars_saved_total")
+});
+
+/// SHELF-40 — 60s rolling rate helper for [`S3_DOLLARS_SAVED_TOTAL`].
+///
+/// Operators care most about *rate* ("are we saving money right
+/// now?"); Prometheus can compute `rate(... [60s])` itself, but
+/// every dashboard that wants the cents-per-second number ends up
+/// re-deriving the same expression with the unit-conversion
+/// multiplier (`0.01` to render dollars/sec, `3600` to project to
+/// dollars/hour) baked in. This gauge ships the rolling rate as
+/// already-correct **cents/sec** so the dashboard just drops it
+/// into a `stat` panel.
+///
+/// Sampled by the SHELF-40 rate-updater task (see `crate::cost`)
+/// once per second over a 60-sample sliding window. Reset to zero
+/// at boot; the first 60 s of any pod's lifetime under-reports
+/// (the window has not filled yet) — that's the same trade-off
+/// `shelf_rolling_hit_ratio_bps` accepts and dashboards already
+/// know how to read.
+pub static S3_DOLLARS_SAVED_RATE_CENTS_PER_SEC: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_s3_dollars_saved_rate_cents_per_sec",
+        "60s rolling rate of shelf_s3_dollars_saved_total, in \
+         **integer cents per second**. Updated once per second by \
+         the SHELF-40 rate-updater task. Multiply by 0.01 for \
+         $/sec, ×60 for $/min, ×3600 for $/hr.",
+        &["region", "outcome"],
+        REGISTRY
+    )
+    .expect("register s3_dollars_saved_rate_cents_per_sec")
+});
+
 /// Stable list of metric series `shelfd` exposes on `/metrics` in the
 /// Phase-0 gate build. Kept as module-level data so `docs/metrics.md`
 /// and the tests can both reference a single source of truth; the
@@ -824,6 +885,9 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_conditional_modified_total",
     "shelf_conditional_skipped_total",
     "shelf_conditional_error_total",
+    // SHELF-40 — audit-able dollars-saved counter + rolling rate.
+    "shelf_s3_dollars_saved_total",
+    "shelf_s3_dollars_saved_rate_cents_per_sec",
 ];
 
 #[cfg(test)]
@@ -898,6 +962,8 @@ mod tests {
             CONDITIONAL_MODIFIED_TOTAL.desc(),
             CONDITIONAL_SKIPPED_TOTAL.desc(),
             CONDITIONAL_ERROR_TOTAL.desc(),
+            S3_DOLLARS_SAVED_TOTAL.desc(),
+            S3_DOLLARS_SAVED_RATE_CENTS_PER_SEC.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -1024,6 +1090,12 @@ mod tests {
         CONDITIONAL_ERROR_TOTAL
             .with_label_values(&["metadata"])
             .inc_by(0);
+        S3_DOLLARS_SAVED_TOTAL
+            .with_label_values(&["us-east-1", "hit_memory"])
+            .inc_by(0);
+        S3_DOLLARS_SAVED_RATE_CENTS_PER_SEC
+            .with_label_values(&["us-east-1", "hit_memory"])
+            .set(0);
 
         let families = REGISTRY.gather();
         let names: HashSet<String> = families.iter().map(|f| f.name().to_owned()).collect();

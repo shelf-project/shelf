@@ -1099,6 +1099,20 @@ pub async fn handle_get_object(
             crate::metrics::HITS_BY_TABLE_TOTAL
                 .with_label_values(&[pool_label, table_label])
                 .inc();
+            // SHELF-40 — bump `shelf_s3_dollars_saved_total` from
+            // the same arm that already bumped `shelf_hits_total`
+            // so the two counters stay locked-in-step. The cost
+            // crate consumes `(HitTier, bytes, peer_az)`; the
+            // SHELF-23 peer-fetch path bumps its own `Peer`
+            // variant from `peer_fetch.rs` to avoid double-charge
+            // (see ADR-0011 — a peer hit is a remote hit, never
+            // also a local hit). `DEFAULT_PEER_AZ::SameAz` is the
+            // pessimistic OSS default; cross-AZ hit attribution
+            // requires explicit operator topology data not yet
+            // surfaced through the membership ring.
+            let event =
+                crate::cost::hit_event_local(tier, b.len() as u64, crate::cost::DEFAULT_PEER_AZ);
+            let _ = state.cost.observe(event);
             // Track A1 / SHELF-G1 — split DRAM vs NVMe hits so
             // `shelf_request_seconds{outcome=hit_memory|hit_disk}`
             // and the byte-efficiency dashboard can graph them
