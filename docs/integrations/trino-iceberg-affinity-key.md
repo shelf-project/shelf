@@ -15,6 +15,25 @@ The Shelf-side deliverable is `io.shelf.scheduler.ShelfAffinityKey`. The
 Trino-side deliverable is a roughly ten-line patch on `IcebergSplit` (or
 the equivalent connector-internal split type) that calls into it.
 
+## Pre-flight verification
+
+Before dispatching the `ShelfAffinityKey` plugin to a Trino coordinator,
+verify the running release contains PR #29182:
+
+```
+kubectl exec -n trino-db <coord-pod> -- trino --version
+```
+
+PR #29182 merged to `master` on 2026-04-27 but is **not** yet in a tagged
+Trino release. Do NOT proceed if the cluster's Trino version predates
+the first release that incorporates it. Running the plugin on an older
+coordinator silently ignores `getAffinityKey()` (the SPI hook is
+absent), so splits fall back to the default load-balanced scheduler and
+the per-pod-locality gain is lost — which is easy to misread as "the
+plugin is wired but not helping" without this check.
+
+Source: F4 finding from the deep-research cross-check, 2026-04-30.
+
 ## Why an affinity key helps
 
 | Without affinity key                              | With affinity key                                       |
