@@ -1,4 +1,4 @@
-# ADR 0022: `/admin/cap-ready` cluster capacity gate (RC6 P1.2)
+# ADR 0025: `/admin/cap-ready` cluster capacity gate (RC6 P1.2)
 
 *Status: Accepted (2026-04-30)*
 *Deciders: rust-engineer-1, ops-aamir*
