@@ -45,6 +45,7 @@
 #![allow(clippy::manual_div_ceil)]
 
 pub mod ab_tag;
+pub mod admin_pin_payload;
 pub mod admission;
 pub mod admission_limiter;
 pub mod admission_wtinylfu;
