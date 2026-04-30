@@ -302,6 +302,67 @@ pub static INFLIGHT_SINGLEFLIGHT: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("register inflight_singleflight")
 });
 
+/// SHELF-30 — count of GET requests that registered as a coalesce
+/// leader, partitioned by Foyer pool. Pair with
+/// [`COALESCE_FOLLOWERS_TOTAL`] to compute the per-pool follower
+/// fan-in ratio (followers / leaders) — the hit-ratio of the
+/// range-coalesce layer itself, independent of Foyer.
+pub static COALESCE_LEADERS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_coalesce_leaders_total",
+        "SHELF-30 — GET requests registered as a coalesce leader, per Foyer pool.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register coalesce_leaders_total")
+});
+
+/// SHELF-30 — count of GET requests that joined an in-flight leader
+/// and sliced its payload, per pool. Each follower represents one
+/// origin GET (and one Foyer insert) that did NOT happen.
+pub static COALESCE_FOLLOWERS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_coalesce_followers_total",
+        "SHELF-30 — GET requests that joined an in-flight leader and sliced its bytes.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register coalesce_followers_total")
+});
+
+/// SHELF-30 — bytes returned to a follower from a leader's payload
+/// without a fresh origin GET. Use as the numerator of the SHELF-30
+/// byte-savings panel; subtract from `shelf_origin_request_bytes_total`
+/// at the same scrape to estimate `$ saved` against the AWS S3
+/// `$0.0004 / 1k requests` GET unit cost.
+pub static COALESCE_FOLLOWER_BYTES_SAVED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_coalesce_follower_bytes_saved_total",
+        "SHELF-30 — bytes served to a follower from the leader's payload, per pool.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register coalesce_follower_bytes_saved_total")
+});
+
+/// SHELF-30 — count of follower attempts that fell through to the
+/// standard fetch path because the leader either dropped its guard
+/// without completing, returned an error, or returned a payload
+/// shorter than the follower's expected window. The `reason` label
+/// is one of: `leader_dropped`, `leader_error`, `truncated`. Treat a
+/// non-zero rate as a correctness signal — followers must not silently
+/// produce wrong bytes; the fall-through is the safe default but a
+/// sustained rate means leader bookkeeping has a bug.
+pub static COALESCE_FALLTHROUGH_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_coalesce_fallthrough_total",
+        "SHELF-30 — followers that fell through to the standard fetch path, per pool + reason.",
+        &["pool", "reason"],
+        REGISTRY
+    )
+    .expect("register coalesce_fallthrough_total")
+});
+
 /// Track E7 — per-fingerprint query count. `fingerprint` is the
 /// canonicalised jsonPlan fingerprint the plugin tags on each
 /// request via an `X-Shelf-Query-Fingerprint` HTTP header (or, in

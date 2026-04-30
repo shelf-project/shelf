@@ -26,6 +26,10 @@ covered by the `registry_exposes_documented_series` regression test.
 | `shelf_request_seconds`  | histogram | `{path,outcome}`       | End-to-end HTTP request latency. `path` ∈ `/cache`, `/cache/head`, `/stats`; `outcome` ∈ `hit`, `miss`, `bad_request`, `not_found`, `error`, `ok`. | SHELF-08 |
 | `shelf_mv_hits_total`    | counter   | `{mv_name}`            | Hits served from a pinned Iceberg MV. Incremented only when the key maps to a file registered by the H3 mv-pin-watcher. | Track H5 |
 | `shelf_mv_bytes_served_total` | counter | `{mv_name}`          | Response bytes served from an MV-backed hit. Paired with `shelf_mv_hits_total` for avg rowgroup size; compare against `shelf_s3_shim_response_bytes_total` for "% of bytes served by MVs". | Track H5 |
+| `shelf_coalesce_leaders_total` | counter | `{pool}` | GET requests that registered as a coalesce leader (excludes no-op leaders for etag-less / length-0 callers). | SHELF-30 |
+| `shelf_coalesce_followers_total` | counter | `{pool}` | GET requests that joined an in-flight leader and sliced its bytes; each follower = 1 origin GET + 1 Foyer insert that did NOT happen. | SHELF-30 |
+| `shelf_coalesce_follower_bytes_saved_total` | counter | `{pool}` | Bytes returned to followers from a leader's payload. Numerator of the SHELF-30 "$ saved" panel. | SHELF-30 |
+| `shelf_coalesce_fallthrough_total` | counter | `{pool,reason}` | Followers that fell through to the standard fetch path. `reason` ∈ `{leader_dropped, leader_error, truncated}`. Sustained non-zero rate is a correctness alarm, not a tuning lever. | SHELF-30 |
 
 ## Planned (future tickets)
 

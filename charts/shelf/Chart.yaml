@@ -6,8 +6,8 @@ description: |
   NVMe + DRAM in front of any S3-compatible object store.
   See BLUEPRINT.md §9 for architecture.
 type: application
-version: 1.0.0-rc.4
-appVersion: "1.0.0-rc.4"
+version: 1.0.0-rc.5
+appVersion: "1.0.0-rc.5"
 kubeVersion: ">=1.27.0-0"
 home: https://github.com/shelf-project/shelf
 sources:

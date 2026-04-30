@@ -47,6 +47,7 @@
 pub mod admission;
 pub mod admission_limiter;
 pub mod aws_chunked;
+pub mod coalesce;
 // Dormant modules — present in the tree but with zero non-test callers
 // in the current hot/control paths. Gated behind off-by-default Cargo
 // features so default `shelfd` builds ship a smaller binary; the source
