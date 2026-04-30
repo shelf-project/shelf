@@ -2,7 +2,7 @@
 
 **Alert:** `ShelfAdmissionModelStale`
 **Severity:** warn
-**Dashboard:** https://grafana.example.internal/d/shelf-trainer
+**Dashboard:** `${SHELF_DASHBOARD_BASE}/d/shelf-trainer`
 
 ## Symptom
 
@@ -24,12 +24,13 @@ and occasional scan-storm false-admits. Users see no error.
 kubectl -n shelf exec shelf-0 -- shelfctl stats --admission | grep -E 'enabled|promoted'
 
 # 2. What does the Airflow DAG say?
-# Replace DAG URL with the example Airflow for your env.
-curl -s https://airflow.example.internal/api/v1/dags/shelf_admission_model_trainer/dagRuns \
+# Set ${SHELF_AIRFLOW_BASE} to your Airflow deployment URL.
+curl -s "${SHELF_AIRFLOW_BASE}/api/v1/dags/shelf_admission_model_trainer/dagRuns" \
   | jq '.dag_runs[-5:] | .[] | {run_id, state, start_date, end_date}'
 
 # 3. Is the S3 object present, and what is its LastModified?
-aws s3 ls s3://example-shelf-prod-config/admission-model.onnx --human-readable
+# Set ${SHELF_CONFIG_BUCKET} to your config bucket name.
+aws s3 ls "s3://${SHELF_CONFIG_BUCKET}/admission-model.onnx" --human-readable
 ```
 
 ## Mitigation

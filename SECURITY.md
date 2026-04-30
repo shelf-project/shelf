@@ -1,8 +1,8 @@
 ---
-# Front matter (machine-readable; mirrored in docs/security.md on launch)
-policy_version: 0.1-scaffold
+# Front matter (machine-readable)
+policy_version: "1.0"
 contact_channel: security@shelf-project.dev
-pgp_fingerprint: TBD-PGP-FINGERPRINT-PLACEHOLDER  # replaced on first rotation
+preferred_channel: github_private_vulnerability_reporting
 disclosure_policy_url: https://github.com/shelf-project/shelf/blob/main/SECURITY.md
 response_sla:
   acknowledge: 48h
@@ -13,16 +13,10 @@ response_sla:
   fix_p3_low: next minor release
 embargo_default_days: 90
 rota:
-  - "@aamir"
-  - "TBD-second-reviewer"
+  - "@aamir306"
 ---
 
 # Security policy
-
-> **Status.** This is the v0.1 scaffold produced by agent-9. It will be
-> superseded by the public-facing policy at OSS launch (plan §7). The
-> email, PGP key, and rota names are placeholders — every `TBD` must be
-> replaced before the repository is made public.
 
 Shelf is a read-through cache sitting directly on the path between
 Trino workers and S3. A defect in `shelfd`, the Trino plugin, or the
@@ -43,19 +37,24 @@ response process documented here.
 **Do not open a public GitHub issue.** Do not discuss in Discord or
 Slack. Use one of the channels below.
 
-### 1.1 Preferred — email + PGP
+### 1.1 Preferred — GitHub Private Vulnerability Reporting
 
-Send to **`security@shelf-project.dev`**. Encrypt sensitive findings
-with our PGP key:
+Open a
+[private vulnerability report on GitHub](https://github.com/shelf-project/shelf/security/advisories/new).
+This is the canonical channel for sensitive findings: it gives us a
+private fork to coordinate fixes, automatic CVE reservation, and a
+clean disclosure path that Security Advisories handles end-to-end.
 
-```
-Fingerprint : TBD-PGP-FINGERPRINT-PLACEHOLDER
-Key URL     : https://shelf-project.dev/.well-known/shelf-security.asc  (TBD)
-```
+### 1.2 Email fallback
 
-Or open a
-[private vulnerability report on GitHub](https://github.com/shelf-project/shelf/security/advisories/new)
-— routed to the same rota.
+If GitHub PVR is not available to you, send to
+**`security@shelf-project.dev`**. The mailbox is monitored by the
+year-1 BDFL and routed to the same triage queue as PVR reports. We
+acknowledge within 48 hours.
+
+PGP encryption is not required at v1.0; if you need it for sensitive
+disclosures, request a key over email and we will publish it before
+the next exchange.
 
 Include, to the extent you can:
 
@@ -66,13 +65,6 @@ Include, to the extent you can:
 - Impact estimate (tenant isolation, RCE, DoS, info leak, etc.)
 - Whether the issue is already public anywhere (pre-prints, forks,
   CVE drafts)
-
-### 1.2 GitHub Private Vulnerability Reporting
-
-Once the repo is public, you may also use GitHub's [Private
-Vulnerability Reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
-flow from the **Security** tab. Reports land in the same triage queue
-as the mailbox.
 
 ### 1.3 What **not** to do
 
@@ -157,14 +149,15 @@ unfixed issue.
 
 ## 5. Security-response rota
 
-| Role                   | Initial owner       | Backup   |
-| ---------------------- | ------------------- | -------- |
-| Primary triage         | `@aamir`            | TBD      |
-| Cryptographic review   | TBD (external)      | `@aamir` |
-| Disclosure comms       | `@aamir` + scribe   | TBD      |
+| Role                   | Initial owner       | Backup                       |
+| ---------------------- | ------------------- | ---------------------------- |
+| Primary triage         | `@aamir306`         | (unfilled — BDFL absorbs)    |
+| Disclosure comms       | `@aamir306`         | (unfilled — BDFL absorbs)    |
 
-The rota expands as the team does. When it does, this file changes in
-the same PR as the rota change.
+The rota is single-owner at v1.0 because Shelf is in
+[Year-1 BDFL governance](./MAINTAINERS.md). It expands as additional
+maintainers are added; this file changes in the same PR as any rota
+change.
 
 ---
 
@@ -172,9 +165,9 @@ the same PR as the rota change.
 
 None. This file is maintained as advisories are published.
 
-The canonical list lives on GitHub once the repo is public:
+The canonical list lives at:
 
-- https://github.com/shelf-project/shelf/security/advisories (TBD)
+- <https://github.com/shelf-project/shelf/security/advisories>
 
 ---
 

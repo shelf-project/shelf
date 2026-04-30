@@ -375,7 +375,7 @@ Trino config (one catalog):
 ```properties
 # iceberg.properties
 connector.name=iceberg
-hive.metastore.uri=thrift://hms.example.internal:9083
+hive.metastore.uri=thrift://<your-hms-host>:9083
 iceberg.catalog.type=hive_metastore
 
 # enable Shelf

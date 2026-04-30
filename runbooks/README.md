@@ -32,6 +32,19 @@ Mitigation / Escalation / Post-incident**.
 - The "Mitigation" section has **exactly three** progressively-safer actions.
 - Escalation follows `docs/oncall.md`.
 
+### Operator URL placeholders
+
+Runbooks that reference Grafana, Airflow, or other operator surfaces use
+shell-style placeholders rather than literal hostnames so they're
+copy-paste safe across deployments. Set these once in your shell or
+runbook environment:
+
+| Placeholder              | Example                              | Used in                                                 |
+| ------------------------ | ------------------------------------ | ------------------------------------------------------- |
+| `${SHELF_DASHBOARD_BASE}`| `https://grafana.example.com`        | "Dashboard:" header, Grafana deep-links                 |
+| `${SHELF_AIRFLOW_BASE}`  | `https://airflow.example.com`        | DAG status / trigger URLs in trainer-related runbooks   |
+| `${SHELF_CONFIG_BUCKET}` | `your-shelf-prod-config`             | S3 bucket holding pin list + admission model artefacts  |
+
 ## Quick command cheat-sheet
 
 ```bash

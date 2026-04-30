@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — v1.0.0 launch hygiene
+
+- **`SECURITY.md` activated for v1.0.** Removed `TBD-PGP-FINGERPRINT-PLACEHOLDER`,
+  `TBD-second-reviewer`, and the "every TBD must be replaced before public"
+  scaffolding banner. v1.0 disclosure flow is GitHub Private Vulnerability
+  Reporting (preferred) + `security@shelf-project.dev` (fallback). PGP is
+  available on request rather than published; the Year-1 BDFL absorbs the
+  rota until additional maintainers are added.
+- **Operator URL placeholders documented** in `runbooks/README.md`. Replaced
+  literal `*.example.internal` host references in 7 runbooks
+  (`shelf-pod-restarting`, `shelf-nvme-usage-high`, `shelf-hit-rate-too-low`,
+  `shelf-fall-through-surge`, `shelf-admission-model-stale`,
+  `rollback-admission-model`, `circuit-breaker-open`) and the `BLUEPRINT.md`
+  Trino-config example with shell-style placeholders
+  (`${SHELF_DASHBOARD_BASE}`, `${SHELF_AIRFLOW_BASE}`,
+  `${SHELF_CONFIG_BUCKET}`, `<your-hms-host>`) so runbooks are
+  copy-paste safe across deployments.
+
 ### Added — SHELF-65 MV-aware pinning recommender
 
 - **`MaterializedViewPinningRecommender`** (`kind() == "mv_pinning"`).

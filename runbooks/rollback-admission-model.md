@@ -21,8 +21,9 @@ Expected recovery: hit-rate within 1 hour of warmup.
 
 ```bash
 # 1. Confirm the bad promotion. Last N versions of the S3 object.
+# Set ${SHELF_CONFIG_BUCKET} to your config bucket name.
 aws s3api list-object-versions \
-  --bucket example-shelf-prod-config \
+  --bucket "${SHELF_CONFIG_BUCKET}" \
   --prefix admission-model.onnx \
   | jq '.Versions[:5] | .[] | {VersionId, LastModified, IsLatest}'
 
@@ -30,17 +31,18 @@ aws s3api list-object-versions \
 kubectl -n shelf exec shelf-0 -- shelfctl stats --admission | grep promoted
 
 # 3. Double-check the in-flight trainer isn't about to overwrite.
-curl -s https://airflow.example.internal/api/v1/dags/shelf_admission_model_trainer/dagRuns?state=running | jq '.dag_runs'
+# Set ${SHELF_AIRFLOW_BASE} to your Airflow deployment URL.
+curl -s "${SHELF_AIRFLOW_BASE}/api/v1/dags/shelf_admission_model_trainer/dagRuns?state=running" | jq '.dag_runs'
 ```
 
 ## Mitigation
 
 1. **Fast-roll-back via S3 version pinning.** Copy the previous
-   VersionId over the current latest:
+   VersionId over the current latest (set `${SHELF_CONFIG_BUCKET}` first):
    ```bash
    aws s3api copy-object \
-     --bucket example-shelf-prod-config \
-     --copy-source "example-shelf-prod-config/admission-model.onnx?versionId=<GOOD_VERSION>" \
+     --bucket "${SHELF_CONFIG_BUCKET}" \
+     --copy-source "${SHELF_CONFIG_BUCKET}/admission-model.onnx?versionId=<GOOD_VERSION>" \
      --key admission-model.onnx
    kubectl -n shelf exec shelf-0 -- shelfctl reload admission-model
    # fan-out to all pods
