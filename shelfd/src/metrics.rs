@@ -479,6 +479,60 @@ pub static MISSES_BY_TABLE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("register misses_by_table_total")
 });
 
+/// SHELF-42 — per-tag hit counter. `tag` is the URL-encoded JSON wire
+/// form normalised by lexicographic key order; values above the
+/// per-pod cardinality cap fold into the sentinel `"other"` (mirroring
+/// `HITS_BY_TABLE_TOTAL`). Carried as a SEPARATE series — not a new
+/// label on `shelf_hits_total` — so existing PromQL stays valid and
+/// the cardinality budget is opt-in via `cache.abTag.enabled`.
+///
+/// The receive path (`crate::ab_tag::AbTagState`) only resolves a
+/// non-`None` tag label when `enabled=true`, so a freshly deployed
+/// shelfd that has not opted into tagging publishes this series with
+/// zero non-`none` children.
+pub static HITS_BY_TAG_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_hits_by_tag_total",
+        "Cache hits, partitioned by Foyer pool + A/B tag (SHELF-42). \
+         The `tag` label is the canonical wire form of the request's \
+         X-Shelf-Tag header, or `none` when the header was absent / \
+         feature-disabled, or `other` when the per-pod cardinality \
+         cap fired.",
+        &["pool", "tag"],
+        REGISTRY
+    )
+    .expect("register hits_by_tag_total")
+});
+
+/// SHELF-42 companion — per-tag miss counter. Same conventions as
+/// [`HITS_BY_TAG_TOTAL`].
+pub static MISSES_BY_TAG_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_misses_by_tag_total",
+        "Cache misses, partitioned by Foyer pool + A/B tag (SHELF-42).",
+        &["pool", "tag"],
+        REGISTRY
+    )
+    .expect("register misses_by_tag_total")
+});
+
+/// SHELF-42 — per-tag bytes the S3 shim returned to Trino. Mirrors
+/// `S3_SHIM_RESPONSE_BYTES_TOTAL` plus a `tag` dimension so dashboards
+/// can split byte-efficiency by experiment cohort. Same `tag` label
+/// rules as the per-tag hit/miss counters.
+pub static S3_SHIM_RESPONSE_BYTES_BY_TAG_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_s3_shim_response_bytes_by_tag_total",
+        "Response body bytes served by the S3 shim (SHELF-22) \
+         partitioned by op + outcome + A/B tag (SHELF-42). \
+         The `tag` label follows the same `none` / `other` / wire-form \
+         rules as `shelf_hits_by_tag_total`.",
+        &["op", "outcome", "tag"],
+        REGISTRY
+    )
+    .expect("register s3_shim_response_bytes_by_tag_total")
+});
+
 /// SHELF-23 — peer-fetch outcome counters.
 ///
 /// On a local cache miss we may race a peer (the HRW primary) against
@@ -748,6 +802,30 @@ pub static LODC_QUEUE_DEPTH: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("register lodc_queue_depth")
 });
 
+/// SHELF-42 — A/B tag cap-violation counter.
+///
+/// Bumped exactly once per (scrape window, distinct over-cap tag) by
+/// [`crate::ab_tag::AbTagState::tag_label_for`]. The value is the
+/// number of *distinct* tag wire forms that had to fall back onto the
+/// `other` sentinel during the current window, NOT the per-request
+/// drop count — that would re-bump on every subsequent request landing
+/// the same offending tag and erase the "how many distinct cohorts did
+/// we drop?" signal we actually want for capacity planning.
+///
+/// `reason` discriminates today's only cap (`cardinality`) from any
+/// future cap shapes (`size`, `epoch`, …) without renaming the metric.
+pub static AB_TAG_CAP_VIOLATIONS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_ab_tag_cap_violations_total",
+        "Number of distinct A/B tag wire forms that exceeded the per-pod \
+         cardinality cap and were folded into the `other` sentinel \
+         (SHELF-42). One bump per (scrape window, distinct offending tag).",
+        &["reason"],
+        REGISTRY
+    )
+    .expect("register ab_tag_cap_violations_total")
+});
+
 /// Track G-11 companion — current rolling hit ratio per pool, in
 /// basis points (0–10_000). Sampled by the same `warm_sampler`
 /// task that flips `WARM_THRESHOLD_CROSSED_SECONDS`. Exposed as
@@ -888,6 +966,11 @@ pub const EXPOSED_SERIES: &[&str] = &[
     // SHELF-40 — audit-able dollars-saved counter + rolling rate.
     "shelf_s3_dollars_saved_total",
     "shelf_s3_dollars_saved_rate_cents_per_sec",
+    // SHELF-42 — A/B tag receive path.
+    "shelf_hits_by_tag_total",
+    "shelf_misses_by_tag_total",
+    "shelf_s3_shim_response_bytes_by_tag_total",
+    "shelf_ab_tag_cap_violations_total",
 ];
 
 #[cfg(test)]
@@ -964,6 +1047,10 @@ mod tests {
             CONDITIONAL_ERROR_TOTAL.desc(),
             S3_DOLLARS_SAVED_TOTAL.desc(),
             S3_DOLLARS_SAVED_RATE_CENTS_PER_SEC.desc(),
+            HITS_BY_TAG_TOTAL.desc(),
+            MISSES_BY_TAG_TOTAL.desc(),
+            S3_SHIM_RESPONSE_BYTES_BY_TAG_TOTAL.desc(),
+            AB_TAG_CAP_VIOLATIONS_TOTAL.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -1096,6 +1183,18 @@ mod tests {
         S3_DOLLARS_SAVED_RATE_CENTS_PER_SEC
             .with_label_values(&["us-east-1", "hit_memory"])
             .set(0);
+        HITS_BY_TAG_TOTAL
+            .with_label_values(&["metadata", "none"])
+            .inc_by(0);
+        MISSES_BY_TAG_TOTAL
+            .with_label_values(&["metadata", "none"])
+            .inc_by(0);
+        S3_SHIM_RESPONSE_BYTES_BY_TAG_TOTAL
+            .with_label_values(&["get_object", "miss", "none"])
+            .inc_by(0);
+        AB_TAG_CAP_VIOLATIONS_TOTAL
+            .with_label_values(&["cardinality"])
+            .inc_by(0);
 
         let families = REGISTRY.gather();
         let names: HashSet<String> = families.iter().map(|f| f.name().to_owned()).collect();

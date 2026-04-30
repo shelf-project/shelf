@@ -76,6 +76,27 @@ pub fn require_minio_or_panic() {
     }
 }
 
+/// Back-compat shim for integration test files that still use the
+/// pre-SHELF-29 "probe + return" pattern (e.g. `it_ab_tag.rs`,
+/// `it_dollars_saved.rs`). Returns `true` when `SHELF_INTEGRATION` is
+/// unset OR MinIO is unreachable, so callers can short-circuit with
+/// `if skip_if_offline() { return; }`. Preferred new pattern is
+/// [`require_minio_or_panic`]; this shim exists solely to keep both
+/// callers compiling until they migrate.
+pub fn skip_if_offline() -> bool {
+    if std::env::var("SHELF_INTEGRATION").ok().as_deref() != Some("1") {
+        return true;
+    }
+    let addr: Option<SocketAddr> = "127.0.0.1:9000"
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut iter| iter.next());
+    match addr {
+        Some(a) => TcpStream::connect_timeout(&a, Duration::from_millis(500)).is_err(),
+        None => true,
+    }
+}
+
 pub async fn s3_client() -> S3Client {
     let shared = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(Region::new("us-east-1"))

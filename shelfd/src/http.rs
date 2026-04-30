@@ -150,6 +150,13 @@ pub struct ServerState {
     /// [`Self::with_cost_state`] from the operator-supplied
     /// `cache.cost.*` config block.
     pub cost: crate::cost::CostState,
+    /// SHELF-42 — per-pod A/B tag state. Owns the cardinality cap and
+    /// cap-violation bookkeeping. Defaults to a disabled instance so
+    /// callers that build a `ServerState` without thinking about
+    /// tagging (most unit tests, the smoke harness) inherit the safe
+    /// "ignore the header entirely" behaviour. `main` overrides this
+    /// from `config.ab_tag` before traffic arrives.
+    pub ab_tag: Arc<crate::ab_tag::AbTagState>,
 }
 
 impl ServerState {
@@ -221,7 +228,17 @@ impl ServerState {
             coalescer: crate::coalesce::RangeCoalescer::new(),
             coalesce_enabled: AtomicBool::new(true),
             cost: crate::cost::CostState::disabled(),
+            ab_tag: crate::ab_tag::AbTagState::disabled(),
         }
+    }
+
+    /// SHELF-42 builder hook: install an operator-configured
+    /// `AbTagState`. `main` calls this from the post-config hookup
+    /// path; tests that don't need the receive path inherit the
+    /// disabled-by-default state from [`Self::with_head_lru_and_pod_id`].
+    pub fn with_ab_tag(mut self, ab_tag: Arc<crate::ab_tag::AbTagState>) -> Self {
+        self.ab_tag = ab_tag;
+        self
     }
 
     /// SHELF-23 builder: install the operator-supplied peer-fetch

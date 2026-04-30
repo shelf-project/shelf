@@ -72,6 +72,10 @@ reqwest = { workspace = true }
 # it for the trait + Frame types the SyncBody adapter implements.
 sync_wrapper = "1"
 http-body = "1"
+# SHELF-42 — encode/decode the X-Shelf-Tag header payload (URL-encoded
+# JSON). Direct dep so the ab_tag module isn't relying on a transitive
+# pull from reqwest/url.
+percent-encoding = { workspace = true }
 # Optional: embedded admin UI (see `ui` feature). `rust-embed` bundles
 # the `ui/dist/` Vite build into the binary; `mime_guess` picks a
 # Content-Type from the asset path.
@@ -133,6 +137,14 @@ parquet_meta = []
 # this module ships the persistent variant). Off by default until the
 # G2 phase is wired up.
 side_bloom_module = []
+# SHELF-42 — feature-gate the optional `tag` label on the
+# `shelf_s3_dollars_saved_total` counter (SHELF-40 lever). The receive
+# path (header parsing, cardinality cap, optional `tag` label on the
+# always-on metrics) is unconditional so SHELF-42 is independently
+# shippable; this flag exists *only* to let the SHELF-40 PR opt the
+# dollars-saved counter into the same label without forcing a merge
+# order between the two PRs.
+ab_tag = []
 
 [[bench]]
 name = "hashring"

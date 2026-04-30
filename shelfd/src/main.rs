@@ -183,6 +183,23 @@ async fn run(args: Args) -> anyhow::Result<()> {
         }
     };
 
+    // SHELF-42 — install A/B tag receive-side state from
+    // `cache.abTag.*`. The Trino plugin's *forwarding* side is always
+    // on; the daemon side is default-off so freshly deployed OSS pods
+    // never expose tag-cardinality surface area until the operator
+    // opts in via Helm or `SHELFD_AB_TAG=on`.
+    let ab_tag_state = shelfd::ab_tag::AbTagState::new(
+        config.ab_tag.enabled,
+        config.ab_tag.max_distinct_tags,
+        config.ab_tag.scrape_window,
+    );
+    tracing::info!(
+        ab_tag_enabled = config.ab_tag.enabled,
+        ab_tag_max_distinct_tags = config.ab_tag.max_distinct_tags,
+        ab_tag_scrape_window = ?config.ab_tag.scrape_window,
+        "SHELF-42 ab_tag receive path configured"
+    );
+
     let mut state = ServerState::with_head_lru_and_pod_id(
         store.clone(),
         origin.clone(),
@@ -194,7 +211,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
     )
     .with_drain_signal(drain_signal.clone())
     .with_peer_fetch(peer_http, config.membership.stats_port)
-    .with_cost_state(cost_state.clone());
+    .with_cost_state(cost_state.clone())
+    .with_ab_tag(ab_tag_state);
     state.set_peer_fetch_enabled(peer_fetch_enabled);
     tracing::info!(
         peer_fetch_enabled,

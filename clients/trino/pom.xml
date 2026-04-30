@@ -58,6 +58,9 @@
         <dep.mockito.version>5.14.2</dep.mockito.version>
         <dep.testcontainers.version>1.20.4</dep.testcontainers.version>
         <dep.assertj.version>3.26.3</dep.assertj.version>
+        <!-- Test-only: parse `tests/fixtures/ab-tag-vectors.json` for SHELF-42
+             parity. Production runtime carries no JSON dependency. -->
+        <dep.jackson.version>2.18.2</dep.jackson.version>
         <!--
             Parquet + Hadoop are test-scope ONLY. They back a single
             ParquetFooterIndexTest case that writes a real multi-
@@ -122,6 +125,19 @@
             <groupId>org.assertj</groupId>
             <artifactId>assertj-core</artifactId>
             <version>${dep.assertj.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!--
+            Test-only Jackson for the SHELF-42 `ab-tag-vectors.json` parity
+            fixture. The production JAR shaded into the Trino plugin path
+            stays Jackson-free; the runtime tag parser
+            (`io.shelf.tag.MinimalJsonObjectParser`) is hand-rolled and
+            zero-dep by design.
+        -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${dep.jackson.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>

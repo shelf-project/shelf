@@ -84,6 +84,14 @@ pub struct Config {
     /// counter off via `cache.cost.enabled: false` if needed.
     #[serde(default)]
     pub cost: shelf_cost::CostConfig,
+
+    /// SHELF-42 — A/B tag receive path. Defaults to **off** so a
+    /// freshly deployed OSS cluster never opens up Prometheus
+    /// cardinality surface area until the operator has sized retention
+    /// for the cap. Penpencil overlay flips `enabled: true`.
+    /// See `docs/contracts/ab-tag.md`.
+    #[serde(default)]
+    pub ab_tag: AbTagConfig,
 }
 
 fn default_head_lru_entries() -> u64 {
@@ -616,6 +624,63 @@ impl Default for S3ShimConfig {
     }
 }
 
+/// SHELF-42 — A/B tag receive path config.
+///
+/// The contract spec lives at `docs/contracts/ab-tag.md`; this struct
+/// is the Rust mirror of the `cache.abTag.*` Helm values. Default-off
+/// for OSS deployments; operators with sized Prometheus retention flip
+/// `enabled: true` in their overlay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AbTagConfig {
+    /// Master switch. The chart default is `false`; operator overlays
+    /// (e.g. `<prod-overlay>/values-prod.yaml`) flip it to `true`. The
+    /// Trino plugin's *forwarding* side has no kill switch — session
+    /// properties are metadata, the per-request HTTP-header cost is
+    /// negligible, and a tag with no downstream consumer (because
+    /// shelfd is `enabled: false`) is silently ignored.
+    #[serde(default = "AbTagConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// Per-pod cardinality cap. The 17th distinct tag wire form within
+    /// a scrape window folds into the sentinel `"other"` and bumps
+    /// `shelf_ab_tag_cap_violations_total{reason="cardinality"}` once
+    /// per (window, distinct offending tag).
+    #[serde(default = "AbTagConfig::default_max_distinct_tags")]
+    pub max_distinct_tags: usize,
+
+    /// Length of one cap-enforcement window. Defaults to 60 s — long
+    /// enough to bracket a 30 s Prometheus scrape, short enough that a
+    /// stale cohort eventually rolls out of the sentinel state.
+    #[serde(
+        with = "humantime_serde",
+        default = "AbTagConfig::default_scrape_window"
+    )]
+    pub scrape_window: Duration,
+}
+
+impl AbTagConfig {
+    fn default_enabled() -> bool {
+        false
+    }
+    fn default_max_distinct_tags() -> usize {
+        crate::ab_tag::DEFAULT_MAX_DISTINCT_TAGS
+    }
+    fn default_scrape_window() -> Duration {
+        crate::ab_tag::DEFAULT_SCRAPE_WINDOW
+    }
+}
+
+impl Default for AbTagConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            max_distinct_tags: Self::default_max_distinct_tags(),
+            scrape_window: Self::default_scrape_window(),
+        }
+    }
+}
+
 impl Config {
     /// Load and validate a config from disk.
     ///
@@ -678,6 +743,16 @@ impl Config {
         // silently disables production back-pressure.
         if crate::admission_limiter::env_disable_override() {
             self.pools.rowgroup.disk_cache.admission.enabled = false;
+        }
+        // SHELF-42 — operator override for the A/B tag receive path.
+        // Accepts canonical truthy/falsy values only so a typo can't
+        // silently flip Prometheus cardinality on or off.
+        if let Ok(v) = std::env::var("SHELFD_AB_TAG") {
+            match v.trim().to_ascii_lowercase().as_str() {
+                "on" | "1" | "true" | "yes" => self.ab_tag.enabled = true,
+                "off" | "0" | "false" | "no" => self.ab_tag.enabled = false,
+                _ => {}
+            }
         }
     }
 

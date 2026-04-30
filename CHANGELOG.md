@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SHELF-42 — A/B query tagging.** Trino sessions can now stamp shelf-bound
+  HTTP requests with an `X-Shelf-Tag` header carrying URL-encoded JSON
+  (e.g. `{"experiment":"b1_compression_on","cohort":"prod_rep1"}`),
+  derived from `shelf.tag.<key>` session properties via the new
+  `io.shelf.tag` package. shelfd parses the header in
+  `s3_shim`, enforces a per-pod cardinality cap (configurable via
+  `cache.abTag.maxDistinctTags`, default 16) with an `other` sentinel,
+  and splits the existing hit / miss / response-bytes counters across
+  the new companion series `shelf_hits_by_tag_total`,
+  `shelf_misses_by_tag_total`, and
+  `shelf_s3_shim_response_bytes_by_tag_total`. A dedicated
+  `shelf_ab_tag_cap_violations_total{reason="cardinality"}` counter
+  fires (and emits a one-shot WARN) when the cap is exceeded inside a
+  scrape window. The receive path is **default-off** (`cache.abTag.enabled
+  = false`); operators flip to `true` on the Penpencil overlay where
+  Prometheus retention is sized for the per-tag series. Trino-side tag
+  forwarding is always on — it is metadata, no perf cost — and tags
+  belong to a single request (not cached, not stashed). See
+  `docs/contracts/ab-tag.md` for the wire-level contract and
+  `shelfd/docs/design-notes/SHELF-42-ab-query-tagging.md` for the
+  lifecycle diagram.
 - **SHELF-40 — `shelf_s3_dollars_saved_total` counter and shared `shelf-cost` crate.**
   New cargo workspace member at `crates/shelf-cost/` exposes a
   region-aware `CostModel` that converts cache hits into integer-cents of
