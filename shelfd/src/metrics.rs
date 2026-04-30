@@ -990,8 +990,7 @@ pub static REWARM_LAG_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
         "SHELF-45: seconds from snapshot commit -> last added-file \
          re-warmed. p95 is the SLO.",
         &["outcome"],
-        prometheus::exponential_buckets(1.0, 2.0, 12)
-            .expect("rewarm bucket gen"),
+        prometheus::exponential_buckets(1.0, 2.0, 12).expect("rewarm bucket gen"),
         REGISTRY
     )
     .expect("register rewarm_lag_seconds")
@@ -1695,9 +1694,7 @@ mod tests {
             "replayed",
             "dropped_rate_limit",
         ] {
-            REWARM_EVENTS_TOTAL
-                .with_label_values(&[outcome])
-                .inc_by(0);
+            REWARM_EVENTS_TOTAL.with_label_values(&[outcome]).inc_by(0);
         }
         for outcome in [
             "warmed",

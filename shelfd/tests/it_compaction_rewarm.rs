@@ -18,9 +18,7 @@ use std::time::{Duration, SystemTime};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use shelfd::admission::SizeThresholdPolicy;
-use shelfd::compaction_rewarm::{
-    CompactionReactor, FileSpec, IcebergSnapshotEvent, RewarmFetcher,
-};
+use shelfd::compaction_rewarm::{CompactionReactor, FileSpec, IcebergSnapshotEvent, RewarmFetcher};
 use shelfd::config::{
     AdmissionConfig, MetadataPoolConfig, PoolsConfig, RewarmConfig, RowGroupPoolConfig,
 };
@@ -103,6 +101,7 @@ async fn rewarm_reactor_warms_minio_object_on_synthetic_compaction() {
             nvme_bytes: 0,
             eviction_policy: shelfd::config::EvictionPolicy::default(),
             disk_cache: shelfd::config::RowGroupDiskCacheConfig::default(),
+            compression: Default::default(),
         },
     };
     let store = Arc::new(FoyerStore::open(&pools).await.expect("open store"));

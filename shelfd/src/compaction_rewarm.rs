@@ -502,7 +502,11 @@ where
         // dashboard alone). is_compaction_event already covers
         // empty sets, but a producer could still send an event
         // where one FileSpec has size_bytes==0 || etag empty.
-        if event.added_files.iter().any(|f| f.size_bytes == 0 || f.etag.is_empty()) {
+        if event
+            .added_files
+            .iter()
+            .any(|f| f.size_bytes == 0 || f.etag.is_empty())
+        {
             tracing::warn!(
                 target: "shelfd::rewarm",
                 table = %event.table_id,
@@ -708,7 +712,6 @@ where
             }
         }
     }
-
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -738,9 +741,7 @@ impl FetchFail {
 mod tests {
     use super::*;
     use crate::admission::{AdmissionContext, AdmissionDecision, AdmissionPolicy};
-    use crate::config::{
-        MetadataPoolConfig, OriginConfig, PoolsConfig, RowGroupPoolConfig,
-    };
+    use crate::config::{MetadataPoolConfig, OriginConfig, PoolsConfig, RowGroupPoolConfig};
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
     use std::time::Duration;
@@ -781,6 +782,7 @@ mod tests {
                 nvme_bytes: 0,
                 eviction_policy: crate::config::EvictionPolicy::default(),
                 disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
+                compression: Default::default(),
             },
         }
     }
@@ -889,14 +891,8 @@ mod tests {
     fn equal_count_is_not_compaction() {
         // Producer reports same number of files in and out; could be
         // a rewrite-with-tombstones or a partial overwrite. Skip.
-        let added = vec![
-            file("new-0", b"e0", 100),
-            file("new-1", b"e1", 100),
-        ];
-        let removed = vec![
-            file("old-0", b"o0", 100),
-            file("old-1", b"o1", 100),
-        ];
+        let added = vec![file("new-0", b"e0", 100), file("new-1", b"e1", 100)];
+        let removed = vec![file("old-0", b"o0", 100), file("old-1", b"o1", 100)];
         let ev = evt(added, removed);
         assert!(!is_compaction_event(&ev, 500));
     }
@@ -905,7 +901,9 @@ mod tests {
     fn growing_file_count_is_not_compaction() {
         // 2 in -> 4 out: shouldn't trigger.
         let removed = vec![file("o0", b"o0", 1024), file("o1", b"o1", 1024)];
-        let added = (0..4).map(|i| file(&format!("n{i}"), &[i as u8], 512)).collect();
+        let added = (0..4)
+            .map(|i| file(&format!("n{i}"), &[i as u8], 512))
+            .collect();
         let ev = evt(added, removed);
         assert!(!is_compaction_event(&ev, 500));
     }
@@ -1146,12 +1144,9 @@ mod tests {
         let bytes = Bytes::from(vec![0u8; size as usize]);
         let bytes_for_seed = bytes.clone();
         let _ = store
-            .get_or_fetch(
-                Pool::RowGroup,
-                key.clone(),
-                &admit,
-                async move { Ok(bytes_for_seed) },
-            )
+            .get_or_fetch(Pool::RowGroup, key.clone(), &admit, async move {
+                Ok(bytes_for_seed)
+            })
             .await;
         assert!(
             store.contains(Pool::RowGroup, &key).await,
