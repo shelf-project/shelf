@@ -29,9 +29,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use parquet::format::{FileMetaData, SchemaElement};
 use parquet::thrift::TSerializable;
-use shelfd::decoded_meta::{
-    self, AdmitHint, DecodedKind, DecodedMetaCache, ManifestFile,
-};
+use shelfd::decoded_meta::{self, AdmitHint, DecodedKind, DecodedMetaCache, ManifestFile};
 use thrift::protocol::TCompactOutputProtocol;
 
 fn skip_if_offline() -> bool {
@@ -52,16 +50,31 @@ fn skip_if_offline() -> bool {
 /// SHELF-50 only because this is a one-shot fixture, not a reusable
 /// utility.
 fn build_minimal_parquet_footer() -> Bytes {
-    let mut schema = SchemaElement::default();
-    schema.name = "minimal_root".to_owned();
-    schema.num_children = Some(0);
+    use parquet::format::FieldRepetitionType;
+    let schema = SchemaElement {
+        type_: None,
+        type_length: None,
+        repetition_type: Some(FieldRepetitionType::REQUIRED),
+        name: "minimal_root".to_owned(),
+        num_children: Some(0),
+        converted_type: None,
+        scale: None,
+        precision: None,
+        field_id: None,
+        logical_type: None,
+    };
 
-    let mut meta = FileMetaData::default();
-    meta.version = 1;
-    meta.schema = vec![schema];
-    meta.num_rows = 0;
-    meta.row_groups = Vec::new();
-    meta.created_by = Some("shelfd-it-decoded-meta".to_owned());
+    let meta = FileMetaData {
+        version: 1,
+        schema: vec![schema],
+        num_rows: 0,
+        row_groups: Vec::new(),
+        key_value_metadata: None,
+        created_by: Some("shelfd-it-decoded-meta".to_owned()),
+        column_orders: None,
+        encryption_algorithm: None,
+        footer_signing_key_metadata: None,
+    };
 
     let mut thrift_buf: Vec<u8> = Vec::new();
     {

@@ -203,18 +203,16 @@ impl DecodedMetaCache {
 
     /// Return the singleton process-wide instance with default caps.
     pub fn global() -> &'static DecodedMetaCache {
-        // Explicit deref so we return `&DecodedMetaCache`, not
-        // `&Lazy<DecodedMetaCache>`. Coercion does NOT fire in
-        // return position; this is the canonical Lazy-singleton
-        // accessor pattern.
-        &*INSTANCE
+        // Auto-deref coerces `&Lazy<DecodedMetaCache>` to
+        // `&DecodedMetaCache` here; clippy 1.95 flags the explicit
+        // deref, so we rely on the compiler-inserted deref.
+        &INSTANCE
     }
 
     /// Toggle the cache on/off without rebuilding it. Used by the
     /// config loader at startup; safe to call repeatedly.
     pub fn set_enabled(&self, on: bool) {
-        self.enabled
-            .store(on, std::sync::atomic::Ordering::Relaxed);
+        self.enabled.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// True iff the cache is currently enabled.
@@ -694,16 +692,35 @@ mod tests {
         // Minimum-viable empty-schema metadata. Parquet requires the
         // root SchemaElement to come first; one root with zero
         // children is the shortest valid schema list.
-        let mut schema = SchemaElement::default();
-        schema.name = "minimal_root".to_owned();
-        schema.num_children = Some(0);
+        // parquet 53 drops the `Default` impls, so we construct the
+        // structs explicitly.
+        use parquet::format::FieldRepetitionType;
+        let schema = SchemaElement {
+            type_: None,
+            type_length: None,
+            // parquet 53.4 validates that the root element carries a
+            // repetition type; REQUIRED is the canonical root choice.
+            repetition_type: Some(FieldRepetitionType::REQUIRED),
+            name: "minimal_root".to_owned(),
+            num_children: Some(0),
+            converted_type: None,
+            scale: None,
+            precision: None,
+            field_id: None,
+            logical_type: None,
+        };
 
-        let mut meta = FileMetaData::default();
-        meta.version = 1;
-        meta.schema = vec![schema];
-        meta.num_rows = 0;
-        meta.row_groups = Vec::new();
-        meta.created_by = Some("shelfd-decoded-meta-test".to_owned());
+        let meta = FileMetaData {
+            version: 1,
+            schema: vec![schema],
+            num_rows: 0,
+            row_groups: Vec::new(),
+            key_value_metadata: None,
+            created_by: Some("shelfd-decoded-meta-test".to_owned()),
+            column_orders: None,
+            encryption_algorithm: None,
+            footer_signing_key_metadata: None,
+        };
 
         let mut thrift_buf: Vec<u8> = Vec::new();
         {
