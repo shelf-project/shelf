@@ -633,12 +633,12 @@ impl Default for S3ShimConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AbTagConfig {
-    /// Master switch. The chart default is `false`; the penpencil
-    /// overlay flips it to `true`. The Trino plugin's *forwarding*
-    /// side has no kill switch — session properties are metadata, the
-    /// per-request HTTP-header cost is negligible, and a tag with no
-    /// downstream consumer (because shelfd is `enabled: false`) is
-    /// silently ignored.
+    /// Master switch. The chart default is `false`; operator overlays
+    /// (e.g. `<prod-overlay>/values-prod.yaml`) flip it to `true`. The
+    /// Trino plugin's *forwarding* side has no kill switch — session
+    /// properties are metadata, the per-request HTTP-header cost is
+    /// negligible, and a tag with no downstream consumer (because
+    /// shelfd is `enabled: false`) is silently ignored.
     #[serde(default = "AbTagConfig::default_enabled")]
     pub enabled: bool,
 

@@ -80,11 +80,11 @@ The single biggest risk of "free-form tagging" is Prometheus cardinality blow-up
 
 The cap is enforced *only* on the receive side. Trino-side forwarding has no kill switch — it is pure metadata and would otherwise become an operational footgun ("did the tag get set or not?" debugging).
 
-## Default-off in OSS, on in Penpencil
+## Default-off in OSS, on in operator overlays
 
 The Helm chart's default `cache.abTag.enabled: false` reflects the OSS-friendly stance: a fresh shelf deployment sees no cardinality bloom even if a misbehaving client starts spamming `X-Shelf-Tag`. The header is read, validated, ignored.
 
-The Penpencil production overlay (`infra/penpencil/charts/shelf/values-prod.yaml`) flips the toggle to `true`. The Penpencil-side rationale is concrete: the post-cutover analysis SQL on `cdp.trino_logs.trino_queries` already relies on per-cohort labelling, the Mimir-data Prometheus retention is sized for the per-tag series, and the SHELF-37 listener feeds the Iceberg event log with the same map.
+Operator overlays (e.g. a `<prod-overlay>/values-prod.yaml`) can flip the toggle to `true`. Typical operator rationale is concrete: the post-cutover analysis SQL on the query-log Iceberg table already relies on per-cohort labelling, Prometheus retention is sized for the per-tag series, and the SHELF-37 listener feeds the Iceberg event log with the same map.
 
 The Trino plugin's session-property forwarding has no toggle — it is metadata, no perf cost, and we prefer "always on, ignored on the receive side" over "configure two things to make tagging work".
 
