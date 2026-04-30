@@ -149,7 +149,7 @@ the wiring is:
    class snapshot tail.
 2. The shelfd binary instantiates a producer that wraps a
    `SnapshotPublisher` against the reactor's bounded mpsc.
-3. `cache.rewarm.enabled` flips to `true` in the penpencil overlay.
+3. `cache.rewarm.enabled` flips to `true` in the operator overlay.
 
 Until then, the chart's `LoggingEventStream` stub is the safe
 default: events received via the diagnostic `with_channel` constructor
@@ -229,8 +229,8 @@ for client traffic; no new credentials, no new mount workflow.
 1. Land this PR with `cache.rewarm.enabled: false` everywhere.
 2. Wait for the SHELF-37 listener PR (#66) to soak for 7 days on
    Tier-1 measurement substrate.
-3. Flip `cache.rewarm.enabled: true` on the penpencil overlay (kept
-   commented in `infra/penpencil/charts/shelf/values-prod.yaml`).
+3. Flip `cache.rewarm.enabled: true` on the operator overlay (kept
+   commented in `<prod-overlay>/values-prod.yaml`).
 4. Watch `shelf_rewarm_events_total{outcome="compaction_detected"}`
    actually move when an `EXECUTE optimize` runs against a hot
    table.

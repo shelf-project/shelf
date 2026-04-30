@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tests in `metrics.rs`. Helm chart gains `cache.rewarm.{enabled,
   maxBytesPerSec, maxConcurrentFiles, queueCapacity,
   snapshotLagToleranceSecs}`; `enabled: false` by default both in
-  the OSS values and operator overlays (overlay carries a
+  the OSS values and operator overlays (overlays carry a
   commented hint to flip after the Tier-1 measurement substrate is
   green for 7 days). Design note in
   `shelfd/docs/design-notes/SHELF-45-compaction-aware-rewarm.md`,
