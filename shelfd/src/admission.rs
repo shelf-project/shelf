@@ -172,6 +172,7 @@ mod tests {
                 nvme_bytes: 0,
                 eviction_policy: crate::config::EvictionPolicy::default(),
                 disk_cache: crate::config::RowGroupDiskCacheConfig::default(),
+                compression: crate::config::CompressionConfig::default(),
             },
         };
         let store = FoyerStore::open(&pools).await.expect("open");

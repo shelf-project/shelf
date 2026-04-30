@@ -249,6 +249,42 @@ cache:
         # submit-queue overflow lines in the logs.
         # admissionBytesPerSec: 209715200  # 200 MiB/s
 
+      # -- B1 — opt-in zstd compression of cached row-group payloads.
+      #
+      # When `enabled` is `true`, every row-group byte range is
+      # zstd-encoded before it lands in the Foyer DRAM tier (and
+      # therefore also before it reaches the NVMe tier on
+      # promotion). On real Iceberg / Parquet rowgroup data the
+      # ratio is ~1.4–2.5× — the columnar payloads are already
+      # dictionary-encoded but the per-page headers + repeated
+      # string values still compress meaningfully under zstd-3.
+      #
+      # At constant pod count this lifts hit ratio by ~5–10 pp by
+      # making the same NVMe budget hold more keys. At constant
+      # hit ratio it makes the StatefulSet shrinkable by one pod
+      # (~$200/mo per replica saved on the alluxio NodePool).
+      #
+      # On-disk safety: shelfd writes a `.shelf-compression.json`
+      # marker file inside `storage.mountPath` on first boot. If
+      # the operator later flips this knob without wiping the NVMe
+      # ring, shelfd aborts at boot with a clear "wipe NVMe to
+      # switch compression mode" error rather than corrupt-read
+      # silently. Switch playbook:
+      #   1. Scale the StatefulSet to 0
+      #   2. `kubectl exec` into a maintenance pod and `rm -rf
+      #      <storage.mountPath>/*`
+      #   3. Toggle this flag, `helm upgrade`, scale back up
+      compression:
+        enabled: false
+        # zstd level. `3` is zstd's own default; level 1–9 is the
+        # practical range (higher levels gain <5% ratio at 2-4×
+        # CPU cost). Level >= 1 and <= 22 is the hard validator
+        # range.
+        level: 3
+        # Frames smaller than this are stored uncompressed (the
+        # 13-byte zstd frame overhead dominates). Defaults to 256.
+        minSizeBytes: 256
+
   admission:
     # -- Refuse inserts for objects > 1 GiB unless pinned. [ADR-0003]
     sizeThresholdMiB: 1024

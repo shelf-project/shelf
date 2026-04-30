@@ -158,6 +158,7 @@ pub fn test_config() -> (OriginConfig, PoolsConfig, AdmissionConfig) {
             nvme_bytes: 0,
             eviction_policy: shelfd::config::EvictionPolicy::default(),
             disk_cache: Default::default(),
+            compression: Default::default(),
         },
     };
     let admission = AdmissionConfig {

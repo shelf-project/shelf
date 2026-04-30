@@ -1036,6 +1036,54 @@ pub static BLOOM_PARSE_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("register bloom_parse_errors_total")
 });
 
+/// **B1** — bytes presented to the compression pipeline before
+/// encoding (one increment per `insert` on a compression-enabled
+/// pool).
+pub static COMPRESS_BYTES_IN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_compress_bytes_in_total",
+        "Bytes presented to the compression pipeline before encoding, per pool (B1).",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register compress_bytes_in_total")
+});
+
+/// **B1** — bytes returned by the compression pipeline (post-encode,
+/// header byte included).
+pub static COMPRESS_BYTES_OUT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_compress_bytes_out_total",
+        "Bytes stored after the compression pipeline (encoded frame size), per pool (B1).",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register compress_bytes_out_total")
+});
+
+/// **B1** — encode/decode outcome counter.
+pub static COMPRESS_OUTCOMES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_compress_outcomes_total",
+        "Compression / decompression outcomes per pool (B1).",
+        &["pool", "outcome"],
+        REGISTRY
+    )
+    .expect("register compress_outcomes_total")
+});
+
+/// **B1** — compression pipeline latency, per pool + op.
+pub static COMPRESS_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec_with_registry!(
+        "shelf_compress_seconds",
+        "Latency of the compression pipeline, per pool + op (B1).",
+        &["pool", "op"],
+        prometheus::exponential_buckets(0.000_01, 2.0, 16).expect("compress bucket gen"),
+        REGISTRY
+    )
+    .expect("register compress_seconds")
+});
+
 /// Stable list of metric series `shelfd` exposes on `/metrics` in the
 /// Phase-0 gate build. Kept as module-level data so `docs/metrics.md`
 /// and the tests can both reference a single source of truth; the
@@ -1109,6 +1157,11 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_bloom_admit_total",
     "shelf_bloom_index_entries",
     "shelf_bloom_parse_errors_total",
+    // B1 — per-pool zstd compression telemetry.
+    "shelf_compress_bytes_in_total",
+    "shelf_compress_bytes_out_total",
+    "shelf_compress_outcomes_total",
+    "shelf_compress_seconds",
 ];
 
 #[cfg(test)]
@@ -1197,6 +1250,10 @@ mod tests {
             BLOOM_ADMIT_TOTAL.desc(),
             BLOOM_INDEX_ENTRIES.desc(),
             BLOOM_PARSE_ERRORS_TOTAL.desc(),
+            COMPRESS_BYTES_IN_TOTAL.desc(),
+            COMPRESS_BYTES_OUT_TOTAL.desc(),
+            COMPRESS_OUTCOMES_TOTAL.desc(),
+            COMPRESS_SECONDS.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -1366,6 +1423,18 @@ mod tests {
         BLOOM_PARSE_ERRORS_TOTAL
             .with_label_values(&["bad_magic"])
             .inc_by(0);
+        COMPRESS_BYTES_IN_TOTAL
+            .with_label_values(&["rowgroup"])
+            .inc_by(0);
+        COMPRESS_BYTES_OUT_TOTAL
+            .with_label_values(&["rowgroup"])
+            .inc_by(0);
+        COMPRESS_OUTCOMES_TOTAL
+            .with_label_values(&["rowgroup", "compressed"])
+            .inc_by(0);
+        COMPRESS_SECONDS
+            .with_label_values(&["rowgroup", "encode"])
+            .observe(0.0);
 
         let families = REGISTRY.gather();
         let names: HashSet<String> = families.iter().map(|f| f.name().to_owned()).collect();
