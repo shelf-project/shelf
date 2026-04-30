@@ -14,8 +14,18 @@
 #   + ~3 GiB Rust runtime / tokio stacks / jemalloc fragmentation headroom
 #
 # Violating this rule causes the kernel OOM-killer to terminate the pod
-# under load. The defaults below are conservative for a 32 GiB pod limit
-# on a node with ~27 GiB allocatable.
+# under load.
+#
+# rc.6 P0.6 (2026-04-30): bumped pod limit 32Gi → 40Gi after Phase D
+# rc.5 cutover saw shelf-3 OOMKilled at 27.81 GiB on a 32 GiB-limit pod
+# during rep-0 night load. The 32 GiB limit was already over the
+# c6a.4xlarge node-allocatable ceiling (~27.3 GiB), so the kernel was
+# pressure-evicting before the container limit fired. 40 GiB only fits
+# on m-family 4xlarge nodes (m6a/m5a/m7a — 64 GiB physical, ~58 GiB
+# allocatable); on c6a.4xlarge (32 GiB physical) the situation is
+# unchanged and the operator must constrain the node pool to m-family
+# instance-families before this overlay is rolled out.
+#   See agents/out/adr/0027-rc6-pod-memory-bump.md.
 
 replicaCount: 3
 
@@ -36,10 +46,21 @@ serviceAccount:
 resources:
   requests:
     cpu: "4"
-    memory: "24Gi"
+    # rc.6 P0.6: 24Gi → 28Gi. Keeps single-pod-per-node guarantee on the
+    # alluxio NodePool: any 4xlarge node has at most one shelf pod
+    # because 28Gi request > 27.3Gi allocatable on c6a.4xlarge nodes
+    # (which schedule-fail), and on m-family 4xlarge (~58Gi allocatable)
+    # a second 28Gi pod cannot fit either.
+    memory: "28Gi"
   limits:
     cpu: "8"
-    memory: "32Gi"
+    # rc.6 P0.6: 32Gi → 40Gi. Fits comfortably under m-family 4xlarge
+    # node allocatable (~58 GiB) with ~16 GiB headroom for the LODC
+    # submit queue + origin pool buffers. Must NOT be scheduled onto
+    # c6a.4xlarge (32 GiB physical / ~27 GiB allocatable) — the node
+    # pool spec must restrict instance-family to m6a/m5a/m7a before
+    # rolling this out. See agents/out/adr/0027-rc6-pod-memory-bump.md.
+    memory: "40Gi"
 
 storage:
   # Prefer local-nvme on instance-store node families (i4i, c6id, m6id,
