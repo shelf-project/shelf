@@ -2394,10 +2394,7 @@ mod store_tests {
             .await
             .unwrap();
         let used = store.used_bytes(Pool::RowGroup);
-        assert!(
-            used > 0,
-            "used_bytes must reflect at least the header byte"
-        );
+        assert!(used > 0, "used_bytes must reflect at least the header byte");
         assert!(
             (used as usize) < payload.len() / 2,
             "compression must shrink storage on highly redundant input: used={used}, payload={}",
@@ -2444,11 +2441,7 @@ mod store_tests {
             .insert(Pool::RowGroup, k(83), payload.clone())
             .await
             .unwrap();
-        assert!(store
-            .get(Pool::RowGroup, &k(83))
-            .await
-            .unwrap()
-            .is_some());
+        assert!(store.get(Pool::RowGroup, &k(83)).await.unwrap().is_some());
 
         let now_in = crate::metrics::COMPRESS_BYTES_IN_TOTAL
             .with_label_values(&["rowgroup"])
@@ -2493,7 +2486,9 @@ mod store_tests {
                 },
             },
         };
-        let _store = FoyerStore::open(&pools).await.expect("open hybrid + compression");
+        let _store = FoyerStore::open(&pools)
+            .await
+            .expect("open hybrid + compression");
         let marker_path = dir.path().join(".shelf-compression.json");
         let bytes = std::fs::read(&marker_path).expect("marker file must exist after open");
         let parsed: serde_json::Value =

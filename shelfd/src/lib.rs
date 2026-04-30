@@ -54,7 +54,10 @@ pub mod coalesce;
 // features so default `shelfd` builds ship a smaller binary; the source
 // stays in-tree per project policy (gate, don't delete) so a future
 // caller can flip the flag without resurrecting code from history.
-#[cfg(feature = "zstd_metadata")]
+// B1 (rowgroup zstd) + SHELF-E2 (metadata zstd, feature-gated consumer).
+// Module is unconditionally compiled because B1 wires runtime-configured
+// compression through `CompressionPipeline`; the `zstd_metadata` feature
+// only gates the metadata-pool consumer, not the module definition.
 pub mod compression;
 pub mod config;
 pub mod control;

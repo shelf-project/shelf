@@ -1261,7 +1261,8 @@ pin_list:
             level: 999,
             min_size_bytes: 0,
         };
-        cfg.validate().expect("disabled compression must always validate");
+        cfg.validate()
+            .expect("disabled compression must always validate");
     }
 
     #[test]
