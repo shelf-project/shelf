@@ -6,7 +6,9 @@
 //! - SHELF-20 (shelfd half) — the `/stats` JSON contract Agent 5's
 //!   plugin membership loader consumes.
 //!
-//! Gated on `SHELF_INTEGRATION=1`; see `tests/docker-compose.yml`.
+//! Gating: every test is `#[cfg_attr(not(feature = "integration"),
+//! ignore)]`. Run with `cargo test -p shelfd --features integration`
+//! after `docker compose -f shelfd/tests/docker-compose.yml up -d`.
 
 #![cfg(test)]
 
@@ -14,15 +16,14 @@ mod common;
 
 use bytes::Bytes;
 use common::{
-    build_state_with_pod_id, delete_object, ensure_bucket, put_object, s3_client, skip_if_offline,
-    spawn_server, TEST_BUCKET,
+    build_state_with_pod_id, delete_object, ensure_bucket, put_object, require_minio_or_panic,
+    s3_client, spawn_server, TEST_BUCKET,
 };
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn head_returns_content_length_matching_object_size() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let client = s3_client().await;
     ensure_bucket(&client).await;
     let key = "head-size";
@@ -56,10 +57,9 @@ async fn head_returns_content_length_matching_object_size() {
 /// object has been deleted must still return 200 from the LRU. If
 /// the LRU were absent, the second HEAD would 404.
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn second_head_hits_lru_after_origin_delete() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let client = s3_client().await;
     ensure_bucket(&client).await;
     let key = "head-lru-survives-delete";
@@ -111,10 +111,9 @@ async fn second_head_hits_lru_after_origin_delete() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn head_on_missing_object_returns_404() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let client = s3_client().await;
     ensure_bucket(&client).await;
 
@@ -138,10 +137,9 @@ async fn head_on_missing_object_returns_404() {
 /// the operator configured and must reflect actual pool usage once
 /// the cache is populated.
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn stats_reflects_pool_usage_after_cache_populate() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let client = s3_client().await;
     ensure_bucket(&client).await;
     let pod_id = "shelf-stats-demo";

@@ -94,6 +94,14 @@ default = []
 # default so the CI image stays identical and we don't require a
 # node toolchain on the critical build path.
 ui = ["dep:rust-embed", "dep:mime_guess"]
+# Gate for MinIO-backed integration tests (`it_read_path.rs`,
+# `it_head_stats.rs`, `it_s3_shim.rs`, `it_shim_write*.rs`). Off by
+# default so plain `cargo test` on a developer laptop or in CI without
+# docker compose stays fast and the runner reports affected tests as
+# `ignored` (idiomatic Rust) rather than silently passing in 0s.
+# Flip on via `cargo test -p shelfd --features integration` after
+# `docker compose -f shelfd/tests/docker-compose.yml up -d`.
+integration = []
 # Enable the Foyer NVMe tier (SHELF-18). Off by default while the
 # hybrid pool is behind a PVC that only exists in rep-2.
 foyer_pool = []

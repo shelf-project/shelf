@@ -1,11 +1,12 @@
 //! Integration tests for SHELF-21b — multipart upload, ListObjectsV2,
 //! bulk DeleteObjects.
 //!
-//! Gating: skipped unless `SHELF_INTEGRATION=1` is set + a MinIO is
-//! running on `127.0.0.1:9000`.
+//! Gating: every test is `#[cfg_attr(not(feature = "integration"),
+//! ignore)]`. Run with `cargo test -p shelfd --features integration`
+//! after MinIO is up.
 //!
 //!   cd shelfd/tests && docker compose up -d minio
-//!   SHELF_INTEGRATION=1 cargo test -p shelfd --test it_shim_write_v2
+//!   cargo test -p shelfd --features integration --test it_shim_write_v2
 //!
 //! What this asserts:
 //!
@@ -32,8 +33,8 @@ use reqwest::Client;
 
 mod common;
 use common::{
-    build_state_with_pod_id, ensure_bucket, s3_client, skip_if_offline, spawn_server_with_shim,
-    TEST_BUCKET,
+    build_state_with_pod_id, ensure_bucket, require_minio_or_panic, s3_client,
+    spawn_server_with_shim, TEST_BUCKET,
 };
 
 async fn http_client() -> Client {
@@ -88,10 +89,9 @@ fn extract_all_tags<'a>(body: &'a str, tag: &str) -> Vec<&'a str> {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn multipart_upload_round_trips_through_shim() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 
@@ -206,10 +206,9 @@ async fn multipart_upload_round_trips_through_shim() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn multipart_abort_cancels_upload() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 
@@ -262,10 +261,9 @@ async fn multipart_abort_cancels_upload() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn list_objects_v2_returns_seeded_keys_in_order() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 
@@ -340,10 +338,9 @@ async fn list_objects_v2_returns_seeded_keys_in_order() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn list_objects_v2_paginates_via_continuation_token() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 
@@ -431,10 +428,9 @@ async fn list_objects_v2_paginates_via_continuation_token() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn bulk_delete_removes_all_listed_keys() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 
@@ -491,10 +487,9 @@ async fn bulk_delete_removes_all_listed_keys() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn bulk_delete_quiet_mode_hides_successes() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 
@@ -533,10 +528,9 @@ async fn bulk_delete_quiet_mode_hides_successes() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn bulk_delete_rejects_malformed_xml_with_400() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 
@@ -577,10 +571,9 @@ async fn bulk_delete_rejects_malformed_xml_with_400() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn complete_multipart_rejects_malformed_xml() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 
@@ -627,10 +620,9 @@ async fn complete_multipart_rejects_malformed_xml() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn upload_part_rejects_invalid_part_number() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
 
     let state = build_state_with_pod_id("shelf-it-uppart-invalid").await;
     let (_native, shim, cancel) = spawn_server_with_shim(state).await;
@@ -682,10 +674,9 @@ async fn upload_part_rejects_invalid_part_number() {
 /// CI memory headroom is finite, but it's enough to exercise the
 /// streaming path beyond a single TCP read.
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn upload_part_streams_large_body() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 
@@ -778,10 +769,9 @@ async fn upload_part_streams_large_body() {
 /// error from the client (acceptable: server hung up because we
 /// lied). Both are valid signals that the cap fired.
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn upload_part_rejects_oversized_content_length_header() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
 
     let state = build_state_with_pod_id("shelf-it-uppart-oversize").await;
     let (_native, shim, cancel) = spawn_server_with_shim(state).await;
@@ -831,10 +821,9 @@ async fn upload_part_rejects_oversized_content_length_header() {
 /// for >1000) — we don't push past 1000 here to keep test wall-time
 /// under a second.
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn bulk_delete_handles_many_keys() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 
@@ -904,10 +893,9 @@ async fn bulk_delete_handles_many_keys() {
 /// single-key `delete_is_idempotent_on_missing_key` invariant from
 /// SHELF-21 v1.
 #[tokio::test]
+#[cfg_attr(not(feature = "integration"), ignore)]
 async fn bulk_delete_is_idempotent_on_missing_keys() {
-    if skip_if_offline() {
-        return;
-    }
+    require_minio_or_panic();
     let s3 = s3_client().await;
     ensure_bucket(&s3).await;
 
