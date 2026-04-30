@@ -31,7 +31,7 @@
 //! "`tools/gen_pin_list.py` /admin/pin schema gap" — Apr 30 finding
 //! during the rep-0 cutover prep).
 //!
-//! ## Decision (per ADR-0023)
+//! ## Decision (per ADR-0026)
 //!
 //! Widen the deserializer via a `serde(untagged)` enum so
 //! `/admin/pin` accepts either schema. The replay-list shape is

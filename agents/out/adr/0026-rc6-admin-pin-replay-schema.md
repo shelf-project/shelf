@@ -1,4 +1,4 @@
-# ADR 0023: `/admin/pin` accepts replay-list manifest schema (RC6 P1.3)
+# ADR 0026: `/admin/pin` accepts replay-list manifest schema (RC6 P1.3)
 
 *Status: Accepted (2026-04-30)*
 *Deciders: rust-engineer-1, ops-aamir*
@@ -172,7 +172,7 @@ Reject for v1. The untagged-enum path is structurally simpler and
 the wire shapes are unambiguous (object-with-`key_hex` vs object-
 with-`bucket+key+etag` vs top-level array). If the schema
 proliferates further (per-entry TTLs, priority hints), the wire
-shape that adds those gets a discriminator and we revisit. ADR-0023
+shape that adds those gets a discriminator and we revisit. ADR-0026
 itself is the schema-version inventory marker for now.
 
 ### C. Two endpoints (`/admin/pin` strict, `/admin/replay-pin` replay)

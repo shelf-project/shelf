@@ -1297,7 +1297,7 @@ pub mod handlers {
     /// `{key_hex, pool, [mv_name]}` shape OR the RC6 P1.3 replay-list
     /// shape (single object or array of `{bucket, key, etag,
     /// size_bytes, ...}` manifest entries). See
-    /// [`crate::admin_pin_payload`] and ADR-0023 for the schema +
+    /// [`crate::admin_pin_payload`] and ADR-0026 for the schema +
     /// conversion contract.
     ///
     /// Response shape:
