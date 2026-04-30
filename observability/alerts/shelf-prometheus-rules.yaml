@@ -111,6 +111,67 @@ spec:
             runbook_url: https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-pod-restarting.md
             dashboard_url: ${GRAFANA_URL}/d/shelf-overview
 
+        # ADR-0024 / rc.6 P1.4 — per-pod RSS watermark alerts.
+        # The values-prod.yaml limit is 32 GiB but on a node with ~27.3
+        # GiB allocatable the practical OOM ceiling is ~27 GiB. Two
+        # watermarks let on-call distinguish "investigate" from "act
+        # right now":
+        #   - 24 GiB warn @ 5m sustained: investigate before adding
+        #     another replica's traffic.
+        #   - 25.5 GiB critical @ 2m sustained: scale shelf-pool +2 OR
+        #     rolling-restart the offending pod immediately.
+        # The `max without(prometheus, dataPrometheusReplica)` wrapper
+        # de-duplicates HA-Prometheus pairs (mimir-prod / mimir-data
+        # carry both `-0` and `-1` replicas of every series).
+        - alert: ShelfPodRSSWarn
+          expr: |
+            max without(prometheus, dataPrometheusReplica) (
+              container_memory_working_set_bytes{namespace="shelf", container="shelfd"}
+            ) / (1024 * 1024 * 1024) > 24
+          for: 5m
+          labels:
+            severity: warning
+            team: shelf-sre
+            service: shelf
+          annotations:
+            summary: "Shelf pod {{ $labels.pod }} RSS > 24 GiB (warn watermark)"
+            description: |
+              RSS is approaching the ~27 GiB OOM ceiling on the node
+              this pod is scheduled on. Investigate before adding more
+              replica traffic. Likely culprits:
+                - Foyer DRAM pool overshoot (check shelf_dram_bytes_used).
+                - Submit-queue overflow under sustained writes
+                  (shelf_lodc_drops_total{reason="submit_queue_overflow"}).
+                - In-flight S3 buffers under high concurrency
+                  (origin.pool.maxConnections × ~32 MiB rowgroup).
+            runbook_url: https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-pod-rss-watermark.md
+            dashboard_url: ${GRAFANA_URL}/d/shelf-overview-v2
+
+        - alert: ShelfPodRSSCritical
+          expr: |
+            max without(prometheus, dataPrometheusReplica) (
+              container_memory_working_set_bytes{namespace="shelf", container="shelfd"}
+            ) / (1024 * 1024 * 1024) > 25.5
+          for: 2m
+          labels:
+            severity: critical
+            team: shelf-sre
+            service: shelf
+          annotations:
+            summary: "Shelf pod {{ $labels.pod }} RSS > 25.5 GiB (critical, OOM imminent)"
+            description: |
+              Pod is within ~1.5 GiB of the OOM ceiling. Act now:
+                1. Scale shelf-pool +2 pods (peer-fetch will redistribute
+                   load across the larger ring).
+                2. Or rolling-restart this pod (Foyer NVMe replays
+                   within the 5-minute startupProbe grace).
+              Do NOT wait for the warning timer to escalate — once the
+              kernel OOM-kills shelfd, in-flight queries on this pod's
+              served keys fall through to S3 with a brief
+              UnknownHostException window during the DNS race.
+            runbook_url: https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-pod-rss-watermark.md
+            dashboard_url: ${GRAFANA_URL}/d/shelf-overview-v2
+
         - alert: ShelfCircuitBreakerOpen
           # agents/8-operator.md §Pass-2: any pod, breaker open > 5m.
           # Encoded state: 0=closed, 1=half-open, 2=open.
