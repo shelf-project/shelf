@@ -41,6 +41,29 @@ covered by the `registry_exposes_documented_series` regression test.
 | `shelf_compress_seconds` | histogram | `{pool, op}` | Compression-pipeline latency; `op` ∈ `encode`, `decode`. | B1 |
 | `shelf_wtinylfu_decisions_total` | counter | `{outcome}` | W-TinyLFU admission decisions per call. `outcome` ∈ `admit`, `reject_inner` (size or pin-list rejected before the frequency gate), `reject_freq` (size accepted but estimated frequency below admit threshold), `reject_other` (combination edge cases — e.g. pinned + inner reject). | SHELF-33 |
 | `shelf_wtinylfu_decays_total` | counter | `{component}` | W-TinyLFU window-decay events: 4-bit Count-Min Sketch halve + Bloom doorkeeper clear at every `window_size` observations. `component` ∈ `both` today (sketch + bloom decay together); kept labelled in case future work splits the cadences. | SHELF-33 |
+| `shelf_predicate_prune_requests_total` | counter | `{outcome}` | `/predicate-prune` request count; `outcome ∈ {hit, miss, error}`. Drives the rollback alert `5xx-rate > 1% / 5m`. | SHELF-34 |
+| `shelf_predicate_prune_seconds` | histogram | `{outcome}` | End-to-end `/predicate-prune` handler latency. Covers allowlist validation, page-index lookup or parse, and predicate evaluation. | SHELF-34 |
+| `shelf_page_index_cached_bytes` | gauge | `{pool}` | Approximate bytes held in the in-process Parquet `PageIndexCache`. Updated on every cache miss / parse. | SHELF-34 |
+| `shelf_page_index_parse_seconds` | histogram | `{outcome}` | Parquet page-index parse latency, one observation per `extract_page_index` call (i.e. per cache miss). | SHELF-34 |
+
+### SHELF-34 page-index sidecar — operator notes
+
+The `/predicate-prune` endpoint is bucket-allowlist gated. Default OSS
+build ships an empty allowlist; populate via an operator-side overlay
+file (e.g. a `sidecar-allowlist.toml` shipped through the operator's
+deployment overlay) at startup. The four metric series above are the
+rollback signals:
+
+- `rate(shelf_predicate_prune_requests_total{outcome="error"}[5m]) /
+   rate(shelf_predicate_prune_requests_total[5m]) > 0.01` for ≥ 5 min
+   ⇒ disable sidecar.
+- `rate(shelf_origin_request_bytes_total[10m])` up `> 20%` vs
+   pre-cutover baseline ⇒ sidecar misroute, disable.
+
+`hit` outcomes are the warm-cache happy path (page index already
+parsed for this ETag); `miss` outcomes triggered a footer parse;
+`error` outcomes are 4xx responses (allowlist rejection, oversized
+footer, predicate shape error, unknown column, etc).
 
 ## Planned (future tickets)
 

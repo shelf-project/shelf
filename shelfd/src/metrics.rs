@@ -1106,6 +1106,52 @@ pub static WTINYLFU_DECAYS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("register wtinylfu_decays_total")
 });
 
+/// SHELF-34 — `/predicate-prune` request counter.
+pub static PREDICATE_PRUNE_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_predicate_prune_requests_total",
+        "Requests to /predicate-prune, partitioned by outcome.",
+        &["outcome"],
+        REGISTRY
+    )
+    .expect("register predicate_prune_requests_total")
+});
+
+/// SHELF-34 — `/predicate-prune` end-to-end latency in seconds.
+pub static PREDICATE_PRUNE_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec_with_registry!(
+        "shelf_predicate_prune_seconds",
+        "End-to-end /predicate-prune handler latency in seconds.",
+        &["outcome"],
+        prometheus::exponential_buckets(0.0005, 2.0, 16).expect("predicate_prune bucket gen"),
+        REGISTRY
+    )
+    .expect("register predicate_prune_seconds")
+});
+
+/// SHELF-34 — approximate bytes held in the in-process PageIndex cache.
+pub static PAGE_INDEX_CACHED_BYTES: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_page_index_cached_bytes",
+        "Approximate bytes held in the in-process Parquet PageIndex cache.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register page_index_cached_bytes")
+});
+
+/// SHELF-34 — Parquet page-index parse latency (per cache miss).
+pub static PAGE_INDEX_PARSE_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec_with_registry!(
+        "shelf_page_index_parse_seconds",
+        "Parquet page-index parse latency in seconds (per cache miss).",
+        &["outcome"],
+        prometheus::exponential_buckets(0.0005, 2.0, 16).expect("page_index_parse bucket gen"),
+        REGISTRY
+    )
+    .expect("register page_index_parse_seconds")
+});
+
 /// Stable list of metric series `shelfd` exposes on `/metrics` in the
 /// Phase-0 gate build. Kept as module-level data so `docs/metrics.md`
 /// and the tests can both reference a single source of truth; the
@@ -1190,6 +1236,11 @@ pub const EXPOSED_SERIES: &[&str] = &[
     // SHELF-33 — W-TinyLFU admission gate telemetry.
     "shelf_wtinylfu_decisions_total",
     "shelf_wtinylfu_decays_total",
+    // SHELF-34 — page-index sidecar telemetry.
+    "shelf_predicate_prune_requests_total",
+    "shelf_predicate_prune_seconds",
+    "shelf_page_index_cached_bytes",
+    "shelf_page_index_parse_seconds",
 ];
 
 #[cfg(test)]
@@ -1284,6 +1335,10 @@ mod tests {
             COMPRESS_BYTES_OUT_TOTAL.desc(),
             COMPRESS_OUTCOMES_TOTAL.desc(),
             COMPRESS_SECONDS.desc(),
+            PREDICATE_PRUNE_REQUESTS_TOTAL.desc(),
+            PREDICATE_PRUNE_SECONDS.desc(),
+            PAGE_INDEX_CACHED_BYTES.desc(),
+            PAGE_INDEX_PARSE_SECONDS.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -1468,6 +1523,18 @@ mod tests {
             .inc_by(0);
         COMPRESS_SECONDS
             .with_label_values(&["rowgroup", "encode"])
+            .observe(0.0);
+        PREDICATE_PRUNE_REQUESTS_TOTAL
+            .with_label_values(&["miss"])
+            .inc_by(0);
+        PREDICATE_PRUNE_SECONDS
+            .with_label_values(&["miss"])
+            .observe(0.0);
+        PAGE_INDEX_CACHED_BYTES
+            .with_label_values(&["metadata"])
+            .set(0);
+        PAGE_INDEX_PARSE_SECONDS
+            .with_label_values(&["ok"])
             .observe(0.0);
 
         let families = REGISTRY.gather();

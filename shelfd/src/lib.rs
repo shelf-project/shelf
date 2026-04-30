@@ -80,7 +80,11 @@ pub mod metrics;
 pub mod mv_registry;
 pub mod origin;
 pub mod parquet_admit;
-#[cfg(feature = "parquet_meta")]
+// SHELF-34 wires `/predicate-prune` through `parquet_meta` in the hot
+// path, so the module is unconditional. The `parquet_meta` feature
+// kept in `shelfd/Cargo.toml` remains a marker for legacy callers
+// (SHELF-46 bloom-block range extraction); the module definition is
+// always present.
 pub mod parquet_meta;
 pub mod peer;
 pub mod peer_fetch;
