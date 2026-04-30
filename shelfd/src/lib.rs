@@ -62,6 +62,7 @@ pub mod control;
 // model. Lives here (not under `metrics`) because it owns its own
 // rolling-rate background task in addition to the metric handles.
 pub mod cost;
+pub mod decoded_meta;
 pub mod error;
 pub mod filter_service;
 #[cfg(feature = "fingerprint")]

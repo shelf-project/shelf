@@ -75,6 +75,20 @@ async fn run(args: Args) -> anyhow::Result<()> {
     tracing::info!(node = %config.node.id, "shelfd starting");
 
     let metrics = Arc::new(metrics::Registry::init()?);
+
+    // SHELF-50 — flip the decoded-metadata LRU on/off based on the
+    // `cache.decodedMeta.enabled` config. The cache itself is a
+    // process-wide singleton; we only toggle the runtime gate here.
+    // Default off, so this is a no-op until an operator opts in.
+    shelfd::decoded_meta::set_enabled(config.decoded_meta.enabled);
+    if config.decoded_meta.enabled {
+        tracing::info!(
+            max_manifest_entries = config.decoded_meta.max_manifest_entries,
+            max_footer_entries = config.decoded_meta.max_footer_entries,
+            "SHELF-50 decoded-metadata cache enabled",
+        );
+    }
+
     let origin = Arc::new(S3Origin::new(&config.origin).await?);
     let store = Arc::new(FoyerStore::open(&config.pools).await?);
     let router = Arc::new(Router::new());

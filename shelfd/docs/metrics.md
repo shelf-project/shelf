@@ -30,6 +30,11 @@ covered by the `registry_exposes_documented_series` regression test.
 | `shelf_coalesce_followers_total` | counter | `{pool}` | GET requests that joined an in-flight leader and sliced its bytes; each follower = 1 origin GET + 1 Foyer insert that did NOT happen. | SHELF-30 |
 | `shelf_coalesce_follower_bytes_saved_total` | counter | `{pool}` | Bytes returned to followers from a leader's payload. Numerator of the SHELF-30 "$ saved" panel. | SHELF-30 |
 | `shelf_coalesce_fallthrough_total` | counter | `{pool,reason}` | Followers that fell through to the standard fetch path. `reason` ∈ `{leader_dropped, leader_error, truncated}`. Sustained non-zero rate is a correctness alarm, not a tuning lever. | SHELF-30 |
+| `shelf_decoded_meta_hits_total` | counter | `{kind}`           | Hits in the SHELF-50 decoded-metadata in-process LRU. `kind` ∈ `{manifest, parquet_footer}`. | SHELF-50 |
+| `shelf_decoded_meta_misses_total` | counter | `{kind}`         | Misses in the SHELF-50 decoded-metadata LRU. A miss does NOT trigger an origin GET; the byte cache is the source of truth. | SHELF-50 |
+| `shelf_decoded_meta_decode_seconds` | histogram | `{kind}`     | Wall-clock seconds the SHELF-50 decode worker spent parsing one entry. Buckets `prometheus::exponential_buckets(0.000_010, 2.0, 16)` — 10 µs → ~330 ms. | SHELF-50 |
+| `shelf_decoded_meta_entries`  | gauge     | `{kind}`             | Resident entry count per kind in the SHELF-50 LRU. Compare against `cache.decodedMeta.maxManifestEntries` / `maxFooterEntries`. | SHELF-50 |
+| `shelf_decoded_meta_decode_errors_total` | counter | `{kind, reason}` | Decode failures observed by the SHELF-50 worker. `reason` ∈ `{bad_magic, parquet_thrift, avro_header}`. Failed entries are NOT installed. | SHELF-50 |
 
 ## Planned (future tickets)
 

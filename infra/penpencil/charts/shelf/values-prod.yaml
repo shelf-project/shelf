@@ -122,6 +122,16 @@ cache:
     maxDistinctTags: 16
     scrapeWindow: 60s
 
+  # SHELF-50 decoded-metadata cache. Left OFF in this overlay until
+  # SHELF-46 (bloom-aware footer admission) is the first downstream
+  # consumer ready to read decoded data. Flip `enabled: true` then
+  # — see `shelfd/docs/design-notes/SHELF-50-decoded-metadata-cache.md`
+  # for the rollout sequence.
+  # decodedMeta:
+  #   enabled: true
+  #   maxManifestEntries: 10000
+  #   maxFooterEntries: 10000
+
 origin:
   # Origin bucket (the data lake Trino reads).
   bucket: ""

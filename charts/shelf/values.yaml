@@ -362,6 +362,25 @@ cache:
     # cohort eventually rolls out of the sentinel state.
     scrapeWindow: 60s
 
+  # -- SHELF-50 — Decoded-metadata in-process LRU. Holds parsed
+  # `ManifestFile` and `ParquetMetaData` keyed by S3 ETag, so warm
+  # planning-path reads skip the Avro / Thrift deserialise step.
+  # Off by default because v1 ships the infrastructure ahead of any
+  # consumer (downstream tickets SHELF-46 / SHELF-37 / SHELF-47 flip
+  # it on once they consume the decoded data). Memory budget in v1
+  # is by entry count only; per-entry size tracking is a SHELF-50b
+  # follow-up — see
+  # `shelfd/docs/design-notes/SHELF-50-decoded-metadata-cache.md`.
+  decodedMeta:
+    enabled: false
+    # -- Max resident decoded `ManifestFile` entries. ~32–256 KiB
+    # per entry on production manifests, so a saturated cache at
+    # 10 000 entries holds ~320 MiB–2.5 GiB worst case.
+    maxManifestEntries: 10000
+    # -- Max resident decoded `ParquetMetaData` entries. Smaller
+    # per-entry footprint (~4–32 KiB).
+    maxFooterEntries: 10000
+
 # ---------------------------------------------------------------------------
 # Origin (S3) client — [plan §4 SHELF-05]
 # ---------------------------------------------------------------------------
