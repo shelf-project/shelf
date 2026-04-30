@@ -1,0 +1,69 @@
+{
+  "_comment": [
+    "Curated golden snapshot for the SHELF-53 dry-run integration test.",
+    "Compared structurally — the test in tests/it_recommend.rs::dry_run_matches_golden_snapshot",
+    "parses both this file and the live binary's output and asserts:",
+    "  - schema_version + generator + as_of are byte-equal,",
+    "  - inputs.* are byte-equal,",
+    "  - recommendations is the same length, sorted in the same order,",
+    "  - each recommendation matches by recommendation_type + table,",
+    "  - confidences are within +/- 0.001 of the snapshot,",
+    "  - rationale numeric fields match within a small tolerance.",
+    "We deliberately do NOT byte-compare the entire JSON because f32 ->",
+    "f64 -> ryu round-trip can produce architecture-dependent trailing",
+    "digits. The determinism guarantee is verified separately by",
+    "tests/it_recommend.rs::dry_run_byte_identical_between_runs."
+  ],
+  "generator": "shelf-advisor",
+  "schema_version": "1.0.0",
+  "as_of": "2026-04-30T00:00:00Z",
+  "inputs": {
+    "trino_query_count": 20,
+    "tables_scanned": 4,
+    "shelfd_pods_scraped": 2,
+    "window_secs": 604800,
+    "event_log_table": "shelf_advisor.events.query_log"
+  },
+  "recommendations": [
+    {
+      "recommendation_type": "optimize_targets",
+      "table": "demo.events.purchases",
+      "confidence": 0.8333,
+      "rationale": {
+        "small_file_bytes_threshold": 33554432,
+        "small_files": 10,
+        "total_files": 12,
+        "small_file_ratio": 0.8333,
+        "small_bytes": 10485760,
+        "total_bytes": 144703488,
+        "avg_file_bytes": 12058624
+      },
+      "suggested_change": {
+        "alter_table": "ALTER TABLE demo.events.purchases EXECUTE optimize(file_size_threshold => '32MB')",
+        "rewrite_data_files": true
+      }
+    },
+    {
+      "recommendation_type": "pin_list_candidates",
+      "table": "demo.events.purchases",
+      "confidence": 0.6,
+      "rationale": {
+        "frequency": 10,
+        "wall_time_seconds": 1000.0,
+        "scanned_bytes": 10737418240,
+        "pool_capacity_bytes": 10737418240,
+        "score": 53687091200000.0,
+        "score_formula": "(scanned_bytes * wall_time_seconds * frequency) / (1 + scanned_bytes / pool_capacity)"
+      },
+      "suggested_change": {
+        "pin_list_entry": {
+          "table": "demo.events.purchases",
+          "partition_filter": null,
+          "ttl": "24h",
+          "pool": "rowgroup"
+        },
+        "format": "shelfd/docs/design-notes/SHELF-23-24-admin-surface-and-pinlist.md"
+      }
+    }
+  ]
+}

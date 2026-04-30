@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/shelf-project/shelf/shelf-advisor/schema/envelope.schema.json",
+  "title": "Envelope",
+  "description": "Versioned envelope around a recommendation array. Written by `shelf-advisor recommend` / `watch` / `dry-run`. The legacy `analyze` command writes a bare array (no envelope) for backward compatibility with the SHELF-34 phase-1 scaffold.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "generator",
+    "schema_version",
+    "as_of",
+    "inputs",
+    "recommendations"
+  ],
+  "properties": {
+    "generator": {
+      "type": "string",
+      "const": "shelf-advisor",
+      "description": "Source-of-record tag. Constant; downstream filters can pin on this."
+    },
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semver of this envelope schema. SHELF-53 ships 1.0.0; bumps signal a breaking change."
+    },
+    "as_of": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$",
+      "description": "RFC3339 wall-clock pin (UTC, second precision). Override via `--as-of` for deterministic tests."
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trino_query_count",
+        "tables_scanned",
+        "shelfd_pods_scraped",
+        "window_secs",
+        "event_log_table"
+      ],
+      "properties": {
+        "trino_query_count": { "type": "integer", "minimum": 0 },
+        "tables_scanned": { "type": "integer", "minimum": 0 },
+        "shelfd_pods_scraped": { "type": "integer", "minimum": 0 },
+        "window_secs": { "type": "integer", "minimum": 0 },
+        "event_log_table": { "type": "string" }
+      }
+    },
+    "recommendations": {
+      "type": "array",
+      "items": { "$ref": "recommendation.schema.json" }
+    }
+  }
+}

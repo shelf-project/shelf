@@ -83,6 +83,7 @@ jobs:
       is_dryrun: ${{ steps.resolve.outputs.is_dryrun }}
       should_publish: ${{ steps.resolve.outputs.should_publish }}
       shelfctl_present: ${{ steps.shelfctl.outputs.present }}
+      shelf_advisor_present: ${{ steps.shelf_advisor.outputs.present }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -188,6 +189,16 @@ jobs:
           else
             echo "present=false" >> "${GITHUB_OUTPUT}"
             echo "::notice::shelfctl/Cargo.toml not found — binaries job will be skipped."
+          fi
+
+      - name: Detect shelf-advisor crate
+        id: shelf_advisor
+        run: |
+          if [[ -f shelf-advisor/Cargo.toml ]]; then
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "present=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::shelf-advisor/Cargo.toml not found — advisor binaries job will be skipped."
           fi
 
   # ===================================================================
@@ -661,16 +672,132 @@ jobs:
           if-no-files-found: warn
 
   # ===================================================================
+  # 6b. shelf-advisor static binaries (matrix) — SHELF-53
+  # ===================================================================
+  # Same SBOM + cosign signing pattern as shelfctl, but a narrower
+  # platform matrix per the SHELF-53 user override:
+  #   linux/amd64 (musl, static) — cross-rs
+  #   darwin/arm64 (Apple Silicon) — native macos-14 runner
+  # linux/arm64 is OUT for v1 — the QEMU + arm64 matrix exceeds the
+  # 90-min runner cap (same gotcha that bit shelfd's image build at
+  # rc.1; see build-image comment block above). Re-enable via a
+  # native arm64 runner slot when one is available.
+  # ===================================================================
+  shelf-advisor:
+    name: shelf-advisor ${{ matrix.target }}
+    needs: preflight
+    if: needs.preflight.outputs.shelf_advisor_present == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    continue-on-error: true
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-22.04
+            cross: true
+            os: linux
+            arch: amd64
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            cross: false
+            os: darwin
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross == true
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Build (cross)
+        if: matrix.cross == true
+        run: cross build --release --bin shelf-advisor --target ${{ matrix.target }} --locked
+
+      - name: Build (native)
+        if: matrix.cross == false
+        run: cargo build --release --bin shelf-advisor --target ${{ matrix.target }} --locked
+
+      - name: Strip binary
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/shelf-advisor"
+          if [[ "${{ matrix.os }}" == "darwin" ]]; then
+            strip "${BIN}" || true
+          else
+            strip "${BIN}" || llvm-strip "${BIN}" || true
+          fi
+          ls -la "${BIN}"
+
+      - name: Tarball
+        id: pkg
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          NAME="shelf-advisor-${TAG}-${{ matrix.os }}-${{ matrix.arch }}"
+          STAGE="dist/${NAME}"
+          mkdir -p "${STAGE}"
+          cp "target/${{ matrix.target }}/release/shelf-advisor" "${STAGE}/shelf-advisor"
+          cp LICENSE NOTICE "${STAGE}/" 2>/dev/null || true
+          cp shelf-advisor/README.md "${STAGE}/README.md" 2>/dev/null || true
+          cp shelf-advisor/config.example.yaml "${STAGE}/config.example.yaml" 2>/dev/null || true
+          tar -czf "dist/${NAME}.tar.gz" -C dist "${NAME}"
+          (cd dist && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+          echo "tarball=dist/${NAME}.tar.gz" >> "${GITHUB_OUTPUT}"
+          echo "checksum=dist/${NAME}.tar.gz.sha256" >> "${GITHUB_OUTPUT}"
+          ls -la dist
+
+      - name: Install cosign
+        if: needs.preflight.outputs.should_publish == 'true'
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Sign tarball
+        if: needs.preflight.outputs.should_publish == 'true'
+        env:
+          TARBALL: ${{ steps.pkg.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --output-signature "${TARBALL}.sig" \
+            --output-certificate "${TARBALL}.pem" \
+            "${TARBALL}"
+
+      - name: Upload artefacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: shelf-advisor-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            ${{ steps.pkg.outputs.tarball }}
+            ${{ steps.pkg.outputs.checksum }}
+            ${{ steps.pkg.outputs.tarball }}.sig
+            ${{ steps.pkg.outputs.tarball }}.pem
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ===================================================================
   # 7. GitHub Release — gather every artefact, publish notes, mark
   #    prereleases appropriately. Notes come from CHANGELOG.md
   #    [Unreleased] section if present, else fall back to autogenerated.
   # ===================================================================
   github-release:
     name: GitHub Release
-    needs: [preflight, build-image, sign-image, sbom-image, helm-publish, shelfctl]
-    # `shelfctl` is allowed to skip (when crate absent) or partially fail;
-    # release should still cut. Use `always()` and gate on the must-have
-    # jobs explicitly.
+    needs: [preflight, build-image, sign-image, sbom-image, helm-publish, shelfctl, shelf-advisor]
+    # `shelfctl` and `shelf-advisor` are allowed to skip (when their
+    # crate is absent) or partially fail; release should still cut.
+    # Use `always()` and gate on the must-have jobs explicitly.
     if: |
       always()
       && needs.preflight.outputs.should_publish == 'true'
@@ -726,6 +853,7 @@ jobs:
             echo "  - linux/amd64, linux/arm64"
             echo "- **Helm chart:** \`oci://${CHART_OCI_REPO}/shelf:${VERSION}\`"
             echo "- **shelfctl binaries:** linux/{amd64,arm64} (musl, static), darwin/{amd64,arm64}"
+            echo "- **shelf-advisor binaries:** linux/amd64 (musl, static), darwin/arm64"
             echo "- **SBOM (CycloneDX):** attached as cosign attestation + release asset"
             echo "- **SLSA v1.0 provenance:** attached as cosign attestation"
             echo ""
@@ -801,6 +929,7 @@ jobs:
       - provenance-image
       - helm-publish
       - shelfctl
+      - shelf-advisor
       - github-release
     steps:
       - name: Summarize

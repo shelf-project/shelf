@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — SHELF-53 advisor framework
+
+- **`shelf-advisor` core implementation.** The
+  workspace's third binary crate (`shelf-advisor/`) is no longer
+  a phase-1 scaffold; this release ships the framework + two
+  real recommenders (`OptimizeRecommender`, `PinListRecommender`),
+  a versioned JSON envelope with per-kind output schemas, four
+  CLI subcommands (`recommend`, `analyze` for backward compat,
+  `watch` with a Prometheus exposition endpoint at `:9100/metrics`,
+  `dry-run` for fixture replay), and an extension seam
+  (`Recommender` trait + `AnalysisContext`) that the sibling
+  tickets SHELF-65 (MV-aware pinning) and SHELF-52 (bloom-write)
+  consume in their own PRs. Output is byte-deterministic across
+  runs; outputs are sorted by `(kind, table, -confidence,
+  sorted-rationale)` and numeric fields are rounded to 4 decimal
+  places via integer math. The Trino access pattern is
+  intentionally trait-shaped — the production client is deferred
+  to a follow-up ticket per the SHELF-53 user override; the
+  in-tree binary supports `dry-run` against JSON fixtures
+  end-to-end. Site-specific overlay lands under the operator's
+  own `infra/<cluster>/` tree (stripped from the OSS publish
+  surface by the release pipeline); the OSS-clean default
+  lives at `shelf-advisor/config.example.yaml`. Design note at
+  `shelfd/docs/design-notes/SHELF-53-shelf-advisor.md`,
+  full operator README at `shelf-advisor/README.md`, and
+  per-recommender thresholds + math at
+  `shelf-advisor/docs/recommenders.md`.
+
 ### Added
 
 - **SHELF-45 — Compaction-aware re-warm reactor.** New module
