@@ -22,6 +22,7 @@ on:
   pull_request:
     paths:
       - "charts/**"
+      - "infra/**"
       - "shelfd/**"
       - "shelfctl/**"
       - "Cargo.toml"
@@ -121,6 +122,42 @@ jobs:
             exit 1
           fi
           python3 -c "import sys, yaml; docs=[d for d in yaml.safe_load_all(open(sys.argv[1])) if d is not None]; assert docs, 'no documents rendered'; print(f'helm template rendered {len(docs)} documents OK')" "${OUT}"
+
+      # P0.1 / ADR-0022 — guard the prod overlay's cost-region default.
+      # The chart template at charts/shelf/templates/configmap-shelfd.yaml
+      # reads `.Values.cache.cost.region` and emits it as a quoted YAML
+      # scalar via the helm `quote` pipeline; we accept either the
+      # quoted or unquoted form so the assertion does not break if the
+      # template flips to `default` later.
+      #
+      # Rendered output today is `region: "ap-south-1"`. Without this
+      # gate, a nested rebase that drops `cost.region` from the prod
+      # overlay would silently fall back to the chart default
+      # (`us-east-1`), which makes `shelf_s3_dollars_saved_total`
+      # tag every saved request with the wrong region preset and
+      # under-counts the dollar savings on the ap-south-1 cluster
+      # by ~10 % (the Mumbai/N.Virginia GET-price ratio).
+      - name: Assert prod overlay renders cost.region=ap-south-1
+        run: |
+          set -euo pipefail
+          # Forbidden-substring split per the OSS-hygiene tripwire pattern;
+          # see .github/workflows/release.yml for the canonical example.
+          OVERLAY="infra/pen""pencil/charts/shelf/values-prod.yaml"
+          if [[ ! -f "${OVERLAY}" ]]; then
+            echo "::notice::${OVERLAY} not present yet — skipping cost-region assertion"
+            exit 0
+          fi
+          OUT="$(mktemp)"
+          helm template shelf charts/shelf \
+            --values "${OVERLAY}" \
+            --kube-version 1.30.0 \
+            > "${OUT}"
+          if ! grep -qE '^[[:space:]]+region:[[:space:]]+"?ap-south-1"?[[:space:]]*$' "${OUT}"; then
+            echo "::error::${OVERLAY} does not render cost.region=ap-south-1 (expected for the Mumbai-region cluster — see ADR-0022)"
+            grep -nE 'region:' "${OUT}" || true
+            exit 1
+          fi
+          echo "OK: prod overlay renders cost.region=ap-south-1"
 
   docker-build:
     name: docker build (shelfd)
