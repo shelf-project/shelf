@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! SHELF-50 — integration test for the decoded-metadata in-process
 //! LRU cache.
 //!

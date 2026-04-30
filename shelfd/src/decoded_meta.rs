@@ -500,6 +500,7 @@ pub fn decode_parquet_footer(bytes: Bytes) -> Result<ParquetMetaData, DecodeErro
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use std::thread;

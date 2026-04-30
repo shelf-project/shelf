@@ -79,6 +79,7 @@ fn test_pools_minimal() -> PoolsConfig {
             nvme_bytes: 0,
             eviction_policy: shelfd::config::EvictionPolicy::default(),
             disk_cache: Default::default(),
+            compression: Default::default(),
         },
     }
 }

@@ -64,9 +64,6 @@ base64 = { workspace = true }
 # SHELF-50 — bounded in-process LRU for decoded metadata (manifests +
 # Parquet footers). See `shelfd/docs/design-notes/SHELF-50-decoded-metadata-cache.md`.
 lru = { workspace = true }
-# SHELF-50 — Parquet footer parser. Compiled but inert when
-# `cache.decoded_meta.enabled = false` (production default).
-parquet = { workspace = true }
 # SHELF-E6 — peer probe HTTP client. `reqwest` is also used in dev
 # tests; duplicating the entry keeps the runtime feature set narrow
 # (no blocking, no native-tls) without forcing dev tests through the
@@ -114,7 +111,7 @@ thrift = "0.17"
 # the v0.5 gate-target build. Cfg-gating follows the pattern in
 # agents/4-shelfd-builder.md Pass 2 "Feature flags compile each pass
 # independently".
-default = ["parquet_meta"]
+default = []
 # Embedded admin UI (see src/ui.rs). When enabled, the Vite build at
 # `ui/dist/` is baked into the binary and served at `/ui`. Off by
 # default so the CI image stays identical and we don't require a
@@ -145,12 +142,13 @@ zstd_metadata = []
 # Intended for the plugin-side query-tag path; no non-test caller in
 # shelfd's hot/control surfaces today, so off by default.
 fingerprint = []
-# SHELF-D3 phase 2 / SHELF-34 / SHELF-46 — Parquet footer + page-index
-# + bloom-block-range extractor (`src/parquet_meta.rs`). Live wiring
-# behind the `/predicate-prune` sidecar (SHELF-34) and the bloom-aware
-# admission policy (SHELF-46). The `parquet` crate itself is
-# unconditional (SHELF-50 decoded-metadata cache needs it); this
-# feature toggles the full page-index / bloom parsing code paths.
+# SHELF-D3 phase 2 / SHELF-46 — Parquet footer + bloom-block-range
+# extractor (`src/parquet_meta.rs`). When off, the bloom-aware
+# admission policy (SHELF-46) still compiles and uses the trailing-
+# N-byte footer-suffix heuristic; the feature turns on full
+# `parquet::file::metadata` parsing so bloom offsets / lengths are
+# discovered instead of approximated. The `parquet` crate itself is
+# unconditional (SHELF-50 decoded-metadata cache needs it).
 parquet_meta = []
 # SHELF-G2 — durable side-bloom store (`src/side_bloom.rs`). Not to be
 # confused with the in-process `SideBloom` trait in `filter_service`
