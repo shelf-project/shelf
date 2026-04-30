@@ -2,7 +2,7 @@
 
 **Alert:** `ShelfFallThroughSurge`
 **Severity:** page
-**Dashboard:** https://grafana.example.internal/d/shelf-overview
+**Dashboard:** `${SHELF_DASHBOARD_BASE}/d/shelf-overview`
 
 ## Symptom
 
