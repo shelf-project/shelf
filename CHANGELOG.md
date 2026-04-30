@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.4] — 2026-04-29
+
+Admission-side back-pressure follow-on to rc.3, plus the post-org-migration
+dependency wave.
+
+### Added
+- **SHELF-29**: independent-queue admission rate-limiter (#39). A second
+  bounded queue at the admission seam — distinct from the LODC submit
+  queue introduced in SHELF-21e — that decouples write admission rate
+  from the read path. Drops on full surface as
+  `shelf_lodc_drops_total{reason="rate_limit"}` so they stay visible in
+  the ops dashboard. Default config is byte- and item-rate gated with an
+  env-var off-switch for emergencies; see `shelfd/src/admission.rs`.
+
+### Changed
+- Bumped `axum` 0.7.9 → 0.8.9 (#25). Route-syntax migration applied across
+  `s3_shim.rs`, `peer.rs`, and `http.rs` (`:cap` → `{cap}`,
+  `*key` → `{*key}`); `metrics::get_name()` → `metrics::name()`.
+- Bumped `prometheus` 0.13.4 → 0.14.0 (#27).
+- Bumped `thiserror` 1.0.69 → 2.0.18 (#28). No source touch required.
+- Bumped `sha2` 0.10.9 → 0.11.0 (#12). Cache-key spec (ADR-0011) is
+  unaffected — keys use the raw `sha256(etag || …)` byte sequence, not
+  the API-level type, so byte-identity across the bump is preserved.
+- Coordinated OpenTelemetry batch (#42, supersedes #17 / #23 / #24 / #26
+  / #29 via `closes #N`): `opentelemetry` 0.27.1 → 0.31.0,
+  `opentelemetry_sdk` 0.27.1 → 0.31.0, `opentelemetry-otlp` 0.27.0 →
+  0.31.1, `tracing-opentelemetry` 0.28.0 → 0.32.1, `prost` 0.13.5 →
+  0.14.3. `shelfd/src/telemetry.rs` adapted: `TracerProvider` →
+  `SdkTracerProvider`, `Resource::new(…)` →
+  `Resource::builder().with_attributes(…).build()`,
+  `with_batch_exporter()` no longer takes a runtime argument.
+- UI dev-dependencies: `react` family (#9), `typescript` 5.9.3 → 6.0.3
+  (#8). The TypeScript bump required an ambient `*.css` declaration in
+  `shelfd/ui/src/types.d.ts` for side-effect imports.
+
+## [1.0.0-rc.3] — 2026-04-29
+
+Peer-fetch race + OSS feature rollup. No Chart.yaml bump landed in this
+window; rc.3 is a logical milestone collapsed into the rc.4 image stream.
+
+### Added
+- **SHELF-23**: peer-fetch race + ETag-conditional GET (#38). Any shelf
+  pod can now serve any key by racing the HRW peer against origin S3
+  with an ETag-conditional GET, falling back to origin on peer miss /
+  drain / disagreement. Wires `peer.rs`, `peer_fetch.rs`, and
+  `freshness.rs` (~1.8 kLOC) into the S3-shim hot path. The rule of
+  thumb stays "1 shelf pod per consumer replica" but cache content is
+  now shareable across pods, structurally unblocking autoscaling and
+  rebalancing the HRW key-family concentration that was leaving cold
+  pods at ~1 % rowgroup hit ratio under heavy single-table read patterns.
+  Smoke evidence on a 4-pod soak: hit ratio normalised to within
+  0.8 pp across pods, peer-win share ~25 %, RSS peak well under the
+  per-pod ceiling, zero pod restarts.
+- **OSS feature rollup** (#33): multi-engine read-path examples
+  (`examples/duckdb/`, `examples/daft/`, `examples/spark/`,
+  `examples/pyiceberg/`, `examples/starrocks/`), `shelfctl` extender
+  scaffold, `shelf-advisor` crate scaffold, in-shim `MemoryFS` banner
+  for stub-mode operation, and 17 backlog ticket specs under
+  `agents/out/SHELF-*/`. Sets up the multi-engine compose smoke matrix
+  the post-rc test rail relies on.
+
+### Changed
+- Wave of GitHub-Actions dependabot bumps (org-migration cleanup):
+  `actions/checkout` 4 → 6 (#14), `actions/github-script` 7 → 9 (#21),
+  `azure/setup-helm` 4 → 5 (#20), `docker/build-push-action` 6 → 7
+  (#19), `docker/setup-qemu-action` 3 → 4 (#18),
+  `aws-actions/configure-aws-credentials` 4 → 6 (#16),
+  `actions/upload-artifact` 4 → 7 (#15), `actions/setup-python` 5 → 6
+  (#13), `actions/download-artifact` 4 → 8 (#11), and the actions
+  minor-and-patch group (#32). UI dev-dep bump
+  `@vitejs/plugin-react` (#7).
+
 ## [1.0.0-rc.2] — 2026-04-29
 
 **Hotfix release for the SHELF-21f LODC submit-queue overflow regression
@@ -184,5 +256,10 @@ across two of four replicas; soak-clock for `v0.5.0` begins at full cutover.
   set under `agents/out/adr/0001-…`, design notes per ticket, rollout
   runbooks under `docs/rollout-v1/`.
 
-[Unreleased]: https://github.com/shelf-project/shelf/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/shelf-project/shelf/compare/v1.0.0-rc.4...HEAD
+[1.0.0-rc.4]: https://github.com/shelf-project/shelf/releases/tag/v1.0.0-rc.4
+[1.0.0-rc.3]: https://github.com/shelf-project/shelf/releases/tag/v1.0.0-rc.3
+[1.0.0-rc.2]: https://github.com/shelf-project/shelf/releases/tag/v1.0.0-rc.2
+[1.0.0-rc.1]: https://github.com/shelf-project/shelf/releases/tag/v1.0.0-rc.1
+[1.0.0-rc.0]: https://github.com/shelf-project/shelf/releases/tag/v1.0.0-rc.0
 [0.1.0]: https://github.com/shelf-project/shelf/releases/tag/v0.1.0
