@@ -15,9 +15,7 @@
 # -----------------------------------------------------------------
 
 # Fully-qualified `catalog.schema.table` of the Trino event-listener
-# log table written by the SHELF-60 jar (design note still filed
-# under agents/out/SHELF-37-iceberg-event-listener-jar.md, tracked
-# in PR #66 at HEAD).
+# log table written by the SHELF-37 jar (PR #66).
 event_log_table: shelf_advisor.events.query_log
 
 # Default lookback window for `analyze` / `recommend` / `watch`.
@@ -89,3 +87,42 @@ mv:
   # fraction of the rowgroup pool capacity. Carries SHELF-65's
   # `nvme_quota * pin_fraction` invariant.
   pin_fraction: 0.30
+
+# -----------------------------------------------------------------
+# SHELF-52 bloom-write advisor knobs.
+# -----------------------------------------------------------------
+# Each key falls back to the library default when omitted.
+bloom_write:
+  # Minimum number of distinct queries against a table inside the
+  # lookback window before it is considered as a candidate.
+  min_query_count: 50
+
+  # Minimum *average* per-query physical_input_bytes for a
+  # candidate table, in bytes. 1 GiB is the SHELF-52 design-note
+  # default; lower it on a smaller cluster.
+  min_query_bytes: 1073741824
+
+  # Default selectivity estimate when Iceberg NDV is not available.
+  # 0.1 (10 % of rows match) → ~90 % bytes saved per query as a
+  # conservative projection. Operators with measured Iceberg
+  # column-stats can leave this alone — the recommender prefers
+  # `1 / NDV` whenever the manifest reader exposes it.
+  default_selectivity: 0.1
+
+  # Tariff used to translate "bytes rewritten" into a dollar figure
+  # for evidence reporting. Documented as a placeholder pending
+  # SHELF-40 (PR #68) integration; see the design note.
+  cost_cents_per_gib: 4
+
+  # Top-N predicate columns reported per table. Acceptance criterion
+  # in SHELF-52 is 5; raising it adds noise.
+  top_n_columns: 5
+
+  # Regex used to extract column names from `WHERE col = literal`
+  # predicates over `QueryRecord.query_text`. Capture group 1 must
+  # be the bare column identifier. The default below catches the
+  # common Trino predicate shapes (`WHERE col = …`, `AND tbl.col = …`)
+  # and is documented to MISS function-wrapped predicates and CTE
+  # inlining — see the SHELF-52 design note's column-ranking
+  # limitations table.
+  predicate_column_regex: '(?i)\b(?:WHERE|AND)\s+(?:[a-zA-Z_][a-zA-Z0-9_]*\.)?([a-zA-Z_][a-zA-Z0-9_]*)\s*='

@@ -291,6 +291,7 @@ async fn main() -> Result<()> {
             // wired) + bare-array writer. The SHELF-34 smoke test
             // depends on this writing `[]` for an empty input.
             let recs = run_against_live_bare(&cfg).await?;
+
             write_recommendations_json(&output, &recs).with_context(|| {
                 format!("failed to write recommendations to {}", output.display())
             })?;

@@ -57,6 +57,19 @@ pub trait IcebergManifestReader: Send + Sync {
     /// List every [`DataFile`] in the current snapshot of `table`,
     /// where `table` is a fully-qualified `catalog.schema.table`.
     fn list_files(&self, table: &str) -> Result<Vec<DataFile>>;
+
+    /// Number-of-distinct-values estimate for `column` in `table`.
+    ///
+    /// Returns `None` when the underlying reader cannot supply an
+    /// NDV (no `iceberg-rust` integration yet, missing column
+    /// stats in the manifest, or Puffin sketches unsupported).
+    /// SHELF-52 falls back to `BloomWriteConfig::default_selectivity`
+    /// in that case — the design note covers the trade-off.
+    ///
+    /// Default impl returns `None` so existing readers don't break.
+    fn ndv(&self, _table: &str, _column: &str) -> Result<Option<u64>> {
+        Ok(None)
+    }
 }
 
 /// Implementation of [`IcebergManifestReader`] that serves rows

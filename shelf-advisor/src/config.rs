@@ -46,6 +46,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cost::S3_REWRITE_TARIFF_CENTS_PER_GIB;
 use crate::error::Result;
 
 /// Fully-resolved configuration for one advisor run. Consumed by
@@ -93,6 +94,42 @@ pub struct AdvisorConfig {
     pub pin_list: PinListConfig,
     pub bloom: BloomConfig,
     pub mv: MvConfig,
+    /// SHELF-52 bloom-write advisor knobs. Default values are
+    /// sourced from the design note and are tuned to the Tier-3
+    /// "high-volume tables only" rollout.
+    pub bloom_write: BloomWriteConfig,
+}
+
+/// SHELF-52 bloom-write advisor configuration.
+///
+/// All fields have safe defaults; operators tune via the YAML
+/// config file or by mutating the struct directly when embedding
+/// the advisor in-process.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BloomWriteConfig {
+    /// Minimum number of distinct queries against a table inside
+    /// the lookback window before it is considered as a candidate.
+    pub min_query_count: u64,
+
+    /// Minimum *average* per-query `physical_input_bytes` for a
+    /// candidate table, in bytes. Defaults to 1 GiB.
+    pub min_query_bytes: u64,
+
+    /// Default selectivity estimate when Iceberg NDV is not
+    /// available. 0.1 (10 %) per the SHELF-52 design note.
+    pub default_selectivity: f64,
+
+    /// Tariff used by [`crate::cost::Cents::from_bytes_rewrite`]
+    /// to translate "bytes rewritten" into a dollar figure.
+    pub cost_cents_per_gib: u64,
+
+    /// Top-N predicate columns reported per table (default 5).
+    pub top_n_columns: usize,
+
+    /// Regex used to extract column names from `WHERE col =
+    /// literal` predicates in `QueryRecord::query_text`. Capture
+    /// group 1 holds the bare column name.
+    pub predicate_column_regex: String,
 }
 
 /// Knobs for [`OptimizeRecommender`].
@@ -212,6 +249,8 @@ struct ConfigFile {
     pin_list: PinListConfig,
     bloom: BloomConfig,
     mv: MvConfig,
+    #[serde(default = "BloomWriteConfig::defaults")]
+    bloom_write: BloomWriteConfig,
 }
 
 impl AdvisorConfig {
@@ -242,6 +281,7 @@ impl AdvisorConfig {
             pin_list: PinListConfig::default(),
             bloom: BloomConfig::default(),
             mv: MvConfig::default(),
+            bloom_write: BloomWriteConfig::defaults(),
         }
     }
 
@@ -272,9 +312,45 @@ impl AdvisorConfig {
             pin_list: f.pin_list,
             bloom: f.bloom,
             mv: f.mv,
+            bloom_write: f.bloom_write,
         }
     }
 }
+
+impl BloomWriteConfig {
+    /// SHELF-52 design-note default: a table must have ≥ 50 queries
+    /// in the lookback window AND average ≥ 1 GiB scanned per query
+    /// to be considered a candidate. Selectivity defaults to 0.1
+    /// (90 % skip projection) when no Iceberg NDV is available.
+    pub fn defaults() -> Self {
+        Self {
+            min_query_count: 50,
+            min_query_bytes: 1024 * 1024 * 1024, // 1 GiB
+            default_selectivity: 0.1,
+            cost_cents_per_gib: S3_REWRITE_TARIFF_CENTS_PER_GIB,
+            top_n_columns: 5,
+            predicate_column_regex: DEFAULT_PREDICATE_COLUMN_REGEX.to_string(),
+        }
+    }
+}
+
+impl Default for BloomWriteConfig {
+    fn default() -> Self {
+        Self::defaults()
+    }
+}
+
+/// Default predicate-column extraction regex.
+///
+/// Captures column identifiers on the LHS of equality predicates
+/// (`WHERE col = '…'` or `AND tbl.col = 42`). Capture group 1 is
+/// the bare column name (table qualifier stripped). Designed to
+/// be greedy on identifiers and conservative on literals — it
+/// will miss, not over-match, on any fancy expression. See
+/// `docs/design-notes/SHELF-52-bloom-write-advisor.md` for the
+/// limitations table.
+pub const DEFAULT_PREDICATE_COLUMN_REGEX: &str =
+    r"(?i)\b(?:WHERE|AND)\s+(?:[a-zA-Z_][a-zA-Z0-9_]*\.)?([a-zA-Z_][a-zA-Z0-9_]*)\s*=";
 
 #[cfg(test)]
 mod tests {

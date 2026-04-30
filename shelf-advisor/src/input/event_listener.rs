@@ -57,6 +57,21 @@ pub struct QueryRecord {
 
     /// Total bytes physically scanned for this table.
     pub physical_input_bytes: u64,
+
+    /// Raw SQL text from `QueryCompletedEvent.metadata.query`.
+    /// Optional because the SHELF-37 event-listener jar does not
+    /// universally project the column today; the SHELF-52
+    /// bloom-write advisor's regex extractor falls back to
+    /// `equality_predicate_columns` when the text is absent.
+    ///
+    /// **Caveat (documented in the SHELF-52 design note):** the
+    /// regex over raw SQL only captures lexically-visible
+    /// `WHERE col = literal` patterns. CTE inlining, subqueries,
+    /// and function-wrapped predicates (e.g. `lower(col) = 'x'`)
+    /// silently miss; relying on this field is a heuristic, not a
+    /// precise predicate-pushdown trace.
+    #[serde(default)]
+    pub query_text: String,
 }
 
 /// Reader contract for the event-log table.
@@ -134,6 +149,7 @@ mod tests {
             equality_predicate_columns: vec!["user_id".to_string()],
             wall_time: Duration::from_secs(7),
             physical_input_bytes: 1_234_567,
+            query_text: String::new(),
         };
         let json = serde_json::to_string(std::slice::from_ref(&row)).expect("encode");
         let decoded: Vec<QueryRecord> = serde_json::from_str(&json).expect("decode");
@@ -150,6 +166,7 @@ mod tests {
             equality_predicate_columns: vec![],
             wall_time: Duration::from_secs(1),
             physical_input_bytes: 1,
+            query_text: String::new(),
         }]);
         let a = r.read_window(Duration::from_secs(60)).unwrap();
         let b = r.read_window(Duration::from_secs(86_400)).unwrap();
