@@ -1293,47 +1293,143 @@ pub mod handlers {
             .into_response()
     }
 
-    /// `POST /admin/pin {"key_hex":"<hex>", "pool":"metadata"|"rowgroup"}`.
+    /// `POST /admin/pin` — accepts either the strict
+    /// `{key_hex, pool, [mv_name]}` shape OR the RC6 P1.3 replay-list
+    /// shape (single object or array of `{bucket, key, etag,
+    /// size_bytes, ...}` manifest entries). See
+    /// [`crate::admin_pin_payload`] and ADR-0023 for the schema +
+    /// conversion contract.
+    ///
+    /// Response shape:
+    /// - **Strict / single replay entry**: backward-compatible
+    ///   `{pinned, pool, pinned_bytes, pinned_count, mv_name}`.
+    /// - **Replay batch**: `{accepted, rejected, pinned_bytes,
+    ///   pinned_count, results: [{key_hex, pool, status,
+    ///   audit, mv_name}, ...]}` where `status` is
+    ///   `"pinned"` or `"not_resident"` per entry.
     pub async fn admin_pin(
         State(state): State<Arc<ServerState>>,
-        axum::Json(body): axum::Json<PinEvictBody>,
+        axum::Json(payload): axum::Json<crate::admin_pin_payload::PinPayload>,
     ) -> Response {
-        let key = match parse_hex_key(&body.key_hex) {
-            Ok(k) => k,
-            Err(r) => return r,
-        };
-        let pool = match parse_pool_field(&body.pool) {
-            Ok(p) => p,
-            Err(r) => return r,
-        };
-        if !state.store.pin(pool, &key) {
-            return client_error(
-                StatusCode::NOT_FOUND,
-                "not_resident",
-                "key is not resident in the requested pool — pin refused",
-            );
-        }
-        // Track H5 — the H3 mv-pin-watcher passes `mv_name` on every
-        // pin it performs. Registering here keeps the "which MV does
-        // this key belong to" lookup table in the same shelfd process
-        // that serves the key, which is what the hit-accounting path
-        // needs to bump per-MV counters without a second hop.
-        if let Some(mv_name) = body.mv_name.as_deref() {
-            if !mv_name.is_empty() {
-                state.mv_registry.pin(&body.key_hex, mv_name);
+        use crate::admin_pin_payload::{pool_label as ap_pool_label, resolve, PinPayload};
+
+        // Capture whether the wire shape was an array — used to pick
+        // the response shape (single-entry contract vs batch contract).
+        let is_batch = matches!(payload, PinPayload::ReplayBatch(_));
+
+        let resolved = match resolve(&payload) {
+            Ok(r) => r,
+            Err(e) => {
+                let kind = if e.contains("batch_too_large") {
+                    "batch_too_large"
+                } else if e.contains("unknown pool") {
+                    "invalid_pool"
+                } else {
+                    "invalid_request"
+                };
+                let status = if kind == "batch_too_large" {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                return client_error(status, kind, &e);
             }
+        };
+
+        let mut accepted: u64 = 0;
+        let mut rejected: u64 = 0;
+        let mut results: Vec<serde_json::Value> = Vec::with_capacity(resolved.len());
+
+        for entry in &resolved {
+            let key = match Key::from_hex(&entry.key_hex) {
+                Ok(k) => k,
+                Err(e) => {
+                    rejected += 1;
+                    if !is_batch && resolved.len() == 1 {
+                        return client_error(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_key",
+                            &e.to_string(),
+                        );
+                    }
+                    results.push(serde_json::json!({
+                        "key_hex": entry.key_hex,
+                        "pool": ap_pool_label(entry.pool),
+                        "status": "invalid_key",
+                        "audit": entry.audit,
+                        "detail": e.to_string(),
+                    }));
+                    continue;
+                }
+            };
+            if !state.store.pin(entry.pool, &key) {
+                rejected += 1;
+                if !is_batch && resolved.len() == 1 {
+                    return client_error(
+                        StatusCode::NOT_FOUND,
+                        "not_resident",
+                        "key is not resident in the requested pool — pin refused",
+                    );
+                }
+                results.push(serde_json::json!({
+                    "key_hex": entry.key_hex,
+                    "pool": ap_pool_label(entry.pool),
+                    "status": "not_resident",
+                    "audit": entry.audit,
+                    "mv_name": entry.mv_name,
+                }));
+                continue;
+            }
+            // Track H5 — the H3 mv-pin-watcher passes `mv_name` on
+            // every pin it performs. The replay-list path also
+            // forwards it when present so prefab pre-warm
+            // pipelines can stamp MV identity at the source.
+            if let Some(mv_name) = entry.mv_name.as_deref() {
+                if !mv_name.is_empty() {
+                    state.mv_registry.pin(&entry.key_hex, mv_name);
+                }
+            }
+            accepted += 1;
+            results.push(serde_json::json!({
+                "key_hex": entry.key_hex,
+                "pool": ap_pool_label(entry.pool),
+                "status": "pinned",
+                "audit": entry.audit,
+                "mv_name": entry.mv_name,
+            }));
         }
-        (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({
-                "pinned": body.key_hex,
-                "pool": body.pool,
-                "pinned_bytes": state.store.pinned_bytes(),
-                "pinned_count": state.store.pinned_count(),
-                "mv_name": body.mv_name,
-            })),
-        )
-            .into_response()
+
+        if is_batch {
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "accepted": accepted,
+                    "rejected": rejected,
+                    "pinned_bytes": state.store.pinned_bytes(),
+                    "pinned_count": state.store.pinned_count(),
+                    "results": results,
+                })),
+            )
+                .into_response()
+        } else {
+            // Backward-compatible single-entry response. We always
+            // have at least one entry here because `resolve` returns
+            // `Ok` only for non-empty inputs and the early-returns
+            // above handle the per-entry failure cases.
+            let only = &resolved[0];
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "pinned": only.key_hex,
+                    "pool": ap_pool_label(only.pool),
+                    "pinned_bytes": state.store.pinned_bytes(),
+                    "pinned_count": state.store.pinned_count(),
+                    "mv_name": only.mv_name,
+                    "audit": only.audit,
+                })),
+            )
+                .into_response()
+        }
     }
 
     /// `POST /admin/unpin {"key_hex":"<hex>"}`.
