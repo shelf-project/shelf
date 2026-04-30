@@ -443,12 +443,7 @@ impl BloomAdmission {
     /// every error variant is counted under
     /// `shelf_bloom_parse_errors_total{reason}` and silently dropped.
     /// Never returns an error to the caller.
-    pub fn maybe_index_footer(
-        &self,
-        etag: &[u8],
-        kind: BloomKind,
-        file_bytes: &[u8],
-    ) {
+    pub fn maybe_index_footer(&self, etag: &[u8], kind: BloomKind, file_bytes: &[u8]) {
         if !matches!(kind, BloomKind::Footer) {
             return;
         }
@@ -605,12 +600,18 @@ pub fn parse_footer_blooms(file_bytes: &[u8]) -> Result<Vec<BloomBlockRange>, Pa
 /// Inner thrift-decoding step. Split out so the magic-validation
 /// path stays compile-cheap when the `parquet_meta` feature is off.
 #[cfg(not(feature = "parquet_meta"))]
-fn parse_footer_thrift(_footer_thrift: &[u8], _file_len: u64) -> Result<Vec<BloomBlockRange>, ParseError> {
+fn parse_footer_thrift(
+    _footer_thrift: &[u8],
+    _file_len: u64,
+) -> Result<Vec<BloomBlockRange>, ParseError> {
     Err(ParseError::FeatureDisabled)
 }
 
 #[cfg(feature = "parquet_meta")]
-fn parse_footer_thrift(footer_thrift: &[u8], file_len: u64) -> Result<Vec<BloomBlockRange>, ParseError> {
+fn parse_footer_thrift(
+    footer_thrift: &[u8],
+    file_len: u64,
+) -> Result<Vec<BloomBlockRange>, ParseError> {
     use parquet::file::metadata::ParquetMetaDataReader;
     // The reader expects the raw thrift-serialized FileMetaData, which
     // is exactly what we sliced off above (between the optional page-
@@ -1074,20 +1075,18 @@ mod tests {
         );
         let mut buf: Vec<u8> = Vec::new();
         {
-            let mut writer = SerializedFileWriter::new(&mut buf, schema.clone(), props.clone())
-                .expect("writer");
+            let mut writer =
+                SerializedFileWriter::new(&mut buf, schema.clone(), props.clone()).expect("writer");
             let mut row_group = writer.next_row_group().expect("row group");
             let mut col = row_group.next_column().expect("col").expect("col present");
-            let typed = col
-                .typed::<ByteArrayType>()
-                .write_batch(
-                    &[
-                        ByteArray::from(b"alice".as_slice()),
-                        ByteArray::from(b"bob".as_slice()),
-                    ],
-                    None,
-                    None,
-                );
+            let typed = col.typed::<ByteArrayType>().write_batch(
+                &[
+                    ByteArray::from(b"alice".as_slice()),
+                    ByteArray::from(b"bob".as_slice()),
+                ],
+                None,
+                None,
+            );
             assert!(typed.is_ok(), "write_batch: {:?}", typed.err());
             col.close().expect("close col");
             row_group.close().expect("close rg");

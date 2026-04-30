@@ -35,7 +35,11 @@ async fn bloom_admission_classifies_footer_suffix_read() {
     // strictly less than the whole object — i.e. exercises the
     // `offset > 0 && offset + length == total_size` branch of the
     // classifier.
-    let payload: Bytes = (0u8..=255).cycle().take(256 * 1024).collect::<Vec<u8>>().into();
+    let payload: Bytes = (0u8..=255)
+        .cycle()
+        .take(256 * 1024)
+        .collect::<Vec<u8>>()
+        .into();
     put_object(&client, key, payload.clone()).await;
 
     let state = build_state_with_bloom("shelf-bloom").await;
@@ -74,7 +78,7 @@ async fn bloom_admission_classifies_footer_suffix_read() {
         .with_label_values(&["footer"])
         .get();
     assert!(
-        post_footer >= baseline_footer + 1,
+        post_footer > baseline_footer,
         "shelf_bloom_admit_total{{kind=\"footer\"}} must increment on a footer-suffix read \
          (baseline={baseline_footer}, post={post_footer})"
     );
@@ -92,7 +96,7 @@ async fn bloom_admission_classifies_footer_suffix_read() {
         .with_label_values(&["rowgroup"])
         .get();
     assert!(
-        post_metadata_misses >= baseline_metadata_misses + 1,
+        post_metadata_misses > baseline_metadata_misses,
         "metadata-pool miss must fire (baseline={baseline_metadata_misses}, \
          post={post_metadata_misses})"
     );
@@ -119,7 +123,11 @@ async fn bloom_admission_leaves_mid_file_reads_alone() {
     // policy — `kind="not_applicable"` should bump and the read
     // must land in the rowgroup pool, not metadata.
     let key_parquet = format!("{key}.parquet");
-    let payload: Bytes = (0u8..=255).cycle().take(256 * 1024).collect::<Vec<u8>>().into();
+    let payload: Bytes = (0u8..=255)
+        .cycle()
+        .take(256 * 1024)
+        .collect::<Vec<u8>>()
+        .into();
     put_object(&client, &key_parquet, payload.clone()).await;
 
     let state = build_state_with_bloom("shelf-bloom-mid").await;
@@ -151,7 +159,7 @@ async fn bloom_admission_leaves_mid_file_reads_alone() {
         .with_label_values(&["not_applicable"])
         .get();
     assert!(
-        post_na >= baseline_na + 1,
+        post_na > baseline_na,
         "shelf_bloom_admit_total{{kind=\"not_applicable\"}} must increment on a mid-file read \
          (baseline={baseline_na}, post={post_na})"
     );
@@ -162,7 +170,7 @@ async fn bloom_admission_leaves_mid_file_reads_alone() {
         .with_label_values(&["rowgroup"])
         .get();
     assert!(
-        post_rowgroup_misses >= baseline_rowgroup_misses + 1,
+        post_rowgroup_misses > baseline_rowgroup_misses,
         "rowgroup-pool miss must fire for a `.parquet` mid-file read \
          (baseline={baseline_rowgroup_misses}, post={post_rowgroup_misses})"
     );

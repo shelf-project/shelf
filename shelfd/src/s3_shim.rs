@@ -970,8 +970,9 @@ pub async fn handle_get_object(
     };
 
     let pool = match bloom_kind {
-        crate::parquet_admit::BloomKind::Footer
-        | crate::parquet_admit::BloomKind::BloomBlock => Pool::Metadata,
+        crate::parquet_admit::BloomKind::Footer | crate::parquet_admit::BloomKind::BloomBlock => {
+            Pool::Metadata
+        }
         crate::parquet_admit::BloomKind::NotApplicable => pool_for(&key),
     };
     let pool_label_early = match pool {
@@ -1162,8 +1163,9 @@ pub async fn handle_get_object(
     // always land in `Pool::Metadata`. Both branches resolve to
     // `&dyn AdmissionPolicy` so `get_or_fetch` accepts either.
     let admission_for_call: &dyn crate::admission::AdmissionPolicy = match bloom_kind {
-        crate::parquet_admit::BloomKind::Footer
-        | crate::parquet_admit::BloomKind::BloomBlock => &crate::parquet_admit::FORCE_ADMIT,
+        crate::parquet_admit::BloomKind::Footer | crate::parquet_admit::BloomKind::BloomBlock => {
+            &crate::parquet_admit::FORCE_ADMIT
+        }
         crate::parquet_admit::BloomKind::NotApplicable => state.admission.as_ref(),
     };
     let outcome = state
