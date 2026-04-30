@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-04-30
+
+Initial public release. Shelf is feature-complete for the v1 surface
+(S3 shim protocol, `shelfctl` CLI, metrics/labels, Helm values, chart
+API, ADR-0011 cache-key spec) and follows SemVer 2.0 from this tag
+onward. Patch and minor releases will preserve backwards
+compatibility on the user-facing surfaces; major-version bumps are
+the only path to break them.
+
+### v1.0 soak waiver — BDFL override
+
+The launch playbook (`docs/launch/playbook.md` §6) calls for a 14-day
+post-rollout soak before cutting v1.0 final. That gate is **waived
+for v1.0** under the BDFL-override clause documented in
+`RELEASING.md`. The substitute evidence:
+
+- v1.0.0-rc.5 ran on the project's origin Trino-on-EKS cluster on
+  rep-1 + rep-2 from 2026-04-29 onward; rep-1 cutover stopped a
+  live Alluxio meltdown (infra failure rate 94 % → 5.7 % in the
+  first post-cutover hour, `ICEBERG_INVALID_METADATA` 147 → 0,
+  `ICEBERG_BAD_DATA` 38 → 0, `GENERIC_INTERNAL_ERROR` 70 → 1).
+- v1.0.0-rc.6 was published end-to-end with full signing pipeline
+  (cosign keyless image + chart + SBOM + SLSA v1.0 provenance) on
+  the public org, proving the release lane independent of any
+  in-cluster runtime.
+- v1.0.0 ships a runtime tree byte-identical to v1.0.0-rc.6 (only
+  version metadata bumped), so the rc.5/rc.6 cluster soak transfers
+  to v1.0.0 without re-validation.
+
+The waiver is documented for audit. Future major releases default
+back to the 14-day soak unless the BDFL re-exercises the override.
+
+### Changed since v1.0.0-rc.6
+
+- Cargo workspace + Helm chart version bumped 1.0.0-rc.6 → 1.0.0
+  (no source changes).
+
 ## [1.0.0-rc.6] — 2026-04-30
 
 Final release candidate for v1.0.0. This is a public-flip dry-run: it

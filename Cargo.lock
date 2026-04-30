@@ -4436,7 +4436,7 @@ dependencies = [
 
 [[package]]
 name = "shelf-advisor"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4457,7 +4457,7 @@ dependencies = [
 
 [[package]]
 name = "shelf-cost"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -4469,7 +4469,7 @@ dependencies = [
 
 [[package]]
 name = "shelfctl"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4490,7 +4490,7 @@ dependencies = [
 
 [[package]]
 name = "shelfd"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "aws-config",
