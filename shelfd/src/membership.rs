@@ -624,6 +624,7 @@ mod tests {
             pinned_bytes: 0,
             pinned_count: 0,
             draining,
+            rss_bytes: 0,
         }
     }
 

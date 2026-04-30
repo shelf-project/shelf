@@ -97,6 +97,16 @@ pub struct Stats {
     /// missing field => `false` => peer is healthy.
     #[serde(default)]
     pub draining: bool,
+    /// RC6 P1.2 — process resident-set size in bytes. Populated by
+    /// [`crate::capacity_check::read_self_rss_bytes`]; consumed by
+    /// the `/admin/cap-ready` cluster-capacity gate. `0` on
+    /// non-Linux dev hosts (and on any platform where we couldn't
+    /// read `/proc/self/status`); `#[serde(default)]` keeps the
+    /// wire compatible with pre-RC6 peers, which simply contribute
+    /// `0` to the max-RSS aggregation (treated as "no signal" by
+    /// the gate, not as "healthy").
+    #[serde(default)]
+    pub rss_bytes: u64,
 }
 
 /// Per-pool capacity / usage section of [`Stats`].
