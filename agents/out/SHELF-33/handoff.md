@@ -7,6 +7,22 @@
 - **PR**: opened on push (URL filled in below).
 - **Image build**: NOT done in this PR — orchestrator owns the image build + cluster-side cutover.
 
+## Scope restriction (F3)
+
+W-TinyLFU admission gate applies ONLY to the DRAM metadata pool.
+
+MUST NOT be wired on the rowgroup pool while it runs S3-FIFO.
+Reason: W-TinyLFU doorkeeper and S3-FIFO small-queue are redundant
+(both filter one-hit-wonders). Stacking yields near-zero additional
+lift but doubles admission-path CPU. Deep-research Q2.4 finding
+2026-04-30.
+
+The cluster-side cutover MR (item 1 in "Open follow-ups") must gate
+the `WTinyLfuPolicy::decide` call on `AdmissionContext::pool ==
+Pool::Metadata`. Rowgroup-pool admission keeps going through the
+inner `SizeThresholdPolicy` alone until S3-FIFO is replaced (SHELF-32,
+itself gated on the SHELF-35 replay delta per F2).
+
 ## What lands
 
 | File | Change |

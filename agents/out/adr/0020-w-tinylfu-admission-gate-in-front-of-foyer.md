@@ -6,6 +6,24 @@
 - Date: 2026-04-29 (UTC+5:30) — start-of-day Apr 30 IST
 - Supersedes / superseded-by: extends [ADR-0003](0003-size-threshold-admission-over-onnx-mlp.md) (size threshold remains the **inner** gate; W-TinyLFU sits in front of it). Does NOT supersede ADR-0003.
 
+## Scope restriction (F3)
+
+W-TinyLFU admission gate applies ONLY to the DRAM metadata pool.
+
+MUST NOT be wired on the rowgroup pool while it runs S3-FIFO.
+Reason: W-TinyLFU doorkeeper and S3-FIFO small-queue are redundant
+(both filter one-hit-wonders). Stacking yields near-zero additional
+lift but doubles admission-path CPU. Deep-research Q2.4 finding
+2026-04-30.
+
+Concretely, the cluster-side cutover MR that wires `WTinyLfuPolicy`
+into `main.rs` must gate the policy on `AdmissionContext::pool ==
+Pool::Metadata` (DRAM-only residency). Any rowgroup-pool `decide`
+call short-circuits to the inner `SizeThresholdPolicy` decision
+without consulting the frequency sketch. Revisit only if the
+rowgroup pool migrates off S3-FIFO (e.g. to Sieve via SHELF-32
+ADR-0015, which is itself gated on the SHELF-35 replay delta per F2).
+
 ## Context
 
 ADR-0003 froze admission at "size threshold + pin list" for the v0.5 → v1 window because every learned-policy upgrade was gated on a SHELF-26 replay showing ≥ 5 pp lift, and that replay didn't exist yet. SHELF-35 (PR [#41](https://github.com/shelf-project/shelf/pull/41)) just landed the replay harness and the workspace memory ([Apr 27 rep-2 cutover narrative](../SHELF-35/handoff.md)) already documents the production tail behaviour: Iceberg manifest scans, predicate-pushdown probes, time-travel reads, and dbt-incremental tests touch a row group exactly once and never again. Today these one-hit-wonders are admitted under the size-threshold policy → DRAM byte cost + NVMe spill cost on eviction → zero hit-ratio return.

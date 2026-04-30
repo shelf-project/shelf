@@ -83,6 +83,20 @@
 //!   pools. Splitting per-pool is a future optimisation if cross-
 //!   pool key contamination ever shows up in metrics.
 //!
+//! ## Scope restriction (F3, deep-research 2026-04-30)
+//!
+//! This policy applies ONLY to the DRAM metadata pool. It MUST NOT
+//! be wired on the rowgroup pool while the rowgroup pool runs
+//! S3-FIFO eviction. W-TinyLFU's doorkeeper and S3-FIFO's small
+//! queue are redundant — both filter one-hit-wonders — so stacking
+//! them yields near-zero additional lift but doubles admission-path
+//! CPU. The cluster-side cutover MR that swaps
+//! `SizeThresholdPolicy::from_config(...)` for
+//! `WTinyLfuPolicy::new(...)` in `main.rs` must gate the policy on
+//! `AdmissionContext::pool == Pool::Metadata`. The
+//! `Pool::RowGroup` unit tests below exercise the algorithm in
+//! isolation; they are not production wiring.
+//!
 //! ## References
 //!
 //! - [Einziger, Friedman, Manes — TinyLFU: A Highly Efficient Cache
