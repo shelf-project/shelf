@@ -1,0 +1,29 @@
+[
+  {
+    "path": "silver_events__MP_CG.parquet",
+    "file_size_in_bytes": 2284,
+    "partition": {
+      "event_region": "MP+CG"
+    },
+    "record_count": 100,
+    "etag": "e4ba2373f845753eb940c6c89f700e67"
+  },
+  {
+    "path": "silver_events__UP.parquet",
+    "file_size_in_bytes": 2257,
+    "partition": {
+      "event_region": "UP"
+    },
+    "record_count": 100,
+    "etag": "a2147f2ab727c99f2b7801cdcd23ce55"
+  },
+  {
+    "path": "silver_events__DL.parquet",
+    "file_size_in_bytes": 2258,
+    "partition": {
+      "event_region": "DL"
+    },
+    "record_count": 100,
+    "etag": "c3cc88ba1bc66f55387765de18fea6b8"
+  }
+]

@@ -1,0 +1,506 @@
+[
+  {
+    "query_id": "q-cat.s.t-0",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u0'"
+  },
+  {
+    "query_id": "q-cat.s.t-1",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u1'"
+  },
+  {
+    "query_id": "q-cat.s.t-2",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u2'"
+  },
+  {
+    "query_id": "q-cat.s.t-3",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u3'"
+  },
+  {
+    "query_id": "q-cat.s.t-4",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u4'"
+  },
+  {
+    "query_id": "q-cat.s.t-5",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u5'"
+  },
+  {
+    "query_id": "q-cat.s.t-6",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u6'"
+  },
+  {
+    "query_id": "q-cat.s.t-7",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u7'"
+  },
+  {
+    "query_id": "q-cat.s.t-8",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u8'"
+  },
+  {
+    "query_id": "q-cat.s.t-9",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u9'"
+  },
+  {
+    "query_id": "q-cat.s.t-10",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u10'"
+  },
+  {
+    "query_id": "q-cat.s.t-11",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u11'"
+  },
+  {
+    "query_id": "q-cat.s.t-12",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u12'"
+  },
+  {
+    "query_id": "q-cat.s.t-13",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u13'"
+  },
+  {
+    "query_id": "q-cat.s.t-14",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u14'"
+  },
+  {
+    "query_id": "q-cat.s.t-15",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u15'"
+  },
+  {
+    "query_id": "q-cat.s.t-16",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u16'"
+  },
+  {
+    "query_id": "q-cat.s.t-17",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u17'"
+  },
+  {
+    "query_id": "q-cat.s.t-18",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u18'"
+  },
+  {
+    "query_id": "q-cat.s.t-19",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u19'"
+  },
+  {
+    "query_id": "q-cat.s.t-20",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u20'"
+  },
+  {
+    "query_id": "q-cat.s.t-21",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u21'"
+  },
+  {
+    "query_id": "q-cat.s.t-22",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u22'"
+  },
+  {
+    "query_id": "q-cat.s.t-23",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u23'"
+  },
+  {
+    "query_id": "q-cat.s.t-24",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u24'"
+  },
+  {
+    "query_id": "q-cat.s.t-25",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u25'"
+  },
+  {
+    "query_id": "q-cat.s.t-26",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u26'"
+  },
+  {
+    "query_id": "q-cat.s.t-27",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u27'"
+  },
+  {
+    "query_id": "q-cat.s.t-28",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u28'"
+  },
+  {
+    "query_id": "q-cat.s.t-29",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u29'"
+  },
+  {
+    "query_id": "q-cat.s.t-30",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u30'"
+  },
+  {
+    "query_id": "q-cat.s.t-31",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u31'"
+  },
+  {
+    "query_id": "q-cat.s.t-32",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u32'"
+  },
+  {
+    "query_id": "q-cat.s.t-33",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u33'"
+  },
+  {
+    "query_id": "q-cat.s.t-34",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u34'"
+  },
+  {
+    "query_id": "q-cat.s.t-35",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u35'"
+  },
+  {
+    "query_id": "q-cat.s.t-36",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u36'"
+  },
+  {
+    "query_id": "q-cat.s.t-37",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u37'"
+  },
+  {
+    "query_id": "q-cat.s.t-38",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u38'"
+  },
+  {
+    "query_id": "q-cat.s.t-39",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u39'"
+  },
+  {
+    "query_id": "q-cat.s.t-40",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u40'"
+  },
+  {
+    "query_id": "q-cat.s.t-41",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u41'"
+  },
+  {
+    "query_id": "q-cat.s.t-42",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u42'"
+  },
+  {
+    "query_id": "q-cat.s.t-43",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u43'"
+  },
+  {
+    "query_id": "q-cat.s.t-44",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u44'"
+  },
+  {
+    "query_id": "q-cat.s.t-45",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u45'"
+  },
+  {
+    "query_id": "q-cat.s.t-46",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u46'"
+  },
+  {
+    "query_id": "q-cat.s.t-47",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u47'"
+  },
+  {
+    "query_id": "q-cat.s.t-48",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u48'"
+  },
+  {
+    "query_id": "q-cat.s.t-49",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u49'"
+  },
+  {
+    "query_id": "q-cat.s.t-50",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u50'"
+  },
+  {
+    "query_id": "q-cat.s.t-51",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u51'"
+  },
+  {
+    "query_id": "q-cat.s.t-52",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u52'"
+  },
+  {
+    "query_id": "q-cat.s.t-53",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u53'"
+  },
+  {
+    "query_id": "q-cat.s.t-54",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u54'"
+  },
+  {
+    "query_id": "q-cat.s.t-55",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u55'"
+  },
+  {
+    "query_id": "q-cat.s.t-56",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u56'"
+  },
+  {
+    "query_id": "q-cat.s.t-57",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u57'"
+  },
+  {
+    "query_id": "q-cat.s.t-58",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u58'"
+  },
+  {
+    "query_id": "q-cat.s.t-59",
+    "table": "cat.s.t",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 100,
+    "physical_input_bytes": 2147483648,
+    "query_text": "SELECT id FROM cat.s.t WHERE user_id = 'u59'"
+  },
+  {
+    "query_id": "q-cat.s.small-0",
+    "table": "cat.s.small",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 10,
+    "physical_input_bytes": 1024,
+    "query_text": "SELECT id FROM cat.s.small WHERE user_id = 'u0'"
+  },
+  {
+    "query_id": "q-cat.s.small-1",
+    "table": "cat.s.small",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 10,
+    "physical_input_bytes": 1024,
+    "query_text": "SELECT id FROM cat.s.small WHERE user_id = 'u1'"
+  },
+  {
+    "query_id": "q-cat.s.small-2",
+    "table": "cat.s.small",
+    "equality_predicate_columns": [],
+    "wall_time_ms": 10,
+    "physical_input_bytes": 1024,
+    "query_text": "SELECT id FROM cat.s.small WHERE user_id = 'u2'"
+  }
+]

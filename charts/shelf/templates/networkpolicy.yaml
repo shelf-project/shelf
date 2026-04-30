@@ -1,0 +1,107 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "shelf.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shelf.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "shelf.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Trino coordinator pods — needed for QueryCreatedEvent listener +
+    # prefetch RPC path. [plan §3 Phase 2]
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.trino.namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.trino.coordinatorPodLabels | nindent 14 }}
+      ports:
+        - port: data
+          protocol: TCP
+        - port: s3shim
+          protocol: TCP
+        - port: admin
+          protocol: TCP
+    # Trino worker pods — data path (HTTP/2 range-GET).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.trino.namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.trino.workerPodLabels | nindent 14 }}
+      ports:
+        - port: data
+          protocol: TCP
+        - port: s3shim
+          protocol: TCP
+    # Prometheus / kube-prometheus-stack for /metrics scraping.
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: metrics
+          protocol: TCP
+    # Peer shelfd pods — HRW lookups, stats gossip, admin fanout.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "shelf.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: data
+          protocol: TCP
+        - port: admin
+          protocol: TCP
+    {{- with .Values.networkPolicy.extraIngressFrom }}
+    - from:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # S3 + STS over HTTPS. We cannot restrict by IP without a VPC endpoint
+    # policy; CIDR 0.0.0.0/0 on port 443 is the least-surprising fallback.
+    # Tighten with a `to.ipBlock` pointing at your S3 VPCE when landed.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
+    # Peer shelfd pods.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "shelf.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: data
+          protocol: TCP
+        - port: admin
+          protocol: TCP
+    {{- with .Values.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

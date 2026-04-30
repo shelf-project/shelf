@@ -1,0 +1,72 @@
+# Shelf CODEOWNERS
+#
+# Status: v0.1 scaffold (agent-9).
+# GitHub matches the LAST matching pattern, so we list broadest first,
+# narrowest last.
+#
+# Handles below are placeholders until the real team roster is known;
+# see SECURITY.md §5 for the rota.
+#
+# ---------------------------------------------------------------------
+# Default owners for everything in the repo
+# ---------------------------------------------------------------------
+*                                               @aamir
+
+# ---------------------------------------------------------------------
+# Security-sensitive paths (routed to the security rota)
+# Any change here requires a security-rota review.
+# ---------------------------------------------------------------------
+
+# Top-level security docs + policy
+/SECURITY.md                                    @aamir @shelf-security-rota
+/SECURITY/                                      @aamir @shelf-security-rota
+
+# CI workflows, especially security scanning + release automation
+/.github/workflows/security.yml                 @aamir @shelf-security-rota
+/.github/workflows/release.yml                  @aamir @shelf-security-rota
+/.github/workflows/                             @aamir @shelf-security-rota
+/.github/PULL_REQUEST_TEMPLATE.md               @aamir @shelf-security-rota
+/CODEOWNERS                                     @aamir @shelf-security-rota
+
+# Supply-chain policy files
+/deny.toml                                      @aamir @shelf-security-rota
+/shelfd/deny.toml                               @aamir @shelf-security-rota
+
+# Network + IAM + pod security (agent 8 owns; security co-reviews)
+/charts/shelf/templates/networkpolicy.yaml      @aamir @shelf-ops @shelf-security-rota
+/charts/shelf/templates/serviceaccount.yaml     @aamir @shelf-ops @shelf-security-rota
+/charts/shelf/templates/role*.yaml              @aamir @shelf-ops @shelf-security-rota
+/charts/shelf/templates/*securitycontext*       @aamir @shelf-ops @shelf-security-rota
+/infra/iam/                                     @aamir @shelf-security-rota
+/infra/terraform/                               @aamir @shelf-ops @shelf-security-rota
+
+# Plugin auth-surface files (mTLS, JWT, circuit breaker)
+/clients/trino/src/main/java/io/shelf/client/CircuitBreaker.java  @aamir @shelf-plugin @shelf-security-rota
+/clients/trino/src/main/java/io/shelf/client/auth/                @aamir @shelf-plugin @shelf-security-rota
+/clients/trino/src/main/java/io/shelf/client/tls/                 @aamir @shelf-plugin @shelf-security-rota
+
+# shelfd HTTP / gRPC boundary — tenant-identity enforcement lives here
+/shelfd/src/http.rs                             @aamir @shelf-rust @shelf-security-rota
+/shelfd/src/control.rs                          @aamir @shelf-rust @shelf-security-rota
+/shelfd/src/auth/                               @aamir @shelf-rust @shelf-security-rota
+/shelfd/src/tls/                                @aamir @shelf-rust @shelf-security-rota
+
+# ---------------------------------------------------------------------
+# Architecture documents (require architect + author review)
+# ---------------------------------------------------------------------
+/BLUEPRINT.md                                   @aamir
+/agents/out/adr/                                @aamir
+/shelf/adr/                                     @aamir
+/docs/adr/                                      @aamir
+
+# ---------------------------------------------------------------------
+# Area owners (placeholders until teams exist)
+# ---------------------------------------------------------------------
+/shelfd/                                        @aamir @shelf-rust
+/clients/trino/                                 @aamir @shelf-plugin
+/clients/python/trainer/                        @aamir @shelf-data
+/benchmarks/                                    @aamir @shelf-rust
+/charts/                                        @aamir @shelf-ops
+/observability/                                 @aamir @shelf-ops
+/runbooks/                                      @aamir @shelf-ops
+/chaos/                                         @aamir @shelf-ops

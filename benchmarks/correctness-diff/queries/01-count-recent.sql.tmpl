@@ -1,0 +1,7 @@
+-- 01-count-recent: simple COUNT(*) on a partitioned table.
+-- Exercises manifest-list reads + partition pruning but no row-group reads;
+-- the divergence we catch here is "manifest metadata drifts between reads"
+-- which would be a shelf-metadata-pool cache-poisoning bug.
+SELECT COUNT(*) AS row_count
+FROM {catalog}.{schema}.{table_events}
+WHERE {partition_column} = DATE '{partition_value}'

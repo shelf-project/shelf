@@ -1,0 +1,128 @@
+# cargo-deny policy for the Shelf workspace.
+#
+# Scope: Phase 0/1 (see 03-plan.md §4 SHELF-01). Run via
+#   cargo deny --all-features check
+# in CI. Advisories are warnings during scaffolding; SHELF-NN tickets
+# will tighten them to `deny` as the project matures.
+
+[graph]
+# Only check our target triples for now. Expand when we ship portable
+# Docker images on more architectures.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "aarch64-apple-darwin" },
+]
+
+[advisories]
+version = 2
+yanked = "warn"
+# Ignore format (security rota must enforce the comment convention):
+#   { id = "RUSTSEC-YYYY-NNNN", reason = "ticket: SHELF-NNN; expiry: YYYY-MM-DD" }
+# Every entry MUST have a ticket link and an expiry ≤ 90 days out.
+# CI re-reviews expired entries via the scheduled security.yml run.
+#
+# All entries below were the seven advisories firing on the
+# v1.0.0-rc.1 release run; tracked as a single sweep under the
+# org-migration ticket (SHELF-30). Each entry needs a follow-up
+# dependency-bump SHELF-NN before its expiry.
+ignore = [
+    # bincode 1.x is unmaintained; transitive via tonic/prost test
+    # harnesses. Bump-or-replace tracked under SHELF-30.
+    { id = "RUSTSEC-2025-0141", reason = "ticket: SHELF-30; expiry: 2026-07-27" },
+
+    # paste is unmaintained (no remediation available); transitive via
+    # foyer/tonic. Vendor-or-replace tracked under SHELF-30.
+    { id = "RUSTSEC-2024-0436", reason = "ticket: SHELF-30; expiry: 2026-07-27" },
+
+    # protobuf <3.7.2 uncontrolled-recursion DoS. Transitive via
+    # opentelemetry-proto; impacted only on attacker-controlled OTLP
+    # input (operators control the collector). Bump tracked under SHELF-30.
+    { id = "RUSTSEC-2024-0437", reason = "ticket: SHELF-30; expiry: 2026-07-27" },
+
+    # rustls-pemfile is unmaintained; succeeded by the parser inside
+    # rustls-pki-types. Transitive removal tracked under SHELF-30.
+    { id = "RUSTSEC-2025-0134", reason = "ticket: SHELF-30; expiry: 2026-07-27" },
+
+    # rustls webpki name-constraints (URI). We do not configure custom
+    # NameConstraints in shelfd; default trust roots use Sigstore +
+    # AWS RDS bundles. Bump rustls tracked under SHELF-30.
+    { id = "RUSTSEC-2026-0098", reason = "ticket: SHELF-30; expiry: 2026-07-27" },
+
+    # rustls webpki name-constraints (wildcard). Same not-exposed
+    # rationale as RUSTSEC-2026-0098.
+    { id = "RUSTSEC-2026-0099", reason = "ticket: SHELF-30; expiry: 2026-07-27" },
+
+    # rustls reachable panic in CRL parsing. shelfd does not consume
+    # CRLs (no client-cert auth on the data plane); rustls bump
+    # tracked under SHELF-30.
+    { id = "RUSTSEC-2026-0104", reason = "ticket: SHELF-30; expiry: 2026-07-27" },
+]
+
+[licenses]
+version = 2
+# The allow-list is intentionally narrow: permissive only. GPL / LGPL
+# require legal review before they enter the tree.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",  # weak copyleft; acceptable per ASF guidance
+    "OpenSSL",
+    # CDLA-Permissive-2.0 is the Mozilla CA root cert bundle license
+    # (`webpki-roots`). Linux Foundation data license, permissive in
+    # the same MIT-equivalent spirit as Apache-2.0 for data; safe to
+    # ship inside redistributable software per LF's FAQ.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+[bans]
+# Multiple versions of the same crate are a warning, not a deny, during
+# scaffolding; Tokio + tonic pull in several compat versions.
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+# Banned crates stub — security policy per SUPPLY_CHAIN.md §1.2.
+# Add new entries with a comment explaining WHY. Any bypass requires an
+# ADR and a SECURITY/THREAT_MODEL.md update.
+deny = [
+    # TLS: we use rustls end-to-end (no system OpenSSL).
+    { name = "openssl", reason = "Use rustls. See SECURITY/IAM.md §2.3 (mTLS)." },
+    { name = "openssl-sys", reason = "Transitive of openssl; use rustls." },
+    { name = "native-tls", reason = "Wraps system TLS; use rustls for determinism." },
+
+    # Consensus: embedded Raft is explicitly rejected in v1 (ADR-0001).
+    # Any PR adding these must supersede that ADR.
+    { name = "openraft", reason = "ADR-0001: no embedded Raft in v1." },
+    { name = "raft",     reason = "ADR-0001: no embedded Raft in v1." },
+    { name = "raft-rs",  reason = "ADR-0001: no embedded Raft in v1." },
+
+    # Known-dangerous deserialisation / eval surfaces.
+    { name = "serde-pickle", reason = "Python-pickle deserialisation; never in the data plane." },
+]
+skip = []
+skip-tree = []
+
+[sources]
+# Advisory DB pinning: cargo-deny uses the standard RustSec DB by default.
+# We pin the source explicitly so a typosquatted DB cannot slip in.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []  # must be empty; any exception requires a CODEOWNERS-approved PR.
+
+[sources.allow-org]
+# Intentionally empty. If we ever allow a forked dependency by org,
+# add the org here + a SECURITY/ comment explaining why upstream
+# cannot be used.
+github = []

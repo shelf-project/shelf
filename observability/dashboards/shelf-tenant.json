@@ -1,0 +1,78 @@
+{
+  "annotations": {"list": [{"builtIn": 1, "datasource": {"type": "grafana", "uid": "-- Grafana --"}, "enable": true, "hide": true, "name": "Annotations", "type": "dashboard"}]},
+  "description": "Per-tenant Shelf behaviour: quotas, admission, eviction. Source: agents/8-operator.md §Pass-2 'shelf-tenant'. Tenant label comes from IRSA-role-mapped identity on the plugin side.",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Tenant cache footprint",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "targets": [
+        {"expr": "sum by (tenant) (shelf_tenant_bytes_used)",                      "legendFormat": "{{tenant}}", "refId": "A", "format": "table", "instant": true},
+        {"expr": "sum by (tenant) (shelf_tenant_bytes_quota)",                     "legendFormat": "{{tenant}}", "refId": "B", "format": "table", "instant": true},
+        {"expr": "sum by (tenant) (rate(shelf_hits_total[5m]))",                   "legendFormat": "{{tenant}}", "refId": "C", "format": "table", "instant": true},
+        {"expr": "sum by (tenant) (rate(shelf_misses_total[5m]))",                 "legendFormat": "{{tenant}}", "refId": "D", "format": "table", "instant": true}
+      ],
+      "transformations": [
+        {"id": "joinByField", "options": {"byField": "tenant", "mode": "outer"}}
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Admission decisions per tenant",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "targets": [
+        {"expr": "sum by (tenant, decision) (rate(shelf_admissions_total[5m]))", "legendFormat": "{{tenant}}/{{decision}}", "refId": "A"}
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Eviction rate per tenant",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "targets": [
+        {"expr": "sum by (tenant, reason) (rate(shelf_evictions_total[5m]))", "legendFormat": "{{tenant}}/{{reason}}", "refId": "A"}
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Quota headroom (ratio)",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 18},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "max": 1}},
+      "targets": [
+        {"expr": "sum by (tenant) (shelf_tenant_bytes_used) / sum by (tenant) (shelf_tenant_bytes_quota)", "legendFormat": "{{tenant}}", "refId": "A"}
+      ]
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 38,
+  "tags": ["shelf", "tenants"],
+  "templating": {
+    "list": [
+      {"name": "DS_PROM", "type": "datasource", "query": "prometheus"},
+      {
+        "name": "tenant",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+        "query": "label_values(shelf_tenant_bytes_used, tenant)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "time": {"from": "now-24h", "to": "now"},
+  "title": "Shelf — Per-tenant",
+  "uid": "shelf-tenant",
+  "version": 1
+}

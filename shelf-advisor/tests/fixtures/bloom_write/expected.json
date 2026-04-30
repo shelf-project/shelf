@@ -1,0 +1,77 @@
+[
+  {
+    "recommendation_type": "bloom_write",
+    "table": "cat.s.t",
+    "confidence": 0.625,
+    "rationale": {
+      "id": "bloom_write_cat.s.t",
+      "severity": "warn",
+      "columns": [
+        {
+          "column": "user_id",
+          "frequency": 60
+        }
+      ],
+      "evidence": [
+        {
+          "metric": "query_count",
+          "value": 60,
+          "threshold": "min_query_count",
+          "comment": "distinct queries against this table inside the lookback window"
+        },
+        {
+          "metric": "avg_input_bytes",
+          "value": 2147483648,
+          "threshold": "min_query_bytes",
+          "comment": "average physical_input_bytes per query — drives saving_per_query"
+        },
+        {
+          "metric": "avg_wall_time_ms",
+          "value": 100,
+          "threshold": null,
+          "comment": "average wall-clock per query, observational only"
+        },
+        {
+          "metric": "selectivity_estimate",
+          "value": 0.1,
+          "threshold": "default_selectivity",
+          "comment": "NDV unavailable — falling back to BloomWriteConfig::default_selectivity (see design note)"
+        },
+        {
+          "metric": "saving_per_query_bytes",
+          "value": 1932735283,
+          "threshold": null,
+          "comment": "avg_input_bytes * (1 - selectivity)"
+        },
+        {
+          "metric": "rewrite_bytes",
+          "value": 214748364800,
+          "threshold": null,
+          "comment": "2 * table_total_bytes (read + write for a full OPTIMIZE)"
+        },
+        {
+          "metric": "rewrite_cost_cents",
+          "value": 800,
+          "threshold": null,
+          "comment": "placeholder tariff (see SHELF-52 design note); replaced by shelf_cost::Cents once PR #68 lands"
+        },
+        {
+          "metric": "payback_queries",
+          "value": 111,
+          "threshold": "100/1000",
+          "comment": "rewrite_bytes / saving_per_query_bytes; severity buckets at <100 (critical), 100..1000 (warn), >=1000 (info)"
+        }
+      ],
+      "regex_caveat": "Predicate columns are extracted via a configurable regex over raw SQL text (BloomWriteConfig::predicate_column_regex). CTE inlining, function-wrapped predicates, and subqueries are silently missed; review the column list before applying.",
+      "tier4_link": "If >30% of advisor cost concentrates in tables with no writer-side blooms, this recommender's output gates Tier-4 SHELF-G2 (`shelfd::side_bloom`) — see plan §Tier-4."
+    },
+    "suggested_change": {
+      "action_yaml": "-- SHELF-52 bloom-write recommendation\nALTER TABLE cat.s.t SET PROPERTIES (\n  'write.parquet.bloom-filter-columns' = 'user_id'\n);\nALTER TABLE cat.s.t EXECUTE optimize;\n",
+      "rewrite_bytes": 214748364800,
+      "rewrite_cost_cents": 800,
+      "rewrite_cost_dollars": "$8.00",
+      "payback_queries": 111,
+      "severity": "warn"
+    }
+  }
+]

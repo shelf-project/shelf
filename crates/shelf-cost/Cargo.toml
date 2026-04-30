@@ -1,0 +1,39 @@
+[package]
+name = "shelf-cost"
+description = "Audit-able S3 + data-transfer cost model for shelfd. Maps cache hits to cents-saved using published AWS prices."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["shelf", "cache", "cost", "s3", "prometheus"]
+categories = ["caching", "finance"]
+
+[lib]
+name = "shelf_cost"
+path = "src/lib.rs"
+
+# SHELF-40 — Public dependency budget is intentionally tight. The crate
+# is a calculation library; pulling in a runtime / async / IO crate
+# would force every downstream (`shelfd`, `shelf-advisor`, future
+# integrators) to carry baggage they don't need.
+[dependencies]
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+# Lightweight, pure-Rust property runner. Pinned to 1.x so it does not
+# drag a different `rand` semver into the workspace; we generate test
+# inputs with the included `TestRng`, never the system one.
+proptest = "1"
+# Micro-benchmark for the `< 5 ns/call` claim in the SHELF-40 design
+# note. Already declared at workspace scope so the version line is a
+# pure inheritance.
+criterion = { workspace = true }
+
+[[bench]]
+name = "dollars_saved_atomic_add"
+harness = false

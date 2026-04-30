@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "shelf.fullname" . }}-shelfd
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shelf.labels" . | nindent 4 }}
+data:
+  # Path must match the Dockerfile CMD: /etc/shelfd/shelfd.yaml.
+  # The shelfd CLI's own default is /etc/shelfd/config.yaml but the
+  # published image pins the former via CMD.
+  #
+  # Schema reference: shelfd/src/config.rs (`deny_unknown_fields` on
+  # every struct, so key spelling matters).
+  #
+  # Per-pod node.id is overridden at runtime by SHELFD_NODE_ID
+  # (fieldRef: metadata.name) — see templates/statefulset.yaml.
+  shelfd.yaml: |
+    node:
+      id: {{ include "shelf.fullname" . }}-placeholder
+    http:
+      listen: "0.0.0.0:{{ .Values.service.dataPort }}"
+      request_timeout: 30s
+    control:
+      listen: "0.0.0.0:{{ .Values.service.adminPort }}"
+    origin:
+      bucket: {{ .Values.origin.bucket | quote }}
+      region: {{ .Values.origin.region | quote }}
+      max_inflight: {{ .Values.origin.pool.maxConnections | int64 }}
+    pools:
+      metadata:
+        dram_bytes: {{ .Values.cache.pools.metadata.sizeBytes | int64 }}
+      rowgroup:
+        dram_bytes: {{ .Values.cache.pools.rowgroup.dramSizeBytes | int64 }}
+        nvme_dir: {{ .Values.storage.mountPath | quote }}
+        nvme_bytes: {{ .Values.cache.pools.rowgroup.nvmeSizeBytes | int64 }}
+        eviction_policy: {{ .Values.cache.pools.rowgroup.evictionPolicy | default "lru" | quote }}
+        {{- with .Values.cache.pools.rowgroup.diskCache }}
+        disk_cache:
+          {{- with .flushers }}
+          flushers: {{ . | int }}
+          {{- end }}
+          {{- with .bufferPoolSizeBytes }}
+          buffer_pool_size_bytes: {{ . | int64 }}
+          {{- end }}
+          {{- with .submitQueueSizeThresholdBytes }}
+          submit_queue_size_threshold_bytes: {{ . | int64 }}
+          {{- end }}
+          {{- with .admissionBytesPerSec }}
+          admission_bytes_per_sec: {{ . | int64 }}
+          {{- end }}
+        {{- end }}
+        {{- with .Values.cache.pools.rowgroup.compression }}
+        compression:
+          enabled: {{ .enabled }}
+          level: {{ .level | int }}
+          min_size_bytes: {{ .minSizeBytes | int64 }}
+        {{- end }}
+    admission:
+      size_threshold_bytes: {{ mul (int64 .Values.cache.admission.sizeThresholdMiB) 1048576 }}
+      pinned_bypass: {{ .Values.cache.admission.pinnedBypass }}
+    {{- with .Values.cache.bloom }}
+    # SHELF-46 — Bloom-aware footer admission. Default off; opt in
+    # per-replica via `cache.bloom.enabled=true` once SHELF-49 +
+    # B1 have soaked. See
+    # `shelfd/docs/design-notes/SHELF-46-bloom-aware-footer-admission.md`.
+    bloom_admission:
+      enabled: {{ .enabled | default false }}
+      max_index_entries: {{ .maxIndexEntries | default 50000 | int }}
+      min_footer_bytes: {{ .minFooterBytes | default 65536 | int64 }}
+    {{- end }}
+    membership:
+      headless_service: {{ include "shelf.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+      dns_refresh: 5s
+    head_lru_entries: 10000
+    s3_shim:
+      enabled: true
+      bind_address: "0.0.0.0:{{ .Values.service.s3shimPort }}"
+      max_full_object_bytes: 268435456
+    {{- with .Values.cache.cost }}
+    # SHELF-40 — `shelf_s3_dollars_saved_total` cost-saved counter.
+    # Defaults live in `crates/shelf-cost/src/coefficients.rs` per
+    # the published AWS price list (see crate README for citations).
+    cost:
+      enabled: {{ .enabled }}
+      region: {{ .region | quote }}
+      {{- with .getRequestMicroCents }}
+      get_request_micro_cents: {{ . | int64 }}
+      {{- end }}
+      {{- with .sameAzMicroCentsPerGib }}
+      same_az_micro_cents_per_gib: {{ . | int64 }}
+      {{- end }}
+      {{- with .crossAzMicroCentsPerGib }}
+      cross_az_micro_cents_per_gib: {{ . | int64 }}
+      {{- end }}
+      {{- with .natProcessingMicroCentsPerGib }}
+      nat_processing_micro_cents_per_gib: {{ . | int64 }}
+      {{- end }}
+      {{- with .natTraversalBasisPoints }}
+      nat_traversal_basis_points: {{ . | int }}
+      {{- end }}
+    {{- end }}
+    {{- with .Values.cache.abTag }}
+    # SHELF-42 — A/B tag receive path. Default off; flip
+    # `cache.abTag.enabled=true` in your overlay once Prometheus has
+    # been sized for the cap. Spec: docs/contracts/ab-tag.md.
+    ab_tag:
+      enabled: {{ .enabled }}
+      max_distinct_tags: {{ .maxDistinctTags | int }}
+      scrape_window: {{ .scrapeWindow | quote }}
+    {{- end }}
+    {{- with .Values.cache.decodedMeta }}
+    decoded_meta:
+      enabled: {{ .enabled | default false }}
+      max_manifest_entries: {{ .maxManifestEntries | default 10000 | int64 }}
+      max_footer_entries: {{ .maxFooterEntries | default 10000 | int64 }}
+    {{- end }}
+    {{- with .Values.cache.rewarm }}
+    rewarm:
+      enabled: {{ .enabled }}
+      max_bytes_per_sec: {{ .maxBytesPerSec | int64 }}
+      max_concurrent_files: {{ .maxConcurrentFiles | int }}
+      queue_capacity: {{ .queueCapacity | int }}
+      snapshot_lag_tolerance: {{ .snapshotLagToleranceSecs | int }}s
+    {{- end }}

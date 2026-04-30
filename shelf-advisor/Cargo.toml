@@ -1,0 +1,65 @@
+[package]
+name = "shelf-advisor"
+description = "Trino-event-listener + Iceberg-manifest advisor that emits JSON recommendations (small-file OPTIMIZE targets, pin-list candidates; MV-aware pinning and bloom-write hints land in sibling tickets). Read-only; no auto-PR; downstream CI/CD applies the suggestions."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[[bin]]
+name = "shelf-advisor"
+path = "src/main.rs"
+
+# `lib.rs` exposes the `Recommender` trait + `AnalysisContext` + the
+# `Recommendation` types so SHELF-65 (MV-aware pinning) and SHELF-52
+# (bloom-write advisor) can land their recommenders in-tree without
+# shelling out to the binary, and so `tests/it_*.rs` can drive the
+# pipeline in-process against fixture readers.
+[lib]
+name = "shelf_advisor"
+path = "src/lib.rs"
+
+[features]
+default = []
+# SHELF-65 — flips `cost_savings_per_refresh` from a `cost_model_unavailable`
+# null to an actual `Cents` figure, computed via the `shelf-dollars-saved`
+# crate landed by SHELF-61 (PR #68). Off by default while #68 is in flight;
+# the feature flip is the cutover point for the dependency. See
+# `shelf-advisor/docs/recommenders.md` §MV-pinning > Cost model wiring.
+shelf_dollars_saved = []
+# SHELF-65 — opt-in cargo feature for the live integration test that
+# drives a fixture-backed recommender end-to-end. The strict gate is
+# *both* this feature AND the `SHELF_INTEGRATION=1` env var; the test
+# panics rather than silent-skipping if either is missing once the
+# binary is built. See plan §8 (SHELF-09 trap).
+integration = []
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# `reqwest` reads shelfd's `/stats` endpoint over HTTP. Same-cluster,
+# no auth, default-features off (rustls-tls already pinned at the
+# workspace level so we don't get OpenSSL on Linux).
+reqwest = { workspace = true }
+# `humantime-serde` only deserialises `Duration` from the YAML config —
+# the CLI keeps its own tiny parser (see `parse_window`) so the
+# `--window` flag stays free of dep churn.
+humantime-serde = { workspace = true }
+[dev-dependencies]
+# `assert_cmd` drives the compiled `shelf-advisor` binary from the
+# integration tests. `tempfile` gives them a writable workspace.
+# Both already in the workspace dep graph; no transitive native deps.
+assert_cmd = "2"
+tempfile = "3"
+serde_yaml = { workspace = true }

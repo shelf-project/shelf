@@ -1,0 +1,102 @@
+[workspace]
+resolver = "2"
+members = ["shelfd", "shelfctl", "shelf-advisor", "crates/shelf-cost"]
+
+[workspace.package]
+version = "1.0.0-rc.6"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+repository = "https://github.com/shelf-project/shelf"
+readme = "README.md"
+
+# Shared dep versions. Binaries pick what they need from this table so that
+# shelfd and shelfctl stay on the same major/minor of every shared crate.
+#
+# Scope: Phase-0/1 only. Additions here must be justified in a SHELF-NN
+# ticket + design note (see shelfd/docs/design-notes/README.md).
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["trace", "timeout"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http2"] }
+axum = { version = "0.8", features = ["http2", "macros"] }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# SHELF-08 — OTLP trace exporter stack. Compatible set: the
+# `tracing-opentelemetry 0.28` ↔ `opentelemetry 0.27` pairing is the
+# last stable line before the 0.29/0.30 API churn, and ships a
+# `grpc-tonic` OTLP transport that pairs cleanly with the `tonic`
+# already pinned in the workspace.
+opentelemetry = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "trace"] }
+tracing-opentelemetry = "0.32"
+prometheus = { version = "0.14", features = ["process"] }
+bytes = "1"
+futures = "0.3"
+once_cell = "1"
+sha2 = "0.11"
+hex = "0.4"
+parking_lot = "0.12"
+humantime-serde = "1"
+# SHELF-65 — MV detection / refresh detection drive a small set of
+# user-facing regexes from the advisor config. `regex 1` is the
+# de-facto standard, no transitive native deps. Workspace-routed so
+# downstream recommenders can reuse the same compiled version.
+regex = "1"
+# AWS SDK — SHELF-05 origin client.
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+# Foyer DRAM + NVMe cache — SHELF-03, SHELF-17, SHELF-18.
+foyer = "0.12"
+# Control plane — SHELF-23 admin surface. Phase 0 ships an HTTP stub;
+# tonic is wired in as an optional dep for when SHELF-23 lands.
+tonic = { version = "0.12", features = ["tls", "gzip"] }
+prost = "0.14"
+# Integration-test helper (S3 via MinIO) — see tests/README.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+# Bench deps
+criterion = { version = "0.5", features = ["html_reports"] }
+# Embedded admin UI — rust-embed bakes the Vite bundle into the binary
+# under the `ui` feature. `mime_guess` resolves a Content-Type from the
+# asset path so we don't ship our own extension table.
+rust-embed = "8"
+mime_guess = "2"
+# SHELF E2 — zstd for Pool::Metadata compression. Pure-Rust (no C
+# deps) via the bundled `zstd-safe` layer; `zstd = "0.13"` pins a
+# maintained line. Metadata pool is the only caller for now.
+zstd = "0.13"
+# SHELF-D7 — `POST /cache/contains` encodes its hit-bitmap as
+# base64 so callers don't need a binary content-type handler. Kept
+# on the `0.22` line which is the last to build on our MSRV.
+base64 = "0.22"
+# SHELF-42 — URL-encode/decode the X-Shelf-Tag header payload.
+percent-encoding = "2"
+# SHELF-50 — bounded in-process LRU for decoded Iceberg manifests
+# and Parquet footers.
+lru = "0.12"
+# SHELF-34 + SHELF-50 — Apache Parquet footer / page-index extractor.
+# `default-features = false` cuts the arrow-* tree (~3 MB compile
+# output); SHELF-34 upgrades the line from 53 → 58 for the richer
+# page-index API. SHELF-50's decoded-metadata cache uses the same
+# crate via the workspace pin — pre-existing call sites (struct
+# literal construction for FileMetaData / SchemaElement in tests)
+# stay compatible across 53→58.
+parquet = { version = "58", default-features = false }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.bench]
+debug = true

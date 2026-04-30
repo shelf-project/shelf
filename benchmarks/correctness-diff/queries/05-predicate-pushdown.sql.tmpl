@@ -1,0 +1,12 @@
+-- 05-predicate-pushdown: highly-selective WHERE clause.
+-- Exercises file-skipping via Iceberg's manifest-level min/max
+-- stats + Parquet page-index skipping inside the surviving files.
+-- If either predicate surface is broken (e.g. shelf returns stale
+-- page-index bytes), we either miss rows that should match or
+-- include rows that shouldn't — both surface as a diff.
+SELECT user_id, event_id, event_time, value
+FROM {catalog}.{schema}.{table_events}
+WHERE {partition_column} = DATE '{partition_value}'
+  AND value > 0.95
+ORDER BY event_time, event_id
+LIMIT 5000

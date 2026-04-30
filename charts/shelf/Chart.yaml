@@ -1,0 +1,27 @@
+apiVersion: v2
+name: shelf
+description: |
+  Shelf — Iceberg-native, row-group-granular read cache for Trino.
+  Drop-in S3 endpoint shim that caches Parquet/Iceberg byte-ranges on
+  NVMe + DRAM in front of any S3-compatible object store.
+  See BLUEPRINT.md §9 for architecture.
+type: application
+version: 1.0.0-rc.6
+appVersion: "1.0.0-rc.6"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/shelf-project/shelf
+sources:
+  - https://github.com/shelf-project/shelf
+keywords:
+  - cache
+  - trino
+  - iceberg
+  - parquet
+  - s3
+maintainers:
+  - name: shelf-oncall
+    email: shelf-oncall@shelf-project.dev
+annotations:
+  # artifacthub.io/changes is intentionally omitted until v0.2; this chart is
+  # scaffolding only — see plan §3 Phase 0 / §4 SHELF-09 & SHELF-21.
+  category: Caching

@@ -1,0 +1,35 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "shelf.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shelf.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "shelf.selectorLabels" . | nindent 6 }}
+  endpoints:
+    # shelfd binds a single HTTP listener on the data plane (port `data`)
+    # that serves `/healthz`, `/readyz`, `/metrics`, `/stats`, `/admin/*`
+    # and `/ui`. The declared `metrics` (9091) + `admin` (9093) ports in
+    # service.yaml are reserved for a future dedicated control-plane
+    # listener but are not bound by current shelfd builds.
+    - port: data
+      interval: {{ .Values.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+      path: /metrics
+      honorLabels: true
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_pod_label_statefulset_kubernetes_io_pod_name]
+          targetLabel: ordinal
+{{- end }}

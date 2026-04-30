@@ -1,0 +1,108 @@
+name: smoke
+
+# SHELF-12 end-to-end smoke.
+#
+# Gated on paths that actually influence the read path so we don't
+# pay the compose boot cost on doc-only PRs. Runs the full cold/warm
+# assertion loop inside a GitHub-hosted runner.
+
+on:
+  pull_request:
+    paths:
+      - "shelfd/**"
+      - "clients/trino/**"
+      - "charts/shelf/**"
+      - "benchmarks/smoke/**"
+      - ".github/workflows/smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: compose smoke (trino 480 + shelfd + minio)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up Java (for plugin build)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Build shelf-trino-plugin JAR
+        run: mvn -B -DskipTests -f clients/trino/pom.xml package
+
+      - name: Build shelfd image
+        working-directory: benchmarks/smoke
+        run: docker compose build shelfd
+
+      - name: Compose up
+        working-directory: benchmarks/smoke
+        run: docker compose up -d
+
+      - name: Wait for services
+        working-directory: benchmarks/smoke
+        run: ./run-smoke.sh wait-healthy
+
+      - name: Run smoke loop
+        working-directory: benchmarks/smoke
+        run: ./run-smoke.sh
+
+      - name: Dump logs on failure
+        if: failure()
+        working-directory: benchmarks/smoke
+        run: docker compose logs --tail=400
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-results
+          path: benchmarks/smoke/results/
+          if-no-files-found: ignore
+
+      - name: Tear down
+        if: always()
+        working-directory: benchmarks/smoke
+        run: docker compose down -v
+
+  chaos-smoke:
+    name: chaos drills (green-in-CI variants)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # SHELF-28 — these smoke variants prove the drill scripts still
+    # parse, the expected metrics still exist, and the assertion math
+    # is still correct against the compose harness. They do NOT prove
+    # the cluster-side invariant — that's ops territory
+    # (see docs/runbook.md §2).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up Java (for plugin build)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      - name: Build shelf-trino-plugin JAR
+        run: mvn -B -DskipTests -f clients/trino/pom.xml package
+
+      - name: chaos-keda-rotation-smoke
+        run: make chaos-keda-rotation-smoke
+
+      - name: chaos-pod-kill-smoke
+        run: make chaos-pod-kill-smoke

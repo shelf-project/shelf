@@ -1,0 +1,219 @@
+# PrometheusRule bundle for the Shelf cache.
+#
+# Every alert has a runbook_url that resolves to a file under runbooks/
+# in this repository. dashboard_url uses a `${GRAFANA_URL}` placeholder
+# so each environment can render the correct host (e.g. via envsubst at
+# deploy time, or kustomize/Helm overlay).
+#
+# NB: no ShelfRaftNotQuorate — ADR-0001 dropped embedded Raft.
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: shelf-rules
+  namespace: shelf
+  labels:
+    app.kubernetes.io/name: shelf
+    app.kubernetes.io/part-of: shelf
+    prometheus: kube-prometheus
+    role: alert-rules
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: shelf.slo
+      interval: 30s
+      rules:
+        - alert: ShelfHitRateTooLow
+          # plan §6.4 primary metric 1: cumulative hit rate must stay ≥ 71%.
+          # Alert at 60% for 10m — that is the rollback threshold per §6.4.
+          expr: |
+            (
+              sum(rate(shelf_hits_total[10m]))
+              /
+              (sum(rate(shelf_hits_total[10m])) + sum(rate(shelf_misses_total[10m])))
+            ) < 0.60
+          for: 10m
+          labels:
+            severity: page
+            team: shelf-sre
+            service: shelf
+          annotations:
+            summary: "Shelf hit rate < 60% for 10 minutes"
+            description: |
+              Cumulative Shelf hit rate is {{ $value | humanizePercentage }} —
+              below the v0.5 rollback threshold of 60%. If this holds for
+              another 20 minutes, consider reverting to Alluxio hot-standby
+              per runbook.
+            runbook_url: https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-hit-rate-too-low.md
+            dashboard_url: ${GRAFANA_URL}/d/shelf-overview
+
+        - alert: ShelfFallThroughSurge
+          # agents/8-operator.md §Pass-2: fall-through rate > 20% for 5m.
+          expr: |
+            (
+              sum(rate(shelf_plugin_fallthrough_total[5m]))
+              /
+              sum(rate(shelf_plugin_requests_total[5m]))
+            ) > 0.20
+          for: 5m
+          labels:
+            severity: page
+            team: shelf-sre
+            service: shelf
+          annotations:
+            summary: "Shelf plugin fall-through > 20% for 5 minutes"
+            description: |
+              {{ $value | humanizePercentage }} of plugin requests are
+              falling through to S3. Either shelfd pods are unreachable
+              or the per-pod circuit breakers are open. Users still get
+              correct answers — but the cache is not doing its job.
+            runbook_url: https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-fall-through-surge.md
+            dashboard_url: ${GRAFANA_URL}/d/shelf-overview
+
+        - alert: ShelfNvmeUsageHigh
+          # agents/8-operator.md §Pass-2: > 85% NVMe for 15m.
+          expr: |
+            (shelf_disk_bytes_used / shelf_disk_bytes_capacity) > 0.85
+          for: 15m
+          labels:
+            severity: warn
+            team: shelf-sre
+            service: shelf
+          annotations:
+            summary: "Shelf pod {{ $labels.pod }} NVMe > 85% full"
+            description: |
+              {{ $labels.pod }} is {{ $value | humanizePercentage }} full.
+              Foyer will start refusing admission at 90% and existing
+              keys continue to serve, but new large reads will fall
+              through until eviction catches up. See runbook for safe
+              mitigation (pin-list trim / scale-up).
+            runbook_url: https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-nvme-usage-high.md
+            dashboard_url: ${GRAFANA_URL}/d/shelf-overview
+
+    - name: shelf.health
+      interval: 30s
+      rules:
+        - alert: ShelfPodRestarting
+          # kube_pod_container_status_restarts_total is from kube-state-metrics.
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace="shelf", container="shelfd"}[15m]) >= 3
+          for: 5m
+          labels:
+            severity: page
+            team: shelf-sre
+            service: shelf
+          annotations:
+            summary: "Shelf pod {{ $labels.pod }} in crashloop"
+            description: |
+              {{ $labels.pod }} restarted {{ $value }} times in 15m.
+              Either an OOM, a panic on startup, or a bad config reload.
+              Treat as data-plane impairment until hit rate confirms it's isolated.
+            runbook_url: https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-pod-restarting.md
+            dashboard_url: ${GRAFANA_URL}/d/shelf-overview
+
+        # ADR-0024 / rc.6 P1.4 — per-pod RSS watermark alerts.
+        # The values-prod.yaml limit is 32 GiB but on a node with ~27.3
+        # GiB allocatable the practical OOM ceiling is ~27 GiB. Two
+        # watermarks let on-call distinguish "investigate" from "act
+        # right now":
+        #   - 24 GiB warn @ 5m sustained: investigate before adding
+        #     another replica's traffic.
+        #   - 25.5 GiB critical @ 2m sustained: scale shelf-pool +2 OR
+        #     rolling-restart the offending pod immediately.
+        # The `max without(prometheus, dataPrometheusReplica)` wrapper
+        # de-duplicates HA-Prometheus pairs (mimir-prod / mimir-data
+        # carry both `-0` and `-1` replicas of every series).
+        - alert: ShelfPodRSSWarn
+          expr: |
+            max without(prometheus, dataPrometheusReplica) (
+              container_memory_working_set_bytes{namespace="shelf", container="shelfd"}
+            ) / (1024 * 1024 * 1024) > 24
+          for: 5m
+          labels:
+            severity: warning
+            team: shelf-sre
+            service: shelf
+          annotations:
+            summary: "Shelf pod {{ $labels.pod }} RSS > 24 GiB (warn watermark)"
+            description: |
+              RSS is approaching the ~27 GiB OOM ceiling on the node
+              this pod is scheduled on. Investigate before adding more
+              replica traffic. Likely culprits:
+                - Foyer DRAM pool overshoot (check shelf_dram_bytes_used).
+                - Submit-queue overflow under sustained writes
+                  (shelf_lodc_drops_total{reason="submit_queue_overflow"}).
+                - In-flight S3 buffers under high concurrency
+                  (origin.pool.maxConnections × ~32 MiB rowgroup).
+            runbook_url: https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-pod-rss-watermark.md
+            dashboard_url: ${GRAFANA_URL}/d/shelf-overview-v2
+
+        - alert: ShelfPodRSSCritical
+          expr: |
+            max without(prometheus, dataPrometheusReplica) (
+              container_memory_working_set_bytes{namespace="shelf", container="shelfd"}
+            ) / (1024 * 1024 * 1024) > 25.5
+          for: 2m
+          labels:
+            severity: critical
+            team: shelf-sre
+            service: shelf
+          annotations:
+            summary: "Shelf pod {{ $labels.pod }} RSS > 25.5 GiB (critical, OOM imminent)"
+            description: |
+              Pod is within ~1.5 GiB of the OOM ceiling. Act now:
+                1. Scale shelf-pool +2 pods (peer-fetch will redistribute
+                   load across the larger ring).
+                2. Or rolling-restart this pod (Foyer NVMe replays
+                   within the 5-minute startupProbe grace).
+              Do NOT wait for the warning timer to escalate — once the
+              kernel OOM-kills shelfd, in-flight queries on this pod's
+              served keys fall through to S3 with a brief
+              UnknownHostException window during the DNS race.
+            runbook_url: https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-pod-rss-watermark.md
+            dashboard_url: ${GRAFANA_URL}/d/shelf-overview-v2
+
+        - alert: ShelfCircuitBreakerOpen
+          # agents/8-operator.md §Pass-2: any pod, breaker open > 5m.
+          # Encoded state: 0=closed, 1=half-open, 2=open.
+          expr: |
+            max by (pod, target_pod) (shelf_circuit_breaker_state) >= 2
+          for: 5m
+          labels:
+            severity: page
+            team: shelf-sre
+            service: shelf
+          annotations:
+            summary: "Circuit breaker OPEN on {{ $labels.pod }} → {{ $labels.target_pod }}"
+            description: |
+              A circuit breaker has been open for 5m+. Traffic to that
+              target is short-circuiting to S3 per BLUEPRINT §9.5 —
+              queries still succeed but hit rate drops. Investigate
+              the target pod's health before the breaker timer keeps
+              doubling.
+            runbook_url: https://github.com/shelf-project/shelf/blob/main/runbooks/circuit-breaker-open.md
+            dashboard_url: ${GRAFANA_URL}/d/shelf-overview
+
+    - name: shelf.admission
+      interval: 1m
+      rules:
+        - alert: ShelfAdmissionModelStale
+          # agents/8-operator.md §Pass-2: > 48h since promotion.
+          # In v1, the admission model is disabled (ADR-0003). This alert
+          # guards the Phase-4 LightGBM escape hatch if it ever ships.
+          expr: |
+            (time() - shelf_admission_model_promoted_timestamp_seconds) > (48 * 3600)
+            and on () shelf_admission_model_enabled == 1
+          for: 10m
+          labels:
+            severity: warn
+            team: shelf-sre
+            service: shelf
+          annotations:
+            summary: "Admission model has not been promoted in > 48h"
+            description: |
+              Last promotion was {{ $value | humanizeDuration }} ago.
+              Either the nightly trainer DAG is failing or promotion
+              was paused manually. In v1 this alert is inert
+              (enabled=0 by default — ADR-0003).
+            runbook_url: https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-admission-model-stale.md
+            dashboard_url: ${GRAFANA_URL}/d/shelf-trainer

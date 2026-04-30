@@ -1,0 +1,110 @@
+# Sample run: smoke_harness.py PASS
+# ---------------------------------------------------------------------------
+# Captured 2026-04-28 against trino-replica-1.example.com (mcp-trino).
+# This is a self-diff (catalog A == catalog B == cdp) used to validate the
+# diff machinery itself. A real cutover-gating run uses --catalog-a cdp
+# --catalog-b cdp_shelf with the cdp_shelf parallel catalog already
+# deployed via a Trino values.yaml MR (Agent E owns drafting that MR).
+# ---------------------------------------------------------------------------
+
+$ python3 smoke_harness.py \
+      --catalog-a cdp \
+      --catalog-b cdp \
+      --replica rep-1 \
+      --queries /tmp/smoke_test.sql \
+      --no-precheck
+
+2026-04-28 12:55:49 INFO loaded 2 custom queries from /tmp/smoke_test.sql
+2026-04-28 12:55:49 INFO smoke harness: A=cdp vs B=cdp (2 queries, replica=rep-1)
+2026-04-28 12:55:49 INFO running tiny_select on both catalogs in parallel
+2026-04-28 12:55:52 INFO   tiny_select: PASS  (rows A=1 B=1, 3.0s A / 2.5s B)
+2026-04-28 12:55:52 INFO running dual on both catalogs in parallel
+2026-04-28 12:55:54 INFO   dual: PASS  (rows A=3 B=3, 2.3s A / 2.3s B)
+================================================================
+smoke harness PASS: 2/2 queries identical
+  catalog-A : cdp
+  catalog-B : cdp
+  replica   : rep-1
+================================================================
+name                           A rows   B rows    A sec    B sec  result
+------------------------------------------------------------------------------
+tiny_select                         1        1     2.97     2.51  PASS
+dual                                3        3     2.30     2.30  PASS
+
+# Exit code: 0 (PASS gate satisfied)
+
+
+# ---------------------------------------------------------------------------
+# Expected output for the canonical 5-query run on a real cutover gate
+# ---------------------------------------------------------------------------
+#
+# $ python3 smoke_harness.py \
+#       --catalog-a cdp \
+#       --catalog-b cdp_shelf \
+#       --replica rep-3
+#
+# 2026-04-28 13:30:00 INFO smoke harness: A=cdp vs B=cdp_shelf (5 queries, replica=rep-3)
+# 2026-04-28 13:30:00 INFO running 01_count_large_fact on both catalogs in parallel
+# 2026-04-28 13:30:08 INFO   01_count_large_fact: PASS  (rows A=1 B=1, 7.2s A / 7.4s B)
+# 2026-04-28 13:30:08 INFO running 02_select_small_dim on both catalogs in parallel
+# 2026-04-28 13:30:10 INFO   02_select_small_dim: PASS  (rows A=100 B=100, 1.9s A / 2.1s B)
+# 2026-04-28 13:30:10 INFO running 03_simple_agg on both catalogs in parallel
+# 2026-04-28 13:30:24 INFO   03_simple_agg: PASS  (rows A=50 B=50, 14.0s A / 13.6s B)
+# 2026-04-28 13:30:24 INFO running 04_join on both catalogs in parallel
+# 2026-04-28 13:31:02 INFO   04_join: PASS  (rows A=100 B=100, 38.1s A / 39.2s B)
+# 2026-04-28 13:31:02 INFO running 05_metadata_snapshots on both catalogs in parallel
+# 2026-04-28 13:31:04 INFO   05_metadata_snapshots: PASS  (rows A=10 B=10, 1.8s A / 1.9s B)
+# ================================================================
+# smoke harness PASS: 5/5 queries identical
+#   catalog-A : cdp
+#   catalog-B : cdp_shelf
+#   replica   : rep-3
+# ================================================================
+# name                           A rows   B rows    A sec    B sec  result
+# ------------------------------------------------------------------------------
+# 01_count_large_fact                 1        1     7.20     7.40  PASS
+# 02_select_small_dim               100      100     1.90     2.10  PASS
+# 03_simple_agg                      50       50    14.00    13.60  PASS
+# 04_join                           100      100    38.10    39.20  PASS
+# 05_metadata_snapshots              10       10     1.80     1.90  PASS
+#
+# Exit code: 0
+#
+# Interpretation: every query returned identical rows + identical schema
+# under a stable sort. cdp_shelf is byte-equivalent to cdp on this rep.
+# Cutover gate (Stage 3b PASS) is satisfied. Proceed to Stage 4 / 5.x.
+
+
+# ---------------------------------------------------------------------------
+# FAIL example (forced by aiming catalog-b at the system catalog so Trino
+# returns a different schema for the same query; included so an operator
+# knows what a real failure looks like in CI logs)
+# ---------------------------------------------------------------------------
+
+$ python3 smoke_harness.py \
+      --catalog-a cdp \
+      --catalog-b system \
+      --queries /tmp/smoke_fail.sql \
+      --no-precheck
+
+2026-04-28 12:56:02 INFO loaded 1 custom queries from /tmp/smoke_fail.sql
+2026-04-28 12:56:02 INFO smoke harness: A=cdp vs B=system (1 queries, replica=n/a)
+2026-04-28 12:56:02 INFO running changing on both catalogs in parallel
+2026-04-28 12:56:05 INFO   changing: FAIL  (rows A=1 B=1, 2.5s A / 2.5s B)
+================================================================
+smoke harness FAIL: 0/1 queries identical
+  catalog-A : cdp
+  catalog-B : system
+================================================================
+name                           A rows   B rows    A sec    B sec  result
+------------------------------------------------------------------------------
+changing                            1        1     2.52     2.52  FAIL
+
+================================================================
+FAIL details:
+================================================================
+
+[changing]
+  schema types mismatch: A=['integer', 'varchar(3)'] vs B=['integer', 'varchar(6)']
+
+# Exit code: 1 (gate NOT satisfied — block cutover)

@@ -1,0 +1,89 @@
+# H2 — open a dbt PR from last night's shelf-advisor run.
+#
+# Runs once per day at 03:30 UTC (75 min after the advisor
+# CronJob). Downloads `recommendations.json` from S3, clones the
+# target dbt repo, runs `tools/dbt_emit.py`, pushes a branch, and
+# opens a PR.
+name: shelf-advisor-dbt-emit
+
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      stamp:
+        description: "YYYY-MM-DD of recommendations to emit"
+        required: false
+      dry_run:
+        description: "If true, write models but do not open a PR"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  emit:
+    runs-on: ubuntu-latest
+    env:
+      DBT_REPO: "${{ vars.SHELF_DBT_REPO }}"
+      # S3 prefix for nightly recommendations.json. Set the
+      # `MV_CANDIDATES_S3_PREFIX` repo variable in your fork.
+      S3_PREFIX: "${{ vars.MV_CANDIDATES_S3_PREFIX }}"
+    steps:
+      - name: Checkout shelf tooling
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.SHELF_ADVISOR_AWS_ROLE }}
+          aws-region: ap-south-1
+
+      - name: Pick recommendations file
+        id: pick
+        run: |
+          set -euo pipefail
+          if [[ -z "${S3_PREFIX:-}" ]]; then
+            echo "::error::MV_CANDIDATES_S3_PREFIX repo variable is not set" >&2
+            exit 1
+          fi
+          if [[ -n "${{ github.event.inputs.stamp }}" ]]; then
+            stamp="${{ github.event.inputs.stamp }}"
+          else
+            stamp=$(date -u +%Y-%m-%d)
+          fi
+          echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
+          aws s3 cp "${S3_PREFIX}/${stamp}.json" /tmp/recommendations.json
+
+      - name: Clone target dbt repo
+        env:
+          GH_TOKEN: ${{ secrets.SHELF_DBT_PR_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${DBT_REPO}.git" /tmp/dbt-repo
+          git -C /tmp/dbt-repo config user.email "shelf-advisor@users.noreply.github.com"
+          git -C /tmp/dbt-repo config user.name "shelf-advisor"
+
+      - name: Emit dbt models + open PR
+        env:
+          GH_TOKEN: ${{ secrets.SHELF_DBT_PR_TOKEN }}
+        run: |
+          set -euo pipefail
+          args=(
+            "--recommendations" "/tmp/recommendations.json"
+            "--repo" "/tmp/dbt-repo"
+            "--branch" "shelf-advisor/mv-${{ steps.pick.outputs.stamp }}"
+          )
+          if [[ "${{ github.event.inputs.dry_run }}" == "true" ]]; then
+            args+=("--no-commit")
+          else
+            args+=("--open-pr")
+          fi
+          python3 shelf/tools/dbt_emit.py "${args[@]}"

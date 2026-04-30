@@ -1,0 +1,120 @@
+# Track C / SHELF-29 — monthly reconfirm of the upstream Trino cache SPI
+# at trinodb/trino#29184 (`user/serafin/unified-caching-v2`).
+#
+# Purpose: the Track G / H rollout depends on a client-side HRW
+# BlobCacheManager SPI that Trino does not yet ship. Until the PR
+# lands we need to check on the first day of every month whether:
+#
+# - the SPI has merged (in which case we want to spike the plugin
+#   that same sprint),
+# - the SPI has materially changed shape (in which case our design
+#   note SHELF-29-blob-cache-plugin.md may need updating), or
+# - it has gone stale (we will not commit to a closed-PR direction).
+#
+# The workflow opens or updates a single tracking issue per month
+# so the reminder is actionable, not silent.
+name: shelf-29-watch
+
+on:
+  schedule:
+    # 09:00 UTC on the 1st of every month — early in the working
+    # day for the maintainers, well clear of the weekly Monday
+    # CI storm at 00:00 UTC.
+    - cron: "0 9 1 * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query trinodb/trino#29184 status
+        id: pr
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: 'trinodb',
+              repo: 'trino',
+              pull_number: 29184,
+            });
+            core.setOutput('state', pr.data.state);
+            core.setOutput('merged', pr.data.merged);
+            core.setOutput('title', pr.data.title);
+            core.setOutput('updated_at', pr.data.updated_at);
+            core.setOutput('additions', pr.data.additions);
+            core.setOutput('deletions', pr.data.deletions);
+            core.setOutput('head_sha', pr.data.head.sha);
+            core.setOutput('base_ref', pr.data.base.ref);
+            core.setOutput('url', pr.data.html_url);
+
+      - name: Open or update monthly tracking issue
+        uses: actions/github-script@v9
+        env:
+          PR_STATE: ${{ steps.pr.outputs.state }}
+          PR_MERGED: ${{ steps.pr.outputs.merged }}
+          PR_TITLE: ${{ steps.pr.outputs.title }}
+          PR_UPDATED_AT: ${{ steps.pr.outputs.updated_at }}
+          PR_ADDITIONS: ${{ steps.pr.outputs.additions }}
+          PR_DELETIONS: ${{ steps.pr.outputs.deletions }}
+          PR_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          PR_BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const {
+              PR_STATE, PR_MERGED, PR_TITLE, PR_UPDATED_AT,
+              PR_ADDITIONS, PR_DELETIONS, PR_HEAD_SHA, PR_BASE_REF, PR_URL,
+            } = process.env;
+            const merged = PR_MERGED === 'true';
+            const banner = merged
+              ? 'MERGED — spike `cache.manager=shelf` plugin this sprint.'
+              : PR_STATE === 'closed'
+                ? 'CLOSED WITHOUT MERGE — reconsider design direction.'
+                : 'Still open — recheck next month.';
+            const today = new Date().toISOString().slice(0, 10);
+            const title = `SHELF-29 upstream SPI check — ${today}`;
+            const body = [
+              `## ${banner}`,
+              '',
+              `- Upstream PR: [trinodb/trino#29184](${PR_URL})`,
+              `- Title: ${PR_TITLE}`,
+              `- State: \`${PR_STATE}\` (merged=\`${merged}\`)`,
+              `- Target branch: \`${PR_BASE_REF}\``,
+              `- Head SHA: \`${PR_HEAD_SHA}\``,
+              `- Last updated: ${PR_UPDATED_AT}`,
+              `- Diff size: +${PR_ADDITIONS} / -${PR_DELETIONS}`,
+              '',
+              'Action items per plan Track C:',
+              '- [ ] Reread SPI surface in upstream HEAD; compare to `clients/trino/docs/design-notes/SHELF-29-blob-cache-plugin.md`.',
+              '- [ ] Confirm our `ShelfFileSystem` still implements the required SPI verbs or note the drift.',
+              '- [ ] If merged: create SHELF-29 implementation ticket + schedule 1-sprint spike.',
+              '- [ ] If closed: open an RFC to pick a different SPI path.',
+            ].join('\n');
+            const q = `repo:${context.repo.owner}/${context.repo.repo} is:issue is:open label:shelf-29-watch in:title "SHELF-29 upstream SPI check"`;
+            const search = await github.rest.search.issuesAndPullRequests({ q });
+            if (search.data.total_count > 0) {
+              const existing = search.data.items[0];
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                title,
+                body,
+              });
+              core.info(`Updated existing issue #${existing.number}`);
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['shelf-29-watch', 'track-c'],
+              });
+              core.info('Opened new tracking issue');
+            }

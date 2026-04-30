@@ -1,0 +1,98 @@
+# Example CronJob for the compressed-canary rollout's hourly
+# correctness diff. One CronJob per replica; the selector scopes the
+# run to that replica's Trino Gateway pool so the REST queries route
+# to the specific replica we're canary-ing.
+#
+# Deploy during each replica's canary window (per rollout-v1.md §5)
+# and delete 24h after that replica's soak ends.
+#
+# Replace the placeholders:
+#   ${REPLICA}        — one of rep-0 / rep-1 / rep-2 / rep-3
+#   ${IMAGE_TAG}      — pinned image digest for shelf-correctness-diff
+#   ${TRINO_GATEWAY}  — headless service routing to the replica
+#   ${NAMESPACE}      — typically trino-db
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: shelf-correctness-diff-${REPLICA}
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: shelf-correctness-diff
+    app.kubernetes.io/component: canary-guardrail
+    shelf.replica: ${REPLICA}
+spec:
+  schedule: "0 * * * *"           # hourly, on the hour
+  concurrencyPolicy: Forbid       # do not overlap; if a run is late, skip the next
+  successfulJobsHistoryLimit: 24  # keep one full day of green runs
+  failedJobsHistoryLimit: 7       # keep a week of failures for postmortem
+  startingDeadlineSeconds: 300    # if the scheduler is > 5m late, skip that slot
+  jobTemplate:
+    spec:
+      backoffLimit: 0             # never retry — a diff is a diff
+      activeDeadlineSeconds: 600  # 10m max wall clock per run
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: shelf-correctness-diff
+            shelf.replica: ${REPLICA}
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: diff
+              image: ghcr.io/shelf-project/correctness-diff:${IMAGE_TAG}
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: REPLICA
+                  value: ${REPLICA}
+                - name: LOG_LEVEL
+                  value: INFO
+              args:
+                - --config
+                - /etc/correctness-diff/config.yaml
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "512Mi"
+              volumeMounts:
+                - name: config
+                  mountPath: /etc/correctness-diff
+                  readOnly: true
+          volumes:
+            - name: config
+              configMap:
+                name: shelf-correctness-diff-${REPLICA}
+                # The ConfigMap carries the replica-specific YAML:
+                #   trino.host: ${TRINO_GATEWAY}   (points at the replica)
+                #   replica: ${REPLICA}
+                #   everything else: shared across replicas
+
+---
+# Alerting: PrometheusRule that pages when the Job fails.
+# Mirror the rollout-v1.md §5 contract: exit-1 from the CronJob
+# triggers an immediate rollback, so it must page, not just warn.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: shelf-correctness-diff-${REPLICA}
+  namespace: ${NAMESPACE}
+  labels:
+    grafana_alert: "1"
+spec:
+  groups:
+    - name: shelf-correctness-diff
+      rules:
+        - alert: ShelfCorrectnessDiffFailed
+          expr: |
+            max_over_time(kube_job_status_failed{job_name=~"shelf-correctness-diff-${REPLICA}-.*"}[15m]) > 0
+          for: 0m
+          labels:
+            severity: page
+            service: shelf
+            replica: ${REPLICA}
+          annotations:
+            summary: "Shelf correctness diff diverged on ${REPLICA} — ROLLBACK per runbook"
+            runbook: "https://internal/runbooks/shelf-errors#correctness-diff"

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shelf-correctness-diff"
+version = "0.1.0"
+description = "Row-level correctness diff between Shelf-backed and S3-direct Trino catalogs (rollout-v1 pre-req)."
+requires-python = ">=3.11"
+dependencies = [
+  "trino>=0.330",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+shelf-correctness-diff = "correctness_diff.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"

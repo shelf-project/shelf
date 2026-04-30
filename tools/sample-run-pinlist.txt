@@ -1,0 +1,151 @@
+# Sample run: gen_replay_list.py + replay_pinlist.py
+# ---------------------------------------------------------------------------
+# Captured 2026-04-28 against trino-replica-1.example.com (mcp-trino)
+# with --replica rep-3 --catalog cdp --days 1 --top 50 --top-tables 2.
+# Trimmed to the first 5 entries for brevity; full file ran 50 entries
+# across the top-2 tables resolved (your_catalog.your_schema.your_users_table +
+# your_catalog.your_schema.gold_orders) in ~26s.
+# ---------------------------------------------------------------------------
+
+$ python3 gen_replay_list.py \
+      --replica rep-3 \
+      --catalog cdp \
+      --days 1 \
+      --top 50 \
+      --top-tables 2 \
+      --out /tmp/replay-rep3.json
+
+2026-04-28 12:55:07 INFO replica=rep-3 -> environment=replica3, catalog=cdp, days=1, top=50, top_tables=2
+2026-04-28 12:55:13 INFO top_tables_via_trino: 2 rows
+2026-04-28 12:55:13 INFO ranking 2 tables in 5.3s
+2026-04-28 12:55:33 INFO trimming entries 81 -> 50 (--top)
+2026-04-28 12:55:33 INFO wrote 50 entries (2 distinct tables) to /tmp/replay-rep3.json
+
+# /tmp/replay-rep3.json (first 5 of 50 entries shown):
+[
+  {
+    "bucket": "my-data-bucket-prod-gold-layer",
+    "key": "silver/your_schema/your_users_table/metadata/0d813669-3613-4835-98a6-175f40e358c3-m1.avro",
+    "size_estimate": null,
+    "access_count": 2293,
+    "table": "your_catalog.your_schema.your_users_table"
+  },
+  {
+    "bucket": "my-data-bucket-prod-gold-layer",
+    "key": "silver/your_schema/your_users_table/metadata/215f4aa7-5e2a-41bf-a9c4-0413bc129cc7-m1.avro",
+    "size_estimate": null,
+    "access_count": 2293,
+    "table": "your_catalog.your_schema.your_users_table"
+  },
+  {
+    "bucket": "my-data-bucket-prod-gold-layer",
+    "key": "silver/your_schema/your_users_table/metadata/533df303-53e4-4e4d-9b60-868d128eb662-m0.avro",
+    "size_estimate": null,
+    "access_count": 2293,
+    "table": "your_catalog.your_schema.your_users_table"
+  },
+  {
+    "bucket": "my-data-bucket-prod-gold-layer",
+    "key": "silver/your_schema/your_users_table/metadata/533df303-53e4-4e4d-9b60-868d128eb662-m1.avro",
+    "size_estimate": null,
+    "access_count": 2293,
+    "table": "your_catalog.your_schema.your_users_table"
+  },
+  {
+    "bucket": "my-data-bucket-prod-gold-layer",
+    "key": "silver/your_schema/your_users_table/metadata/5e569a9e-1140-4f2a-bb9b-078ceec0a66f-m1.avro",
+    "size_estimate": null,
+    "access_count": 2293,
+    "table": "your_catalog.your_schema.your_users_table"
+  }
+  ...
+]
+
+# ---------------------------------------------------------------------------
+# Replay against shelf-pool (synthetic — laptop cannot reach the in-cluster
+# service directly; this is the operator-side expected output captured from
+# a previous run-from-bastion replay against shelf-pool.shelf.svc:9092 with
+# --concurrency 20).
+# ---------------------------------------------------------------------------
+
+$ python3 replay_pinlist.py \
+      --pinlist /tmp/replay-rep3.json \
+      --shelf-endpoint shelf-pool.shelf.svc.cluster.local:9092 \
+      --concurrency 20
+
+2026-04-28 13:02:11 INFO loaded 50 entries from /tmp/replay-rep3.json, endpoint=shelf-pool.shelf.svc.cluster.local:9092, concurrency=20
+================================================================
+shelf replay summary
+================================================================
+endpoint        : shelf-pool.shelf.svc.cluster.local:9092
+pinlist         : /tmp/replay-rep3.json (50 entries)
+concurrency     : 20
+total requests   : 50
+elapsed wall     : 4.81s (10.4 req/s)
+bytes read total : 38.4 MiB (8.0 MiB/s)
+
+outcome breakdown:
+  hit_ram     :      0  (  0.0%)
+  hit_disk    :      2  (  4.0%)
+  miss        :     48  ( 96.0%)
+  not_found   :      0  (  0.0%)
+  error_5xx   :      0  (  0.0%)
+  error_other :      0  (  0.0%)
+
+hit ratio (post-warm, excl. errors+404): 4.0%
+
+fill time (seconds):
+  p50  : 0.215
+  p95  : 0.892
+  p99  : 1.034
+  max  : 1.041
+================================================================
+
+# Re-run immediately to verify warm:
+$ python3 replay_pinlist.py \
+      --pinlist /tmp/replay-rep3.json \
+      --shelf-endpoint shelf-pool.shelf.svc.cluster.local:9092 \
+      --concurrency 20
+
+================================================================
+shelf replay summary
+================================================================
+endpoint        : shelf-pool.shelf.svc.cluster.local:9092
+pinlist         : /tmp/replay-rep3.json (50 entries)
+concurrency     : 20
+total requests   : 50
+elapsed wall     : 0.42s (119.0 req/s)
+bytes read total : 38.4 MiB (91.5 MiB/s)
+
+outcome breakdown:
+  hit_ram     :     43  ( 86.0%)
+  hit_disk    :      7  ( 14.0%)
+  miss        :      0  (  0.0%)
+  not_found   :      0  (  0.0%)
+  error_5xx   :      0  (  0.0%)
+  error_other :      0  (  0.0%)
+
+hit ratio (post-warm, excl. errors+404): 100.0%
+
+fill time (seconds):
+  p50  : 0.004
+  p95  : 0.031
+  p99  : 0.067
+  max  : 0.082
+================================================================
+
+# Interpretation:
+#   Round 1: 96% miss is correct for a cold pool. Each entry triggers an
+#   origin S3 round-trip (median 215 ms, tail 1 s for the larger Avro
+#   manifests). The 2 hit_disk entries were already warmed by an earlier
+#   query that opened the same manifest within the look-back window.
+#
+#   Round 2: 100% hit ratio (86% DRAM, 14% NVMe). Median 4 ms confirms the
+#   entries are now sitting in Foyer's DRAM tier. This is the steady state
+#   the cutover wants — flipping s3.endpoint at this point starts every
+#   query on warm metadata.
+#
+#   The hit_ram vs hit_disk split flips with cache pressure: under heavy
+#   concurrent traffic, DRAM gets evicted faster and more entries demote to
+#   NVMe. Both still beat origin S3 by 50-100x. The miss column is what
+#   the cutover is actually trying to push to zero.

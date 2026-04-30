@@ -1,0 +1,38 @@
+{
+  "tables": [
+    {
+      "catalog": "warehouse",
+      "schema": "your_schema",
+      "table": "your_events_table",
+      "snapshot_id": 1001,
+      "partition_spec": [
+        {
+          "field": "event_region",
+          "transform": "identity"
+        }
+      ],
+      "entries_file": "your_catalog.your_schema.your_events_table/1001.json"
+    },
+    {
+      "catalog": "warehouse",
+      "schema": "your_gold_schema",
+      "table": "your_daily_revenue",
+      "snapshot_id": 2001,
+      "partition_spec": [],
+      "entries_file": "your_catalog.your_schema.your_daily_revenue/2001.json"
+    },
+    {
+      "catalog": "warehouse",
+      "schema": "your_bronze_schema",
+      "table": "your_page_events",
+      "snapshot_id": 3001,
+      "partition_spec": [
+        {
+          "field": "event_date",
+          "transform": "identity"
+        }
+      ],
+      "entries_file": "warehouse.your_bronze_schema.your_page_events/3001.json"
+    }
+  ]
+}

@@ -1,0 +1,170 @@
+[package]
+name = "shelfd"
+description = "Shelf cache daemon — Iceberg-native, row-group-granular read cache for Trino"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[[bin]]
+name = "shelfd"
+path = "src/main.rs"
+
+[lib]
+name = "shelfd"
+path = "src/lib.rs"
+
+[dependencies]
+# SHELF-40 — audit-able cost model + serde-validated config loader
+# behind the `shelf_s3_dollars_saved_total` counter.
+shelf-cost = { path = "../crates/shelf-cost" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+axum = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+prometheus = { workspace = true }
+bytes = { workspace = true, features = ["serde"] }
+futures = { workspace = true }
+once_cell = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+parking_lot = { workspace = true }
+humantime-serde = { workspace = true }
+clap = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+foyer = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+# SHELF-34 — Apache Parquet page-index parser for the
+# `/predicate-prune` sidecar. See parquet_meta.rs.
+parquet = { workspace = true }
+# SHELF E2 — Pool::Metadata compression (gated behind `zstd_metadata`
+# feature). The dep compiles fine off-feature; only the wrapper in
+# `compression.rs` is disabled.
+zstd = { workspace = true }
+# SHELF-D7 — bitmap encoder for `POST /cache/contains`.
+base64 = { workspace = true }
+# SHELF-50 — bounded in-process LRU for decoded metadata (manifests +
+# Parquet footers). See `shelfd/docs/design-notes/SHELF-50-decoded-metadata-cache.md`.
+lru = { workspace = true }
+# SHELF-E6 — peer probe HTTP client. `reqwest` is also used in dev
+# tests; duplicating the entry keeps the runtime feature set narrow
+# (no blocking, no native-tls) without forcing dev tests through the
+# same feature gate.
+reqwest = { workspace = true }
+# SHELF-21c — adapter to bridge axum's `Body` (UnsyncBoxBody, !Sync)
+# into `aws_smithy_types::byte_stream::ByteStream::from_body_1_x`,
+# which requires `Send + Sync`. `sync_wrapper` is already in the
+# dependency tree transitively via axum + http; declaring it here
+# is a zero-cost direct reference. `http-body` is similarly already
+# transitively present via axum and aws-smithy-types; we re-declare
+# it for the trait + Frame types the SyncBody adapter implements.
+sync_wrapper = "1"
+http-body = "1"
+# SHELF-42 — encode/decode the X-Shelf-Tag header payload (URL-encoded
+# JSON). Direct dep so the ab_tag module isn't relying on a transitive
+# pull from reqwest/url.
+percent-encoding = { workspace = true }
+# Optional: embedded admin UI (see `ui` feature). `rust-embed` bundles
+# the `ui/dist/` Vite build into the binary; `mime_guess` picks a
+# Content-Type from the asset path.
+rust-embed = { workspace = true, optional = true }
+mime_guess = { workspace = true, optional = true }
+# SHELF-46 footer-parser dep is already satisfied by the unconditional
+# `parquet = { workspace = true }` above (added by SHELF-50). The
+# `parquet_meta` feature below remains a marker feature: it toggles
+# bloom-block range extraction in `src/parquet_meta.rs` without
+# needing an extra optional crate.
+
+[dev-dependencies]
+criterion = { workspace = true }
+tokio = { workspace = true }
+# SHELF-18 — integration tests for the hybrid NVMe pool need a
+# per-test temp directory that the foyer `DirectFsDevice` can own
+# and clean up on drop.
+tempfile = "3"
+# SHELF-50 — the round-trip Parquet footer test serialises a real
+# `parquet::format::FileMetaData` via the Thrift compact protocol.
+# Pinned to the same line the upstream `parquet` crate ships; at
+# parquet 58 the thrift interop stays stable against 0.17.
+thrift = "0.17"
+
+[features]
+# Feature flags track ADR-0001/2/3/4/8/9 scope. The defaults represent
+# the v0.5 gate-target build. Cfg-gating follows the pattern in
+# agents/4-shelfd-builder.md Pass 2 "Feature flags compile each pass
+# independently".
+default = []
+# Embedded admin UI (see src/ui.rs). When enabled, the Vite build at
+# `ui/dist/` is baked into the binary and served at `/ui`. Off by
+# default so the CI image stays identical and we don't require a
+# node toolchain on the critical build path.
+ui = ["dep:rust-embed", "dep:mime_guess"]
+# Gate for MinIO-backed integration tests (`it_read_path.rs`,
+# `it_head_stats.rs`, `it_s3_shim.rs`, `it_shim_write*.rs`). Off by
+# default so plain `cargo test` on a developer laptop or in CI without
+# docker compose stays fast and the runner reports affected tests as
+# `ignored` (idiomatic Rust) rather than silently passing in 0s.
+# Flip on via `cargo test -p shelfd --features integration` after
+# `docker compose -f shelfd/tests/docker-compose.yml up -d`.
+integration = []
+# Enable the Foyer NVMe tier (SHELF-18). Off by default while the
+# hybrid pool is behind a PVC that only exists in rep-2.
+foyer_pool = []
+# ADR-0001 keeps Raft out of v1. This flag exists only so the compiler
+# can refuse its reintroduction without an ADR update.
+raft = []
+# ADR-0004 keeps Arrow Flight out of v1. Same reason.
+flight = []
+# SHELF E2 — flip Pool::Metadata on-cache compression. Off by default
+# until the benchmark in `benchmarks/compression/` shows a positive
+# capacity × latency trade-off on rep-2's 7-day trace. Also gates the
+# `src/compression.rs` zstd wrapper (no non-test callers today).
+zstd_metadata = []
+# Track E7 — canonicalised jsonPlan fingerprint (`src/fingerprint.rs`).
+# Intended for the plugin-side query-tag path; no non-test caller in
+# shelfd's hot/control surfaces today, so off by default.
+fingerprint = []
+# SHELF-D3 phase 2 / SHELF-46 — Parquet footer + bloom-block-range
+# extractor (`src/parquet_meta.rs`). When off, the bloom-aware
+# admission policy (SHELF-46) still compiles and uses the trailing-
+# N-byte footer-suffix heuristic; the feature turns on full
+# `parquet::file::metadata` parsing so bloom offsets / lengths are
+# discovered instead of approximated. The `parquet` crate itself is
+# unconditional (SHELF-50 decoded-metadata cache needs it).
+parquet_meta = []
+# SHELF-G2 — durable side-bloom store (`src/side_bloom.rs`). Not to be
+# confused with the in-process `SideBloom` trait in `filter_service`
+# (those are independent: the trait names a hot-path signal source,
+# this module ships the persistent variant). Off by default until the
+# G2 phase is wired up.
+side_bloom_module = []
+# SHELF-42 — feature-gate the optional `tag` label on the
+# `shelf_s3_dollars_saved_total` counter (SHELF-40 lever). The receive
+# path (header parsing, cardinality cap, optional `tag` label on the
+# always-on metrics) is unconditional so SHELF-42 is independently
+# shippable; this flag exists *only* to let the SHELF-40 PR opt the
+# dollars-saved counter into the same label without forcing a merge
+# order between the two PRs.
+ab_tag = []
+
+[[bench]]
+name = "hashring"
+harness = false

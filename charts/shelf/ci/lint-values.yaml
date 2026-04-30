@@ -1,0 +1,66 @@
+# Values snapshot for `helm lint --strict` CI gate.
+# Keeps every feature switch ON so the linter walks every template branch.
+#
+# Usage (from CI):
+#   helm lint charts/shelf -f charts/shelf/ci/lint-values.yaml --strict
+
+replicaCount: 3
+
+image:
+  repository: ghcr.io/shelf-project/shelfd
+  tag: "0.1.0"
+
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::000000000000:role/shelf-lint
+
+networkPolicy:
+  enabled: true
+  extraIngressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: shelf-ops
+      podSelector:
+        matchLabels:
+          app: shelfctl
+  extraEgress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 4317
+          protocol: TCP
+
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  additionalLabels:
+    release: kube-prometheus-stack
+    tenant: shelf-ci
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+priorityClass:
+  create: true
+  value: 100000
+
+podAnnotations:
+  ci.shelf/lint: "true"
+
+podLabels:
+  ci.shelf/lint: "true"
+
+cache:
+  admission:
+    model:
+      enabled: true
+      s3Uri: s3://shelf-ci/admission-model.onnx
+      maxAgeHours: 48
+
+extraEnv:
+  - name: SHELF_CI
+    value: "true"

@@ -1,0 +1,29 @@
+# MinIO fixture for `cargo test --test it_read_path` (SHELF_INTEGRATION=1).
+#
+# Spin up with:
+#   cd shelfd/tests && docker compose up -d minio
+#   SHELF_INTEGRATION=1 cargo test -p shelfd --test it_read_path
+#
+# Tear down with:
+#   docker compose down -v
+#
+# The integration test seeds buckets / objects itself via aws-sdk-s3, so
+# there is no separate bootstrap container. MinIO listens on :9000 (S3
+# API) and :9001 (web console). Both are bound to 127.0.0.1 only.
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2024-12-13T22-19-12Z
+    container_name: shelfd-it-minio
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: ["server", "/data", "--console-address", ":9001"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 1s
+      retries: 30

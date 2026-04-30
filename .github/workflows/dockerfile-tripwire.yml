@@ -1,0 +1,114 @@
+name: dockerfile-tripwire
+
+# rc.6 / P0.4 — guard against the recurring "new workspace crate landed
+# but the Dockerfile COPY was forgotten" failure mode.
+#
+# This trips on PRs that:
+#   - add a member to Cargo.toml#workspace.members without adding a
+#     matching COPY directive in shelfd/Dockerfile, or
+#   - rename a member without updating the COPY line.
+#
+# Failing here is cheap (~10 s); failing in the build-image job during
+# a release tag is much more expensive — the rc.5 cut hit exactly this
+# trap (release-prep/1.0.0-rc.5 commit 9b066a2) on PR #68 / SHELF-40
+# when `crates/shelf-cost` joined the workspace.
+#
+# Design note: ADR-0023.
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "shelfd/Dockerfile"
+      - ".github/workflows/dockerfile-tripwire.yml"
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dockerfile-tripwire-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tripwire:
+    name: workspace members ↔ Dockerfile COPY
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python (3.11+ for tomllib)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Assert every workspace member is COPY'd into the build context
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          repo = Path(".").resolve()
+
+          # 1. Workspace members from Cargo.toml.
+          with (repo / "Cargo.toml").open("rb") as f:
+              cfg = tomllib.load(f)
+          members = sorted(set(cfg.get("workspace", {}).get("members", [])))
+          if not members:
+              print("::error::Cargo.toml has no [workspace].members; nothing to assert.")
+              sys.exit(1)
+
+          # 2. COPY source paths from shelfd/Dockerfile (skip --from=stage refs;
+          #    those are produced by an earlier build stage, not the build context).
+          dockerfile = (repo / "shelfd" / "Dockerfile").read_text()
+          copy_sources: list[str] = []
+          for raw in dockerfile.splitlines():
+              line = raw.strip()
+              if not line.upper().startswith("COPY "):
+                  continue
+              # Strip the COPY keyword, drop --flag arguments (--from=, --chown=).
+              tokens = line.split()
+              fields = [t for t in tokens[1:] if not t.startswith("--")]
+              if len(fields) < 2:
+                  continue
+              # Last field is the destination; the rest are sources.
+              if fields[0].startswith("--from="):
+                  continue
+              for src in fields[:-1]:
+                  if src.startswith("--"):
+                      continue
+                  src = src.rstrip("/")
+                  copy_sources.append(src)
+          copy_sources = sorted(set(copy_sources))
+
+          # 3. Coverage check: a member is covered iff some COPY source is the
+          #    member itself OR a parent directory of the member.
+          def covered(member: str, sources: list[str]) -> bool:
+              for src in sources:
+                  if src == member or member.startswith(src + "/"):
+                      return True
+              return False
+
+          missing = [m for m in members if not covered(m, copy_sources)]
+
+          print("Workspace members:", members)
+          print("COPY sources:     ", copy_sources)
+          if missing:
+              print()
+              print("::error::shelfd/Dockerfile is missing COPY directives for the following workspace members:")
+              for m in missing:
+                  print(f"::error::  - {m}")
+              print()
+              print("Fix: add `COPY <member> ./<member>` (or a parent path) to shelfd/Dockerfile.")
+              print("See ADR-0023 for the rationale.")
+              sys.exit(1)
+
+          print("OK — every workspace member is covered by a Dockerfile COPY.")
+          PY

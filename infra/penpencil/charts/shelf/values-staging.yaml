@@ -1,0 +1,72 @@
+# Staging overlay — 3-pod StatefulSet on EBS-backed PVCs, mirrors the
+# production shape so chaos drills exercise the production code path.
+#
+# Treat this file as a starting template; replace bucket names, region,
+# and IRSA role ARN to match your staging environment.
+
+replicaCount: 3
+
+image:
+  pullPolicy: IfNotPresent
+  # tag intentionally empty — falls back to Chart.appVersion (currently 1.0.0-rc.4); update Chart.yaml only.
+  tag: ""
+
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::000000000000:role/shelf-staging-s3-read
+
+resources:
+  requests:
+    cpu: "4"
+    memory: "24Gi"
+  limits:
+    cpu: "8"
+    memory: "32Gi"
+
+storage:
+  storageClassName: ebs-gp3-wffc
+  size: 200Gi
+
+cache:
+  pools:
+    metadata:
+      sizeBytes: 2147483648         # 2 GiB
+    rowgroup:
+      dramSizeBytes: 17179869184    # 16 GiB
+      nvmeSizeBytes: 214748364800   # 200 GiB (matches storage.size)
+  admission:
+    model:
+      enabled: false
+      s3Uri: ""
+  pinList:
+    s3Uri: ""
+
+origin:
+  bucket: ""
+  region: us-east-1
+
+trino:
+  namespace: trino-staging
+
+networkPolicy:
+  enabled: true
+
+serviceMonitor:
+  enabled: true
+  additionalLabels:
+    release: kube-prometheus-stack
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+priorityClass:
+  create: true
+  value: 100000
+
+nodeSelector:
+  workload: shelf
+
+logging:
+  level: info

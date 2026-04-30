@@ -1,0 +1,65 @@
+# Example config for shelf-correctness-diff.
+#
+# Two-catalog diff: every query in `queries/` is executed against
+# both `catalog_a` and `catalog_b`; result sets are canonicalised
+# (sorted + hashed) and compared. Any non-identity fails the run
+# with exit code 1, which the k8s CronJob surfaces as a failed
+# job and which the rollout runbook treats as an immediate
+# rollback signal (see docs/rollout-v1.md §5).
+#
+# "A" is by convention the trusted baseline (S3-direct); "B" is
+# the catalog under test (Shelf-backed). The harness is symmetric
+# — it only reports divergence, it does not care which side is
+# "right" — but several diagnostic messages read as "A (baseline)
+# has X rows; B (under test) has Y".
+
+# Trino coordinator endpoint. For in-cluster runs this is the
+# ClusterIP service; for local smoke it's the port exposed by
+# docker-compose.
+trino:
+  host: localhost
+  port: 8080
+  user: shelf-correctness-diff
+  # HTTP / HTTPS — the harness follows the trino-python-client
+  # default (http if no tls block set).
+  http_scheme: http
+
+# Catalogs under comparison. In production:
+#   catalog_a: iceberg_direct  (pinned pre-rollout config, S3 direct)
+#   catalog_b: iceberg         (rollout target, Shelf-backed)
+# Both must be configured on the same Trino coordinator. See the
+# rollout runbook for the dual-catalog Trino config pattern.
+catalog_a: iceberg_direct
+catalog_b: iceberg
+schema: default
+
+# Per-replica context. Emitted into the results JSON so cron-job
+# logs distinguish rep-2 canary runs from rep-0/1/3 baseline
+# runs. Set via --replica CLI flag or REPLICA env var to override.
+replica: rep-2
+
+# Bind variables for the .sql.tmpl files under queries/. Every
+# template is rendered with str.format_map(bindings); a missing
+# placeholder raises a harness error at load time, not at query
+# time.
+bindings:
+  # Catalog substitution is automatic; these only cover table /
+  # schema / filter values.
+  table_events: events
+  table_users: users
+  table_orders: orders
+  table_courses: courses
+  partition_column: event_date
+  partition_value: "2026-04-01"
+
+# Query execution controls. Timeouts are enforced via
+# `SET SESSION query_max_run_time`; cancellation is cooperative.
+execution:
+  query_max_run_time: "5m"
+  per_query_retry: 0
+  fetch_chunk_rows: 10000
+
+# Output directory. The harness writes one JSON file per run
+# (results/<timestamp>.json) plus a `latest.json` symlink for the
+# cron-job log tail to grep against.
+output_dir: results

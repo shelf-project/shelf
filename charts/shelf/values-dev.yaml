@@ -1,0 +1,67 @@
+# Dev overlay — single pod, ephemeral NVMe, minio origin, generous logging.
+#
+# Target: local kind cluster or dev EKS namespace. Not for production.
+
+replicaCount: 1
+
+image:
+  pullPolicy: Always
+  tag: "latest"  # dev only; never in prod overlay
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "2Gi"
+  limits:
+    cpu: "2"
+    memory: "4Gi"
+
+storage:
+  storageClassName: standard  # kind/minikube default
+  size: 20Gi
+
+cache:
+  pools:
+    metadata:
+      sizeBytes: 536870912       # 512 MiB (fits in a dev pod)
+    rowgroup:
+      dramSizeBytes: 1073741824  # 1 GiB DRAM
+      nvmeSizeBytes: 10737418240 # 10 GiB NVMe
+
+origin:
+  bucket: shelf-dev-data
+  region: us-east-1
+
+# MinIO in dev — use env for the endpoint override.
+extraEnv:
+  - name: AWS_ENDPOINT_URL_S3
+    value: "http://minio.dev.svc.cluster.local:9000"
+  - name: AWS_ACCESS_KEY_ID
+    value: "minioadmin"
+  - name: AWS_SECRET_ACCESS_KEY
+    value: "minioadmin"
+
+trino:
+  namespace: trino-dev
+  coordinatorPodLabels:
+    app: trino
+    component: coordinator
+
+networkPolicy:
+  # Dev clusters often lack a CNI that enforces NetworkPolicy — disable to
+  # avoid false-green. Re-enable explicitly for E2E tests.
+  enabled: false
+
+serviceMonitor:
+  enabled: false  # dev cluster usually has no Prometheus operator
+
+podDisruptionBudget:
+  enabled: false  # 1 pod cannot satisfy maxUnavailable=1
+
+priorityClass:
+  create: false
+
+nodeSelector: {}
+
+logging:
+  level: debug

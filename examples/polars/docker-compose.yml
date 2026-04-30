@@ -1,0 +1,112 @@
+# Polars + Shelf example. Runs MinIO + shelfd + a Python runner.
+#
+#   bash run.sh                        # full cold→warm benchmark
+#   docker compose down -v             # tear down
+#
+# The `runner` service uses profile `tools` so `docker compose up`
+# only starts MinIO + shelfd; `docker compose run --rm runner ...`
+# pulls runner into the same network on demand.
+#
+# shelfd image: by default `docker compose build shelfd` builds
+# from the repo's production Dockerfile (multi-stage Rust + distroless),
+# takes ~5–10 min cold / ~30 s warm. Override with
+#   SHELFD_IMAGE=ghcr.io/shelf-project/shelfd:0.1.0-preview-9 \
+#   docker compose up -d shelfd
+# once the public image becomes available.
+
+name: shelf-polars-example
+
+networks:
+  shelf-polars:
+    driver: bridge
+
+volumes:
+  minio-data:
+  shared:
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2024-12-13T22-19-12Z
+    container_name: shelf-polars-minio
+    networks: [shelf-polars]
+    ports:
+      # Bumped off the default 9000/9001 so this example can run
+      # alongside other Shelf example stacks on the same host.
+      - "127.0.0.1:29000:9000"
+      - "127.0.0.1:29001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    command: ["server", "/data", "--console-address", ":9001"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  minio-setup:
+    image: minio/mc:latest
+    container_name: shelf-polars-minio-setup
+    networks: [shelf-polars]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      set -eu;
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing local/warehouse;
+      echo 'bucket warehouse ready';
+      "
+
+  shelfd:
+    image: ${SHELFD_IMAGE:-shelf-polars-example/shelfd:local}
+    build:
+      context: ../..
+      dockerfile: shelfd/Dockerfile
+    container_name: shelf-polars-shelfd
+    networks: [shelf-polars]
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    environment:
+      RUST_LOG: info
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./config/shelfd.yaml:/etc/shelfd/shelfd.yaml:ro
+    ports:
+      # 9090 = data plane (/healthz, /readyz, /stats, /metrics, /admin/*)
+      # 9092 = SHELF-22 S3-compat read shim
+      # Bumped off defaults to avoid clashing with other example stacks.
+      - "127.0.0.1:29090:9090"
+      - "127.0.0.1:29092:9092"
+    # The shelfd image is distroless (no shell, no curl), so we can't
+    # express a CMD healthcheck. run.sh probes /healthz from the host
+    # via the published 9090 port instead.
+
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+    container_name: shelf-polars-runner
+    profiles: ["tools"]
+    networks: [shelf-polars]
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      SHELFD_ENDPOINT: http://shelfd:9092
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      WAREHOUSE_BUCKET: warehouse
+      SHARED_DIR: /shared
+      SEED_ROWS: "200000"
+    volumes:
+      - shared:/shared
+      - .:/app:ro
+    working_dir: /app

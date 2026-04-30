@@ -1,0 +1,60 @@
+{
+  "_": "Golden tag-set vectors shared by Java + Rust parsers. See docs/contracts/ab-tag.md §9.",
+  "_": "wire is the URL-encoded JSON form of normalized after key-sorting.",
+  "vectors": [
+    {
+      "name": "empty_tag_omitted",
+      "session_props": {},
+      "normalized": null,
+      "wire": null
+    },
+    {
+      "name": "single_experiment",
+      "session_props": {
+        "shelf.tag.experiment": "b1_compression_on"
+      },
+      "normalized": {
+        "experiment": "b1_compression_on"
+      },
+      "wire": "%7B%22experiment%22%3A%22b1_compression_on%22%7D"
+    },
+    {
+      "name": "experiment_and_cohort_sorted",
+      "session_props": {
+        "shelf.tag.experiment": "shelf_46_bloom",
+        "shelf.tag.cohort": "rep2_canary"
+      },
+      "normalized": {
+        "cohort": "rep2_canary",
+        "experiment": "shelf_46_bloom"
+      },
+      "wire": "%7B%22cohort%22%3A%22rep2_canary%22%2C%22experiment%22%3A%22shelf_46_bloom%22%7D"
+    },
+    {
+      "name": "epoch_coerced_from_int",
+      "session_props": {
+        "shelf.tag.experiment": "b1_compression_on",
+        "shelf.tag.cohort": "prod_rep1",
+        "shelf.tag.epoch": "1714512345"
+      },
+      "normalized": {
+        "cohort": "prod_rep1",
+        "epoch": "1714512345",
+        "experiment": "b1_compression_on"
+      },
+      "wire": "%7B%22cohort%22%3A%22prod_rep1%22%2C%22epoch%22%3A%221714512345%22%2C%22experiment%22%3A%22b1_compression_on%22%7D"
+    },
+    {
+      "name": "non_tag_props_ignored",
+      "session_props": {
+        "query_max_memory": "10GB",
+        "shelf.tag.experiment": "b1_compression_on",
+        "shelf.notatag": "ignored"
+      },
+      "normalized": {
+        "experiment": "b1_compression_on"
+      },
+      "wire": "%7B%22experiment%22%3A%22b1_compression_on%22%7D"
+    }
+  ]
+}

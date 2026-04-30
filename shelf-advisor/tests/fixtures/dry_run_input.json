@@ -1,0 +1,104 @@
+{
+  "_comment_about_this_fixture": [
+    "Curated fixture for the SHELF-53 dry-run + snapshot tests.",
+    "Designed so:",
+    "  - demo.events.purchases triggers BOTH optimize_targets (12 files,",
+    "    10 of them 1 MiB; small-file ratio 0.8333) AND pin_list_candidates",
+    "    (10 queries, 100s wall each, 1 GiB scan each — frequency*wall = 1e4",
+    "    => confidence = 0.6).",
+    "  - demo.events.steady has no small files (16 files of 64 MiB) AND",
+    "    its query frequency*wall = 7200 puts pin_list confidence at ~0.59,",
+    "    just below the 0.6 floor — verifies the cutoff.",
+    "  - demo.events.cold has only 5 files: optimize skips it (below the",
+    "    min_files_per_table=8 floor) and pin_list never sees it.",
+    "  - demo.events.quiet appears in the event log only (no manifest",
+    "    rows) AND its frequency=4 is below pin_list.min_frequency=5 —",
+    "    verifies the manifest-vs-eventlog union plus the freq cutoff.",
+    "Pool capacity = 2 pods × 5 GiB rowgroup = 10 GiB."
+  ],
+  "event_log": [
+    { "query_id": "q-purchases-01", "table": "demo.events.purchases", "equality_predicate_columns": ["user_id"], "wall_time": "100s", "physical_input_bytes": 1073741824 },
+    { "query_id": "q-purchases-02", "table": "demo.events.purchases", "equality_predicate_columns": ["user_id"], "wall_time": "100s", "physical_input_bytes": 1073741824 },
+    { "query_id": "q-purchases-03", "table": "demo.events.purchases", "equality_predicate_columns": ["user_id"], "wall_time": "100s", "physical_input_bytes": 1073741824 },
+    { "query_id": "q-purchases-04", "table": "demo.events.purchases", "equality_predicate_columns": ["user_id"], "wall_time": "100s", "physical_input_bytes": 1073741824 },
+    { "query_id": "q-purchases-05", "table": "demo.events.purchases", "equality_predicate_columns": ["user_id"], "wall_time": "100s", "physical_input_bytes": 1073741824 },
+    { "query_id": "q-purchases-06", "table": "demo.events.purchases", "equality_predicate_columns": ["user_id"], "wall_time": "100s", "physical_input_bytes": 1073741824 },
+    { "query_id": "q-purchases-07", "table": "demo.events.purchases", "equality_predicate_columns": ["user_id"], "wall_time": "100s", "physical_input_bytes": 1073741824 },
+    { "query_id": "q-purchases-08", "table": "demo.events.purchases", "equality_predicate_columns": ["user_id"], "wall_time": "100s", "physical_input_bytes": 1073741824 },
+    { "query_id": "q-purchases-09", "table": "demo.events.purchases", "equality_predicate_columns": ["user_id"], "wall_time": "100s", "physical_input_bytes": 1073741824 },
+    { "query_id": "q-purchases-10", "table": "demo.events.purchases", "equality_predicate_columns": ["user_id"], "wall_time": "100s", "physical_input_bytes": 1073741824 },
+    { "query_id": "q-steady-01",    "table": "demo.events.steady",    "equality_predicate_columns": [],          "wall_time": "200s", "physical_input_bytes": 2147483648 },
+    { "query_id": "q-steady-02",    "table": "demo.events.steady",    "equality_predicate_columns": [],          "wall_time": "200s", "physical_input_bytes": 2147483648 },
+    { "query_id": "q-steady-03",    "table": "demo.events.steady",    "equality_predicate_columns": [],          "wall_time": "200s", "physical_input_bytes": 2147483648 },
+    { "query_id": "q-steady-04",    "table": "demo.events.steady",    "equality_predicate_columns": [],          "wall_time": "200s", "physical_input_bytes": 2147483648 },
+    { "query_id": "q-steady-05",    "table": "demo.events.steady",    "equality_predicate_columns": [],          "wall_time": "200s", "physical_input_bytes": 2147483648 },
+    { "query_id": "q-steady-06",    "table": "demo.events.steady",    "equality_predicate_columns": [],          "wall_time": "200s", "physical_input_bytes": 2147483648 },
+    { "query_id": "q-quiet-01",     "table": "demo.events.quiet",     "equality_predicate_columns": [],          "wall_time": "10s",  "physical_input_bytes": 10485760 },
+    { "query_id": "q-quiet-02",     "table": "demo.events.quiet",     "equality_predicate_columns": [],          "wall_time": "10s",  "physical_input_bytes": 10485760 },
+    { "query_id": "q-quiet-03",     "table": "demo.events.quiet",     "equality_predicate_columns": [],          "wall_time": "10s",  "physical_input_bytes": 10485760 },
+    { "query_id": "q-quiet-04",     "table": "demo.events.quiet",     "equality_predicate_columns": [],          "wall_time": "10s",  "physical_input_bytes": 10485760 }
+  ],
+  "manifests": {
+    "demo.events.purchases": [
+      { "path": "s3://demo/purchases/00.parquet", "file_size_bytes": 1048576,  "record_count": 1000, "spec_id": 0 },
+      { "path": "s3://demo/purchases/01.parquet", "file_size_bytes": 1048576,  "record_count": 1000, "spec_id": 0 },
+      { "path": "s3://demo/purchases/02.parquet", "file_size_bytes": 1048576,  "record_count": 1000, "spec_id": 0 },
+      { "path": "s3://demo/purchases/03.parquet", "file_size_bytes": 1048576,  "record_count": 1000, "spec_id": 0 },
+      { "path": "s3://demo/purchases/04.parquet", "file_size_bytes": 1048576,  "record_count": 1000, "spec_id": 0 },
+      { "path": "s3://demo/purchases/05.parquet", "file_size_bytes": 1048576,  "record_count": 1000, "spec_id": 0 },
+      { "path": "s3://demo/purchases/06.parquet", "file_size_bytes": 1048576,  "record_count": 1000, "spec_id": 0 },
+      { "path": "s3://demo/purchases/07.parquet", "file_size_bytes": 1048576,  "record_count": 1000, "spec_id": 0 },
+      { "path": "s3://demo/purchases/08.parquet", "file_size_bytes": 1048576,  "record_count": 1000, "spec_id": 0 },
+      { "path": "s3://demo/purchases/09.parquet", "file_size_bytes": 1048576,  "record_count": 1000, "spec_id": 0 },
+      { "path": "s3://demo/purchases/10.parquet", "file_size_bytes": 67108864, "record_count": 60000, "spec_id": 0 },
+      { "path": "s3://demo/purchases/11.parquet", "file_size_bytes": 67108864, "record_count": 60000, "spec_id": 0 }
+    ],
+    "demo.events.steady": [
+      { "path": "s3://demo/steady/00.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 },
+      { "path": "s3://demo/steady/01.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 },
+      { "path": "s3://demo/steady/02.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 },
+      { "path": "s3://demo/steady/03.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 },
+      { "path": "s3://demo/steady/04.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 },
+      { "path": "s3://demo/steady/05.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 },
+      { "path": "s3://demo/steady/06.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 },
+      { "path": "s3://demo/steady/07.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 },
+      { "path": "s3://demo/steady/08.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 },
+      { "path": "s3://demo/steady/09.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 },
+      { "path": "s3://demo/steady/10.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 },
+      { "path": "s3://demo/steady/11.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 },
+      { "path": "s3://demo/steady/12.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 },
+      { "path": "s3://demo/steady/13.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 },
+      { "path": "s3://demo/steady/14.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 },
+      { "path": "s3://demo/steady/15.parquet", "file_size_bytes": 67108864, "record_count": 100000, "spec_id": 1 }
+    ],
+    "demo.events.cold": [
+      { "path": "s3://demo/cold/00.parquet", "file_size_bytes": 1048576, "record_count": 500, "spec_id": 0 },
+      { "path": "s3://demo/cold/01.parquet", "file_size_bytes": 1048576, "record_count": 500, "spec_id": 0 },
+      { "path": "s3://demo/cold/02.parquet", "file_size_bytes": 1048576, "record_count": 500, "spec_id": 0 },
+      { "path": "s3://demo/cold/03.parquet", "file_size_bytes": 1048576, "record_count": 500, "spec_id": 0 },
+      { "path": "s3://demo/cold/04.parquet", "file_size_bytes": 1048576, "record_count": 500, "spec_id": 0 }
+    ]
+  },
+  "shelfd_stats": [
+    {
+      "pod_id": "shelf-0",
+      "capacity_bytes": 5368709120,
+      "used_bytes": 1073741824,
+      "metadata_pool": { "capacity_bytes": 268435456, "used_bytes": 67108864 },
+      "rowgroup_pool": { "capacity_bytes": 5368709120, "used_bytes": 1073741824 },
+      "pinned_bytes": 0,
+      "pinned_count": 0,
+      "draining": false
+    },
+    {
+      "pod_id": "shelf-1",
+      "capacity_bytes": 5368709120,
+      "used_bytes": 1610612736,
+      "metadata_pool": { "capacity_bytes": 268435456, "used_bytes": 33554432 },
+      "rowgroup_pool": { "capacity_bytes": 5368709120, "used_bytes": 1610612736 },
+      "pinned_bytes": 0,
+      "pinned_count": 0,
+      "draining": false
+    }
+  ]
+}

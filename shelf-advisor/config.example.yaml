@@ -1,0 +1,128 @@
+# shelf-advisor — OSS-clean default config.
+#
+# Copy to ~/.shelf-advisor/config.yaml (or pass with `--config`)
+# and edit the URLs / table name to match your deployment. Every
+# field has a compiled-in default; this file documents the
+# surface so an operator can see every knob in one place.
+#
+# Site-specific overlays live elsewhere in the operator's tree
+# (under their `infra/<cluster>/` directory) and are merged
+# in via the same `--config` flag — never edit this file with
+# deployment-specific identifiers; that's what the overlay is for.
+
+# -----------------------------------------------------------------
+# Inputs
+# -----------------------------------------------------------------
+
+# Fully-qualified `catalog.schema.table` of the Trino event-listener
+# log table written by the SHELF-37 jar (PR #66).
+event_log_table: shelf_advisor.events.query_log
+
+# Default lookback window for `analyze` / `recommend` / `watch`.
+# CLI `--window` always wins.
+window: 7d
+
+# Hard cap on recommendations per (table, recommendation_type).
+# Mirrors the false-positive-flood guardrail in the canonical
+# SHELF-53 design note.
+top_n_per_table: 8
+
+# Global confidence floor; applied AFTER each recommender's own
+# floor. Whichever is higher wins.
+min_confidence: 0.5
+
+# Per-pod shelfd `/stats` URLs the advisor will scrape. Same-cluster
+# only; no auth. Leave empty in CI / dry-run.
+shelfd_stats_urls: []
+#  - http://shelf-0.shelf.svc.cluster.local:8080/stats
+#  - http://shelf-1.shelf.svc.cluster.local:8080/stats
+
+# -----------------------------------------------------------------
+# OptimizeRecommender (small-file detection over Iceberg manifests)
+# -----------------------------------------------------------------
+optimize:
+  # Files smaller than this count toward the "small file" ratio.
+  # 32 MiB matches the threshold cited in the canonical SHELF-53
+  # design note (RisingWave small-file blog).
+  small_file_bytes: 33554432    # 32 MiB
+  # Below this ratio the table is not flagged.
+  small_file_ratio_min: 0.30
+  # Tables with fewer than this many data files are skipped
+  # (every small-file count looks "100 % small" on a 3-file table).
+  min_files_per_table: 8
+
+# -----------------------------------------------------------------
+# PinListRecommender (top-N hot tables by score)
+# -----------------------------------------------------------------
+pin_list:
+  # Tables seen in fewer than this many queries within the window
+  # are dropped before scoring (cold workloads do not benefit
+  # from pinning).
+  min_frequency: 5
+  # Per-recommender confidence floor.
+  min_confidence: 0.6
+  # Fallback pool capacity used when no shelfd /stats sample is
+  # available. 11 GiB matches the rc.2 rowgroup pool default in
+  # charts/shelf/values.yaml.
+  default_pool_capacity_bytes: 11811160064  # 11 GiB
+
+# -----------------------------------------------------------------
+# BloomFilterRecommender — owned by SHELF-52
+# -----------------------------------------------------------------
+# SHELF-53 ships the trait + a stub. Keep `enabled: false` until
+# SHELF-52 lands the real implementation.
+bloom:
+  enabled: false
+  min_confidence: 0.7
+
+# -----------------------------------------------------------------
+# MaterializedViewRecommender — owned by SHELF-65
+# -----------------------------------------------------------------
+# SHELF-53 ships the trait + a stub. Keep `enabled: false` until
+# SHELF-65 lands the real implementation.
+mv:
+  enabled: false
+  min_confidence: 0.5
+  # Cap on pinned bytes per recommendation, expressed as a
+  # fraction of the rowgroup pool capacity. Carries SHELF-65's
+  # `nvme_quota * pin_fraction` invariant.
+  pin_fraction: 0.30
+
+# -----------------------------------------------------------------
+# SHELF-52 bloom-write advisor knobs.
+# -----------------------------------------------------------------
+# Each key falls back to the library default when omitted.
+bloom_write:
+  # Minimum number of distinct queries against a table inside the
+  # lookback window before it is considered as a candidate.
+  min_query_count: 50
+
+  # Minimum *average* per-query physical_input_bytes for a
+  # candidate table, in bytes. 1 GiB is the SHELF-52 design-note
+  # default; lower it on a smaller cluster.
+  min_query_bytes: 1073741824
+
+  # Default selectivity estimate when Iceberg NDV is not available.
+  # 0.1 (10 % of rows match) → ~90 % bytes saved per query as a
+  # conservative projection. Operators with measured Iceberg
+  # column-stats can leave this alone — the recommender prefers
+  # `1 / NDV` whenever the manifest reader exposes it.
+  default_selectivity: 0.1
+
+  # Tariff used to translate "bytes rewritten" into a dollar figure
+  # for evidence reporting. Documented as a placeholder pending
+  # SHELF-40 (PR #68) integration; see the design note.
+  cost_cents_per_gib: 4
+
+  # Top-N predicate columns reported per table. Acceptance criterion
+  # in SHELF-52 is 5; raising it adds noise.
+  top_n_columns: 5
+
+  # Regex used to extract column names from `WHERE col = literal`
+  # predicates over `QueryRecord.query_text`. Capture group 1 must
+  # be the bare column identifier. The default below catches the
+  # common Trino predicate shapes (`WHERE col = …`, `AND tbl.col = …`)
+  # and is documented to MISS function-wrapped predicates and CTE
+  # inlining — see the SHELF-52 design note's column-ranking
+  # limitations table.
+  predicate_column_regex: '(?i)\b(?:WHERE|AND)\s+(?:[a-zA-Z_][a-zA-Z0-9_]*\.)?([a-zA-Z_][a-zA-Z0-9_]*)\s*='

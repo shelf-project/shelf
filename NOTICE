@@ -1,0 +1,22 @@
+Shelf
+Copyright 2026 The Shelf Authors.
+
+This product was originally developed against an internal Trino-on-EKS
+deployment (see docs/cluster-handoff.md for the operational context the
+project was hardened against) and contributed to the Shelf open-source
+project.
+
+This product includes software from the following third-party projects:
+
+- foyer — https://github.com/foyer-rs/foyer — Apache-2.0
+- Apache Arrow — https://github.com/apache/arrow — Apache-2.0
+- tokio — https://github.com/tokio-rs/tokio — MIT
+- axum — https://github.com/tokio-rs/axum — MIT
+- tonic — https://github.com/hyperium/tonic — MIT
+- Trino — https://github.com/trinodb/trino — Apache-2.0
+- Apache Iceberg — https://github.com/apache/iceberg — Apache-2.0
+- AWS SDK for Rust — https://github.com/awslabs/aws-sdk-rust — Apache-2.0
+
+Full third-party attribution is generated via `cargo about` and
+`mvn license:aggregate-add-third-party` on release and published
+alongside each artifact.

@@ -1,0 +1,79 @@
+# F4 — shelf-only SF100 regression gate.
+#
+# Fires on every tag push and on manual dispatch. Runs the 99 TPC-DS
+# queries against the smallest viable scale factor (SF100) on a
+# self-hosted runner that has shelfd + Trino already provisioned,
+# then hands the resulting CSV to `check_regression.py` which
+# compares against `benchmarks/tpcds/baseline/shelf-sf100.csv`.
+#
+# Why SF100 not SF1000: the full SF1000 run takes ~2-4 hours even on
+# the dedicated runner; it lives on a separate nightly workflow
+# (not a tag-time gate). SF100 catches > 90 % of regressions in
+# under 20 minutes.
+name: tpcds-regression
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      sf:
+        description: "Scale factor"
+        required: false
+        default: "100"
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    # The runner must have Trino + shelfd reachable at the URLs in
+    # `runner/engines.yaml`. In practice this is a self-hosted node
+    # inside the bench VPC; GitHub-hosted runners cannot reach
+    # shelfd on a private network.
+    runs-on: [self-hosted, tpcds-sf100]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install runner deps
+        run: python -m pip install --upgrade pip requests pyyaml
+
+      - name: Bootstrap TPC-DS queries
+        working-directory: benchmarks/tpcds/queries
+        run: ./bootstrap.sh
+
+      - name: Run shelf SF100
+        id: run
+        env:
+          SF: ${{ github.event.inputs.sf || '100' }}
+        run: |
+          set -euo pipefail
+          OUT_DIR="benchmarks/tpcds/results/ci-${{ github.ref_name }}-${{ github.run_id }}"
+          mkdir -p "$OUT_DIR"
+          python benchmarks/tpcds/runner/run.py \
+            --engine shelf \
+            --sf "$SF" \
+            --out "$OUT_DIR/shelf.csv" \
+            --warm-state mixed \
+            --timeout 900
+          echo "out_dir=$OUT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Check regression vs baseline
+        run: |
+          python benchmarks/tpcds/regression/check_regression.py \
+            --baseline benchmarks/tpcds/baseline/shelf-sf100.csv \
+            --candidate "${{ steps.run.outputs.out_dir }}/shelf.csv"
+
+      - name: Upload run artefacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shelf-sf100-${{ github.ref_name }}-${{ github.run_id }}
+          path: benchmarks/tpcds/results/ci-${{ github.ref_name }}-${{ github.run_id }}/
+          retention-days: 30

@@ -1,0 +1,61 @@
+# F3 — hourly hardware cost per engine configuration.
+#
+# List prices only (AWS on-demand, us-east-1, April 2026). Commit
+# prices / savings-plans / spot are explicitly out of scope: this
+# harness reports a reproducible comparison, not any particular
+# customer's bill.
+#
+# Every cost is denominated in USD/hour for the whole configuration,
+# NOT per node. `cost/model.py` multiplies by `wall_clock_hours`
+# to get the per-query $ figure.
+
+shelf:
+  # 4 × m6a.12xlarge workers + 1 × m6a.4xlarge shelf pod quartet.
+  # Both coordinators + shelfd run on the worker nodes; dedicated
+  # coordinator class kept off the bill to match Alluxio's layout.
+  nodes: 4
+  instance_type: m6a.12xlarge
+  hourly_per_instance: 2.0736
+  storage_gb: 2000   # 2 TiB gp3 per worker for scratch
+  storage_hourly_per_gb: 0.000114   # gp3 at $0.08/GB-mo
+  egress_free_reason: "shelfd + S3 same region; shelf peer traffic is intra-VPC"
+  notes: "shelfd self-hosted; $0 license."
+
+alluxio:
+  # Same shape as shelf — identical worker footprint.
+  nodes: 4
+  instance_type: m6a.12xlarge
+  hourly_per_instance: 2.0736
+  storage_gb: 2000
+  storage_hourly_per_gb: 0.000114
+  notes: "Alluxio OSS; $0 license."
+
+warpspeed:
+  # Starburst Enterprise sizes each worker the same way, with
+  # Warp Speed's NVMe index co-located on the instance.
+  nodes: 4
+  instance_type: m6a.12xlarge
+  hourly_per_instance: 2.0736
+  storage_gb: 2000
+  storage_hourly_per_gb: 0.000114
+  starburst_license_per_vcpu_hour: 0.25   # list; note as "list, not actual"
+  license_notes: |
+    Starburst Enterprise list price is $0.20–$0.30 per vCPU per hour
+    per published partner data. We use $0.25 as the midpoint; actual
+    customer prices vary. Changing this value in post-hoc analysis
+    invalidates the run.
+
+firebolt:
+  # Firebolt is SaaS. We map to "identical monthly spend" by
+  # provisioning an `L` engine at $8/FBU-hour × 16 FBU (matching
+  # the 192 vCPU / 768 GiB budget at list). The runner reports
+  # Firebolt-reported compile+execute time; idle-engine cost is
+  # averaged into the per-query $ below.
+  fbu: 16
+  fbu_hourly_rate: 8.0
+  storage_cost_usd_per_gb_month: 0.023
+  ingestion_notes: |
+    Firebolt requires a one-time ingestion from Iceberg into F3.
+    Ingestion time is added to the first query's cost — the "first-
+    query $" is therefore inflated for Firebolt relative to the
+    others. Documented in results/<date>/summary.md.

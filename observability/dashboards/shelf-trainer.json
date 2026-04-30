@@ -1,0 +1,121 @@
+{
+  "annotations": {"list": [{"builtIn": 1, "datasource": {"type": "grafana", "uid": "-- Grafana --"}, "enable": true, "hide": true, "name": "Annotations", "type": "dashboard"}]},
+  "description": "Nightly trainer health: Airflow DAG status, pin-list / admission-model version age, canary-vs-prod admission delta. Source: agents/8-operator.md §Pass-2 'shelf-trainer'. In v1 the trainer only emits a pin list (ADR-0003 — size-threshold admission); the ONNX panels are placeholders for v1.x if LightGBM clears the Phase-4 gate.",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Pin list age (last promotion)",
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green",  "value": null},
+              {"color": "orange", "value": 86400},
+              {"color": "red",    "value": 172800}
+            ]
+          }
+        }
+      },
+      "targets": [
+        {"expr": "time() - shelf_pin_list_promoted_timestamp_seconds", "refId": "A"}
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Admission model age",
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "description": "Fires ShelfAdmissionModelStale when > 48h. v1 shelfd always reports 0 (no model loaded).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green",  "value": null},
+              {"color": "orange", "value": 86400},
+              {"color": "red",    "value": 172800}
+            ]
+          }
+        }
+      },
+      "targets": [
+        {"expr": "time() - shelf_admission_model_promoted_timestamp_seconds", "refId": "A"}
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Trainer DAG — last run status",
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "description": "1 = success, 0 = failure. Emitted by the Airflow Prometheus exporter.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "FAILED", "color": "red"}, "1": {"text": "OK", "color": "green"}}}
+          ]
+        }
+      },
+      "targets": [
+        {"expr": "max(airflow_dag_last_run_success{dag_id=\"shelf_pin_list_trainer\"})", "refId": "A"}
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Candidate model AUC over time (offline eval)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "max": 1}},
+      "targets": [
+        {"expr": "shelf_trainer_candidate_auc", "legendFormat": "{{model}}", "refId": "A"},
+        {"expr": "shelf_trainer_prod_auc",      "legendFormat": "prod",       "refId": "B"}
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Canary vs prod admission delta (top-N disagreement rate)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "fieldConfig": {"defaults": {"unit": "percentunit"}},
+      "targets": [
+        {"expr": "rate(shelf_admission_canary_disagreements_total[5m]) / rate(shelf_admission_canary_decisions_total[5m])", "legendFormat": "disagree rate", "refId": "A"}
+      ]
+    },
+    {
+      "id": 20,
+      "type": "table",
+      "title": "Pin list diff since last promotion",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 13},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROM}"},
+      "description": "Rendered by the trainer as a gauge per (table, change). Useful for PR-style review before a reload.",
+      "targets": [
+        {"expr": "shelf_pin_list_pending_change", "refId": "A", "format": "table", "instant": true}
+      ]
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 38,
+  "tags": ["shelf", "trainer", "admission"],
+  "templating": {
+    "list": [
+      {"name": "DS_PROM", "type": "datasource", "query": "prometheus"}
+    ]
+  },
+  "time": {"from": "now-7d", "to": "now"},
+  "title": "Shelf — Trainer",
+  "uid": "shelf-trainer",
+  "version": 1
+}

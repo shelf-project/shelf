@@ -1,0 +1,35 @@
+[package]
+name = "shelfctl"
+description = "Operator CLI for the Shelf cache daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../shelfd/README.md"
+
+[[bin]]
+name = "shelfctl"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "process", "io-util", "io-std"] }
+reqwest = { workspace = true }
+# SHELF-31/32/33 — Kubernetes-touching subcommands (chaos, bundle,
+# install). The 0.95 line is the last release before the kube-rs API
+# rename to `kube::Api::list_metadata`/etc. landed in 0.96; pinning
+# here keeps the surface stable while shelfd's own kube usage is
+# still sketched out (see SHELF-23).
+kube = { version = "0.95", features = ["client", "runtime", "derive"] }
+k8s-openapi = { version = "0.23", features = ["latest"] }
+tar = "0.4"
+flate2 = "1"
+regex = "1"
