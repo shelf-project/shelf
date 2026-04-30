@@ -950,7 +950,31 @@ pub async fn handle_get_object(
         }
     };
 
-    let pool = pool_for(&key);
+    // SHELF-46 — bloom-aware classification.
+    //
+    // Runs before pool routing so a Parquet footer suffix or known
+    // bloom block range can be steered into `Pool::Metadata`
+    // (DRAM-only, longer residency) regardless of the file
+    // extension. Cheap when disabled: a single null check + atomic
+    // load. The classification result is reused below to (a) bypass
+    // the size-threshold admission via [`FORCE_ADMIT`] and (b)
+    // optionally populate the etag → bloom-block-list index after
+    // a successful Footer-suffix fetch.
+    let bloom_kind = match state.bloom_admission.as_ref() {
+        Some(ba) => {
+            let kind = ba.classify(etag_bytes, offset, length, total_size);
+            ba.record_classification(kind);
+            kind
+        }
+        None => crate::parquet_admit::BloomKind::NotApplicable,
+    };
+
+    let pool = match bloom_kind {
+        crate::parquet_admit::BloomKind::Footer | crate::parquet_admit::BloomKind::BloomBlock => {
+            Pool::Metadata
+        }
+        crate::parquet_admit::BloomKind::NotApplicable => pool_for(&key),
+    };
     let pool_label_early = match pool {
         Pool::Metadata => "metadata",
         Pool::RowGroup => "rowgroup",
@@ -1133,9 +1157,20 @@ pub async fn handle_get_object(
         .await
     };
 
+    // SHELF-46 — when the read is a footer or a known bloom block,
+    // bypass the size-threshold admission via the static
+    // `FORCE_ADMIT` policy so Parquet footers + bloom payloads
+    // always land in `Pool::Metadata`. Both branches resolve to
+    // `&dyn AdmissionPolicy` so `get_or_fetch` accepts either.
+    let admission_for_call: &dyn crate::admission::AdmissionPolicy = match bloom_kind {
+        crate::parquet_admit::BloomKind::Footer | crate::parquet_admit::BloomKind::BloomBlock => {
+            &crate::parquet_admit::FORCE_ADMIT
+        }
+        crate::parquet_admit::BloomKind::NotApplicable => state.admission.as_ref(),
+    };
     let outcome = state
         .store
-        .get_or_fetch(pool, key_obj, state.admission.as_ref(), fetcher)
+        .get_or_fetch(pool, key_obj, admission_for_call, fetcher)
         .await;
 
     // SHELF-30 — publish the leader's bytes to any followers that
@@ -1248,6 +1283,18 @@ pub async fn handle_get_object(
         bytes.len() as u64,
         is_hit,
     );
+
+    // SHELF-46 — when the read was Footer-classified, attempt to
+    // populate the etag → bloom-block-list index from the bytes we
+    // just served. Fail-open: every parse error is silently absorbed
+    // and counted under `shelf_bloom_parse_errors_total{reason}`.
+    // Skipped on `BloomKind::BloomBlock` and `NotApplicable` since
+    // we cannot construct a footer parse from a mid-file byte range.
+    if matches!(bloom_kind, crate::parquet_admit::BloomKind::Footer) {
+        if let Some(ba) = state.bloom_admission.as_ref() {
+            ba.maybe_index_footer(etag_bytes, bloom_kind, &bytes);
+        }
+    }
 
     let mut headers = HeaderMap::new();
     stamp_common_headers(&mut headers, &meta);

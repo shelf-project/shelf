@@ -157,6 +157,11 @@ pub struct ServerState {
     /// "ignore the header entirely" behaviour. `main` overrides this
     /// from `config.ab_tag` before traffic arrives.
     pub ab_tag: Arc<crate::ab_tag::AbTagState>,
+    /// SHELF-46 — bloom-aware footer admission state. `None` ⇒ the
+    /// policy is disabled and the s3-shim takes the existing path
+    /// untouched. `main` builds this from `config.bloom_admission`
+    /// at startup; the default Helm chart leaves it `None`.
+    pub bloom_admission: Option<Arc<crate::parquet_admit::BloomAdmission>>,
 }
 
 impl ServerState {
@@ -229,6 +234,7 @@ impl ServerState {
             coalesce_enabled: AtomicBool::new(true),
             cost: crate::cost::CostState::disabled(),
             ab_tag: crate::ab_tag::AbTagState::disabled(),
+            bloom_admission: None,
         }
     }
 
@@ -313,6 +319,18 @@ impl ServerState {
         svc: Arc<crate::filter_service::ShelfFilterService>,
     ) -> Self {
         self.filter_service = Some(svc);
+        self
+    }
+
+    /// SHELF-46 builder hook: install a `BloomAdmission` instance.
+    /// Same shape as [`Self::with_filter_service`]; callers that
+    /// don't enable bloom-aware admission inherit `None` and the
+    /// s3-shim falls through to the pre-SHELF-46 hot path bit-for-bit.
+    pub fn with_bloom_admission(
+        mut self,
+        admission: Arc<crate::parquet_admit::BloomAdmission>,
+    ) -> Self {
+        self.bloom_admission = Some(admission);
         self
     }
 
