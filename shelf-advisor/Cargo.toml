@@ -56,11 +56,6 @@ reqwest = { workspace = true }
 # the CLI keeps its own tiny parser (see `parse_window`) so the
 # `--window` flag stays free of dep churn.
 humantime-serde = { workspace = true }
-# SHELF-52 — predicate-column extraction over `query_text`. The
-# regex crate is already pulled transitively via tracing-subscriber
-# (env-filter), so this declaration does not bump Cargo.lock.
-regex = "1"
-
 [dev-dependencies]
 # `assert_cmd` drives the compiled `shelf-advisor` binary from the
 # integration tests. `tempfile` gives them a writable workspace.

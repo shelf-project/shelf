@@ -108,13 +108,8 @@ fn live_smoke_recommender_emits_against_minimal_fixture() {
             .with_refresh_log_reader(Arc::new(InMemoryRefreshes(refreshes))),
     )];
 
-    let recs = run_pipeline(
-        &cfg,
-        &EmptyEvLog,
-        &InMemoryManifests(files),
-        &recommenders,
-    )
-    .expect("pipeline must succeed under live gate");
+    let recs = run_pipeline(&cfg, &EmptyEvLog, &InMemoryManifests(files), &recommenders)
+        .expect("pipeline must succeed under live gate");
 
     assert!(
         !recs.is_empty(),

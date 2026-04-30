@@ -38,11 +38,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use shelf_advisor::{
-    run_pipeline, AdvisorConfig, DataFile, IcebergEventLogReader, IcebergManifestReader,
+    render_rfc3339_utc, run_pipeline, AdvisorConfig, AnalysisContext, DataFile,
+    FixtureShelfdStatsReader, IcebergEventLogReader, IcebergManifestReader,
     IcebergRefreshLogReader, IcebergTablePropertiesReader, MaterializedViewPinningRecommender,
     MvPinningConfig, MvTableProperties, QueryRecord, Recommendation, Recommender, RefreshEvent,
     Result,
 };
+use std::time::SystemTime;
 
 const FIXTURE: &str = "tests/fixtures/mv_pinning";
 
@@ -98,16 +100,14 @@ fn load_fixtures() -> (
 
     let refresh_raw =
         std::fs::read_to_string(format!("{FIXTURE}/refresh_log.json")).expect("refresh fixture");
-    let refreshes: Vec<RefreshEvent> =
-        serde_json::from_str(&refresh_raw).expect("refresh parse");
+    let refreshes: Vec<RefreshEvent> = serde_json::from_str(&refresh_raw).expect("refresh parse");
 
-    let cfg = AdvisorConfig {
-        event_log_table: "cdp.trino_logs.trino_queries".to_string(),
-        output_path: PathBuf::from("/tmp/shelf-65-snapshot.json"),
-        window: Duration::from_secs(7 * 24 * 60 * 60),
-        top_n_per_table: 8,
-        mv_pinning: MvPinningConfig::default(),
-    };
+    let mut cfg = AdvisorConfig::defaults(
+        PathBuf::from("/tmp/shelf-65-snapshot.json"),
+        Duration::from_secs(7 * 24 * 60 * 60),
+    );
+    cfg.event_log_table = "cdp.trino_logs.trino_queries".to_string();
+    cfg.mv_pinning = MvPinningConfig::default();
 
     (
         cfg,
@@ -130,7 +130,23 @@ fn run_once(
             .with_table_properties_reader(props_dyn)
             .with_refresh_log_reader(refreshes_dyn),
     )];
-    run_pipeline(cfg, &EmptyEvLog, manifests, &recommenders).expect("pipeline")
+    let stats = FixtureShelfdStatsReader::empty();
+    let tables: Vec<String> = Vec::new();
+    let log = EmptyEvLog;
+    let ctx = AnalysisContext {
+        config: cfg,
+        event_log: &log,
+        manifests,
+        shelfd_stats: &stats,
+        tables: &tables,
+    };
+    run_pipeline(
+        &ctx,
+        &recommenders,
+        render_rfc3339_utc(SystemTime::UNIX_EPOCH),
+    )
+    .expect("pipeline")
+    .recommendations
 }
 
 fn strip_pin_keys(v: &mut serde_json::Value) {
@@ -190,7 +206,8 @@ fn pin_keys_are_64_char_lowercase_hex() {
             let s = k.as_str().expect("pin_key string");
             assert_eq!(s.len(), 64, "ADR-0011 keys are 64 hex chars, got {s:?}");
             assert!(
-                s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                s.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
                 "ADR-0011 keys are lowercase hex, got {s:?}"
             );
         }

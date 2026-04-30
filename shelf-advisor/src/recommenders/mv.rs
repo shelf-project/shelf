@@ -86,10 +86,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::MvDetectStrategy;
 use crate::error::Result;
-use crate::input::{
-    DataFile, IcebergEventLogReader, IcebergManifestReader, IcebergRefreshLogReader,
-    IcebergTablePropertiesReader, RefreshEvent,
-};
+use crate::input::{DataFile, IcebergRefreshLogReader, IcebergTablePropertiesReader, RefreshEvent};
 use crate::output::Recommendation;
 use crate::recommenders::{AnalysisContext, Recommender};
 
@@ -211,7 +208,9 @@ impl Recommender for MaterializedViewPinningRecommender {
             )
         })?;
 
-        let want_property_strategies = mv_cfg.detect_strategies.contains(&MvDetectStrategy::TrinoProperty)
+        let want_property_strategies = mv_cfg
+            .detect_strategies
+            .contains(&MvDetectStrategy::TrinoProperty)
             || mv_cfg
                 .detect_strategies
                 .contains(&MvDetectStrategy::IcebergProperty);
@@ -245,13 +244,14 @@ impl Recommender for MaterializedViewPinningRecommender {
             }
             let window_id = ev.started_at_unix_seconds / bucket_secs;
             for base in &ev.base_tables {
-                let entry = buckets
-                    .entry((base.clone(), window_id))
-                    .or_insert_with(|| RefreshBucket {
-                        mv_table: ev.written_table.clone(),
-                        refresh_count: 0,
-                        sample_query_id: ev.query_id.clone(),
-                    });
+                let entry =
+                    buckets
+                        .entry((base.clone(), window_id))
+                        .or_insert_with(|| RefreshBucket {
+                            mv_table: ev.written_table.clone(),
+                            refresh_count: 0,
+                            sample_query_id: ev.query_id.clone(),
+                        });
                 entry.refresh_count += 1;
                 if entry.mv_table != ev.written_table {
                     entry.mv_table = format!("{} +others", entry.mv_table);
@@ -321,9 +321,7 @@ impl MaterializedViewPinningRecommender {
                 MvDetectStrategy::NameRegex => name_re.is_match(leaf),
                 MvDetectStrategy::TrinoProperty => props
                     .as_ref()
-                    .map(|p| {
-                        p.trino_storage_table.is_some() || p.trino_fresh_snapshot_id.is_some()
-                    })
+                    .map(|p| p.trino_storage_table.is_some() || p.trino_fresh_snapshot_id.is_some())
                     .unwrap_or(false),
                 MvDetectStrategy::IcebergProperty => props
                     .as_ref()
@@ -347,7 +345,7 @@ impl MaterializedViewPinningRecommender {
         let pin_keys = pin_keys_for(&files);
         let pin_bytes_estimate: u64 = files.iter().map(|f| f.file_size_bytes).sum();
         let lift = expected_hit_ratio_lift(bucket.refresh_count);
-        let bytes_saved = (pin_bytes_estimate as f64 * lift) as u64;
+        let bytes_saved = (pin_bytes_estimate as f64 * lift as f64) as u64;
         let cost_savings_cents = cost_savings_cents(bytes_saved, mv_cfg);
         let severity = Severity::from_cents(cost_savings_cents);
         Ok(Interim {
@@ -487,7 +485,8 @@ fn expected_hit_ratio_lift(refresh_count: u32) -> f32 {
 }
 
 fn cost_savings_cents(bytes_saved: u64, mv_cfg: &crate::config::MvPinningConfig) -> i64 {
-    let pico = (bytes_saved as u128).saturating_mul(mv_cfg.s3_get_cost_picodollars_per_byte as u128);
+    let pico =
+        (bytes_saved as u128).saturating_mul(mv_cfg.s3_get_cost_picodollars_per_byte as u128);
     let cents = pico / 10_000_000_000u128;
     cents.min(i64::MAX as u128) as i64
 }
@@ -506,7 +505,8 @@ mod tests {
     use std::time::Duration;
 
     fn cfg() -> AdvisorConfig {
-        let mut c = AdvisorConfig::defaults(PathBuf::from("/tmp/x.json"), Duration::from_secs(86_400));
+        let mut c =
+            AdvisorConfig::defaults(PathBuf::from("/tmp/x.json"), Duration::from_secs(86_400));
         c.event_log_table = "x.y.z".to_string();
         c
     }
@@ -590,8 +590,12 @@ mod tests {
         let re = Regex::new(r"^(mv_|materialized_)").unwrap();
         let mut c = cfg();
         c.mv_pinning.detect_strategies = vec![MvDetectStrategy::NameRegex];
-        assert!(r.classify_mv("cdp.gold.mv_orders", &re, &c.mv_pinning).unwrap());
-        assert!(!r.classify_mv("cdp.gold.orders", &re, &c.mv_pinning).unwrap());
+        assert!(r
+            .classify_mv("cdp.gold.mv_orders", &re, &c.mv_pinning)
+            .unwrap());
+        assert!(!r
+            .classify_mv("cdp.gold.orders", &re, &c.mv_pinning)
+            .unwrap());
         assert!(r
             .classify_mv("cdp.gold.materialized_dau", &re, &c.mv_pinning)
             .unwrap());
@@ -670,7 +674,9 @@ mod tests {
         let r = MaterializedViewPinningRecommender::new();
         let re = Regex::new(r"^(mv_|materialized_)").unwrap();
         let c = cfg();
-        assert!(!r.classify_mv("cdp.gold.orders", &re, &c.mv_pinning).unwrap());
+        assert!(!r
+            .classify_mv("cdp.gold.orders", &re, &c.mv_pinning)
+            .unwrap());
     }
 
     #[test]
@@ -699,10 +705,11 @@ mod tests {
             ),
         ];
 
-        let r = MaterializedViewPinningRecommender::new()
-            .with_refresh_log_reader(Arc::new(FixedRefreshes {
+        let r = MaterializedViewPinningRecommender::new().with_refresh_log_reader(Arc::new(
+            FixedRefreshes {
                 events: Mutex::new(refreshes),
-            }));
+            },
+        ));
 
         let mut c = cfg();
         c.mv_pinning.detect_strategies = vec![MvDetectStrategy::NameRegex];
@@ -758,10 +765,11 @@ mod tests {
             1_700_000_000,
         )];
 
-        let r = MaterializedViewPinningRecommender::new()
-            .with_refresh_log_reader(Arc::new(FixedRefreshes {
+        let r = MaterializedViewPinningRecommender::new().with_refresh_log_reader(Arc::new(
+            FixedRefreshes {
                 events: Mutex::new(refreshes),
-            }));
+            },
+        ));
 
         let mut c = cfg();
         c.mv_pinning.detect_strategies = vec![MvDetectStrategy::NameRegex];
@@ -817,10 +825,11 @@ mod tests {
             1_700_000_000,
         )];
 
-        let r = MaterializedViewPinningRecommender::new()
-            .with_refresh_log_reader(Arc::new(FixedRefreshes {
+        let r = MaterializedViewPinningRecommender::new().with_refresh_log_reader(Arc::new(
+            FixedRefreshes {
                 events: Mutex::new(refreshes),
-            }));
+            },
+        ));
         let mut c = cfg();
         c.mv_pinning.detect_strategies = vec![MvDetectStrategy::NameRegex];
         let recs = run(&r, &c, &EmptyEvLog, &manifests).unwrap();

@@ -98,6 +98,8 @@ pub struct AdvisorConfig {
     /// sourced from the design note and are tuned to the Tier-3
     /// "high-volume tables only" rollout.
     pub bloom_write: BloomWriteConfig,
+    /// SHELF-65 — MV-aware pinning recommender knobs.
+    pub mv_pinning: MvPinningConfig,
 }
 
 /// SHELF-52 bloom-write advisor configuration.
@@ -413,7 +415,7 @@ pin_list:
 /// `refresh_user_pattern` (matches the `user` field on a
 /// `RefreshEvent` — see `IcebergRefreshLogReader`) and
 /// `refresh_sql_pattern` (matches the `query_sql` field).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MvPinningConfig {
     /// MV-detection strategies, OR-unioned. The recommender will WARN
     /// once per run if a strategy is enabled but the corresponding
@@ -477,7 +479,7 @@ pub struct MvPinningConfig {
 /// MV-detection strategies. Each variant maps 1:1 to a reader the
 /// recommender consults; missing readers degrade to a single
 /// per-run WARN log.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum MvDetectStrategy {
     /// Match `MvPinningConfig::name_regex` against the table portion
     /// of a fully-qualified table name. Always available — needs no

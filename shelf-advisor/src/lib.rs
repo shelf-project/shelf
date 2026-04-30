@@ -37,9 +37,9 @@ pub use cost::{Cents, GIB, S3_REWRITE_TARIFF_CENTS_PER_GIB};
 pub use error::{Error, Result};
 pub use input::{
     DataFile, FixtureEventLogReader, FixtureManifestReader, FixtureShelfdStatsReader,
-    HttpShelfdStatsReader, IcebergEventLogReader, IcebergManifestReader,
-    IcebergRefreshLogReader, IcebergTablePropertiesReader, MvTableProperties, PodStats,
-    PoolStats, QueryRecord, RefreshEvent, ShelfdStatsReader,
+    HttpShelfdStatsReader, IcebergEventLogReader, IcebergManifestReader, IcebergRefreshLogReader,
+    IcebergTablePropertiesReader, MvTableProperties, PodStats, PoolStats, QueryRecord,
+    RefreshEvent, ShelfdStatsReader,
 };
 pub use output::{
     render_rfc3339_utc, sort_for_emission, write_envelope_json, write_per_kind_dir,
@@ -47,8 +47,8 @@ pub use output::{
 };
 pub use recommenders::{
     default_recommenders, kind_filter, AnalysisContext, BloomFilterRecommender,
-    BloomWriteRecommender, MaterializedViewPinningRecommender, MaterializedViewRecommender,
-    MvPinningSeverity, OptimizeRecommender, PinListRecommender, Recommender,
+    BloomWriteRecommender, MaterializedViewPinningRecommender, MvPinningSeverity,
+    OptimizeRecommender, PinListRecommender, Recommender,
 };
 
 /// Run every recommender against the supplied context and return

@@ -21,9 +21,7 @@ use crate::output::Recommendation;
 
 pub use bloom::BloomFilterRecommender;
 pub use bloom_write::BloomWriteRecommender;
-pub use mv::{
-    MaterializedViewPinningRecommender, MaterializedViewRecommender, Severity as MvPinningSeverity,
-};
+pub use mv::{MaterializedViewPinningRecommender, Severity as MvPinningSeverity};
 pub use optimize::OptimizeRecommender;
 pub use pin_list::PinListRecommender;
 
