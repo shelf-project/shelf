@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.6] — 2026-04-30
+
+Final release candidate for v1.0.0. This is a public-flip dry-run: it
+exercises the entire signed-artefact pipeline (multi-arch image, OCI
+chart, SBOM, SLSA provenance, cosign signatures) ahead of the v1.0.0
+GA tag so that the GHCR-side release procedure is proven green on a
+public org before the repository visibility flips.
+
 ### Changed — v1.0.0 launch hygiene
 
 - **`SECURITY.md` activated for v1.0.** Removed `TBD-PGP-FINGERPRINT-PLACEHOLDER`,

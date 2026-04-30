@@ -3,7 +3,7 @@ resolver = "2"
 members = ["shelfd", "shelfctl", "shelf-advisor", "crates/shelf-cost"]
 
 [workspace.package]
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 edition = "2021"
 rust-version = "1.82"
 license = "Apache-2.0"
