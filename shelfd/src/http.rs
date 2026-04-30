@@ -469,6 +469,10 @@ pub fn build_router(state: Arc<ServerState>) -> Router {
         .route("/admin/unpin", post(handlers::admin_unpin))
         .route("/admin/evict", post(handlers::admin_evict))
         .route("/admin/reload", post(handlers::admin_reload))
+        // RC6 P1.2 — cluster cap-ready gate. Codifies the "scale +2
+        // before adding a new replica's traffic" ops rule. See
+        // `crate::capacity_check`.
+        .route("/admin/cap-ready", get(handlers::admin_cap_ready))
         // SHELF-34 — page-index aware fetching sidecar.
         // GET /predicate-prune?path=s3://...&col=...&min=...&max=...
         // returns `{"pages":[[offset,length], ...]}`. Allowlist is
@@ -1025,6 +1029,9 @@ pub mod handlers {
             // `DrainSignal`. Peers' resolvers drop us from their HRW
             // rings within `dns_refresh` of seeing this transition.
             draining: state.drain_signal.is_active(),
+            // RC6 P1.2 — `0` on non-Linux dev hosts; on production
+            // distroless this is the live `/proc/self/status` VmRSS.
+            rss_bytes: crate::capacity_check::read_self_rss_bytes(),
         };
         (
             StatusCode::OK,
@@ -1422,6 +1429,110 @@ pub mod handlers {
                 .into_response(),
             Err(e) => upstream_error("reload_failed", &e.to_string()),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // RC6 P1.2 — `/admin/cap-ready` cluster capacity gate.
+    //
+    // Codifies the workspace ops rule "verify ALL existing pods are
+    // < 22 GiB RSS before adding a new replica's traffic to the
+    // pool" into a one-shot machine-readable check. See
+    // `crate::capacity_check` for the threshold rationale and the
+    // failure-mode contract (conservative-503 on any unreachable
+    // peer).
+    //
+    // Wire shape:
+    //   GET /admin/cap-ready[?caller=<replica-name>]
+    //     -> 200 {"ready": true,  "max_rss_gib": <f64>, ...}
+    //     -> 503 {"ready": false, "max_rss_gib": <f64>, "max_rss_pod": "<id>", ...}
+    //
+    // The `caller` parameter is opaque audit metadata — the cutover
+    // tooling threads the replica name (e.g. `rep-0`) through it so
+    // operators can grep `kubectl logs` for which side initiated each
+    // gate check. We log it; we never act on it.
+    // -----------------------------------------------------------------
+
+    /// Optional query parameters for `/admin/cap-ready`.
+    #[derive(Debug, serde::Deserialize)]
+    pub struct CapReadyQuery {
+        /// Audit metadata. The cutover MR template threads the calling
+        /// replica name (e.g. `rep-0`) through this so `kubectl logs`
+        /// surfaces which side initiated the check.
+        #[serde(default)]
+        pub caller: Option<String>,
+    }
+
+    /// `GET /admin/cap-ready` handler.
+    ///
+    /// Returns `200` only if every probed peer (including self)
+    /// reports `rss_bytes < threshold` AND every peer was reachable.
+    /// Returns `503` on threshold breach OR on peer unreachability,
+    /// per the conservative-by-design contract documented in
+    /// [`crate::capacity_check`].
+    pub async fn admin_cap_ready(
+        State(state): State<Arc<ServerState>>,
+        Query(q): Query<CapReadyQuery>,
+    ) -> Response {
+        let caller = q.caller.as_deref().unwrap_or("(unspecified)");
+        let span = tracing::info_span!(
+            "http.admin_cap_ready",
+            otel.kind = "server",
+            route = "/admin/cap-ready",
+            caller = %caller,
+            ready = field::Empty,
+            status = field::Empty,
+        );
+        async move { admin_cap_ready_inner(state, caller).await }
+            .instrument(span)
+            .await
+    }
+
+    async fn admin_cap_ready_inner(state: Arc<ServerState>, caller: &str) -> Response {
+        use crate::capacity_check::{
+            check_cluster_capacity, ReqwestPeerStatsProbe, DEFAULT_CAP_READY_THRESHOLD_BYTES,
+            DEFAULT_PEER_PROBE_TIMEOUT,
+        };
+
+        let view = state.router.view();
+        let members = view.members().to_vec();
+        let probe = Arc::new(ReqwestPeerStatsProbe::new(
+            state.peer_http.clone(),
+            state.peer_stats_port,
+            DEFAULT_PEER_PROBE_TIMEOUT,
+        ));
+        let report = check_cluster_capacity(
+            &members,
+            state.pod_id.as_ref(),
+            DEFAULT_CAP_READY_THRESHOLD_BYTES,
+            probe,
+        )
+        .await;
+
+        let span = tracing::Span::current();
+        span.record("ready", report.ready);
+        let status = if report.ready {
+            tracing::info!(
+                target: "shelfd::cap_ready",
+                caller,
+                max_rss_gib = report.max_rss_gib,
+                peers_probed = report.peers_probed,
+                "cap-ready gate PASS",
+            );
+            StatusCode::OK
+        } else {
+            tracing::warn!(
+                target: "shelfd::cap_ready",
+                caller,
+                max_rss_gib = report.max_rss_gib,
+                max_rss_pod = ?report.max_rss_pod,
+                peers_probed = report.peers_probed,
+                peers_unreachable = ?report.peers_unreachable,
+                "cap-ready gate FAIL",
+            );
+            StatusCode::SERVICE_UNAVAILABLE
+        };
+        span.record("status", status.as_u16());
+        (status, axum::Json(report)).into_response()
     }
 
     // -----------------------------------------------------------------
@@ -1901,6 +2012,10 @@ mod tests {
             pinned_bytes: 0,
             pinned_count: 0,
             draining: false,
+            // RC6 P1.2 — additive `rss_bytes` field. `0` here keeps
+            // existing serializers happy and matches the non-Linux
+            // dev-host fallback.
+            rss_bytes: 0,
         };
         let v = serde_json::to_value(&stats).expect("serialize");
         let obj = v.as_object().expect("object");
@@ -1914,6 +2029,8 @@ mod tests {
             "pinned_count",
             // SHELF-20: peer drain advertisement.
             "draining",
+            // RC6 P1.2: cluster cap-ready gate signal.
+            "rss_bytes",
         ] {
             assert!(
                 obj.contains_key(key),

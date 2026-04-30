@@ -49,6 +49,11 @@ pub mod admission;
 pub mod admission_limiter;
 pub mod admission_wtinylfu;
 pub mod aws_chunked;
+// RC6 P1.2 — cluster cap-ready gate (`/admin/cap-ready`). Codifies
+// the "scale +2 before adding a new replica's traffic" workspace ops
+// rule into a one-shot machine-readable check the cutover MR template
+// can curl.
+pub mod capacity_check;
 pub mod coalesce;
 // SHELF-45 — compaction-aware re-warm reactor. Default-off via
 // config; the module is always compiled so EXPOSED_SERIES sees the
