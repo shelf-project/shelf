@@ -76,11 +76,11 @@ The error message names the directory + the offending descriptors so the operato
 
 ## Switch playbook
 
-1. `kubectl scale statefulset shelf -n alluxio --replicas=0`
+1. `kubectl scale statefulset shelf -n <cache-ns> --replicas=0`
 2. `kubectl exec -it <maintenance pod> -- rm -rf /var/cache/shelf/*` against each PVC
-3. Toggle `cache.pools.rowgroup.compression.enabled` in `infra/penpencil/charts/shelf/values-prod.yaml`
-4. `helm upgrade shelf charts/shelf -f infra/penpencil/charts/shelf/values-prod.yaml -n alluxio`
-5. `kubectl scale statefulset shelf -n alluxio --replicas=4`
+3. Toggle `cache.pools.rowgroup.compression.enabled` in `<prod-overlay>/values-prod.yaml`
+4. `helm upgrade shelf charts/shelf -f <prod-overlay>/values-prod.yaml -n <cache-ns>`
+5. `kubectl scale statefulset shelf -n <cache-ns> --replicas=4`
 
 The cluster cold-starts compressed; in-flight queries fail-over to direct S3 per ADR-0010 §Fail-open.
 
@@ -103,3 +103,14 @@ zstd-3 decode is ~500 MB/s/core (single-thread). At 60 MB/s/pod sustained read t
 - **Metadata-pool wiring** — keeps the legacy `zstd_metadata` feature gate. A follow-up will swap the wiring to `CompressionPipeline` and retire the gate.
 - **lz4** as an alternative algo — `compression.algo` is hard-coded to zstd in v1; the config struct has room for it but no plumbing.
 - **Per-key compression hints** (e.g. metadata.json always compresses well, raw Parquet may not). The `skipped_incompressible` outcome already short-circuits the bad cases, so the gain from a hint table is < 1 % of bytes.
+
+## Rollback signals
+
+Two production signals flip `cache.pools.rowgroup.compression.enabled` back to `false`. Both are evaluated in the `shelf-overview` dashboard alongside the rc-gate thresholds:
+
+| Trigger (PromQL) | Action |
+|---|---|
+| `histogram_quantile(0.99, sum by (pool, le) (rate(shelf_compress_seconds_bucket{op="decode"}[5m]))) > 0.050` sustained for >10 min | Flip `compression.enabled=false`, roll the StatefulSet per the switch playbook (wipe NVMe before re-start). |
+| `rate(shelf_lodc_drops_total{reason="submit_queue_overflow"}[5m])` ≥ 2× the pre-B1 baseline for >5 min | Revert: the encode path is slowing admission drain faster than Foyer can write through. |
+
+Both triggers assume the cluster was on green post-cutover thresholds (decompress p99 ≤ 50 ms, LODC overflow rate ≤ baseline) for ≥ 24 h before the flip; otherwise treat them as baselining signals, not rollback signals.
