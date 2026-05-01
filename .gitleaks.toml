@@ -1,0 +1,35 @@
+# Repo-local gitleaks configuration.
+#
+# We keep the default rule set (via `useDefault = true`) and only
+# carve out intentional test fixtures that otherwise trip the
+# `generic-api-key` / entropy heuristics. Every allow-list entry MUST
+# carry a justification comment explaining why the match is not a
+# real secret. Security rota reviews diffs of this file.
+
+title = "Shelf gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+# `generic-api-key` picks up any high-entropy alnum literal ≥ 32
+# chars. That catches every sha256-shape hex constant we use as a
+# deterministic test fixture for Shelf's content-addressed cache-key
+# derivation — cf. ADR-0011. The rule-level `allowlist` below narrows
+# the exception to files under clients/trino test fixtures; real
+# `*.yaml` / production code paths are still scanned.
+[[rules.allowlists]]
+description = "sha256-shape hex constants used as Shelf cache-key fixtures in trino-plugin tests"
+paths = [
+  '''clients/trino/src/test/java/.*Test\.java$''',
+]
+
+[allowlist]
+description = "Repo-wide path allowlist"
+paths = [
+  # `.gitleaks.toml` itself — the file describes the rules and may
+  # embed secret-shaped examples as documentation.
+  '''\.gitleaks\.toml$''',
+]

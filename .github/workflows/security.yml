@@ -131,11 +131,16 @@ jobs:
         # image rejects it with "flag provided but not defined"). Git
         # metadata isn't a lockfile source anyway; the scanner falls
         # back to the configured lockfiles under clients/trino.
+        # The `--config=.osv-scanner.toml` flag was also dropped because
+        # no repo-root config file was ever committed — the scanner was
+        # failing with "Failed to read config file: open
+        # .osv-scanner.toml: no such file or directory". Re-introduce
+        # the config arg if/when a repo-specific severity / ignore
+        # policy is written.
         uses: google/osv-scanner-action/osv-scanner-action@v2.3.5
         with:
           scan-args: |-
             --recursive
-            --config=.osv-scanner.toml
             clients/trino
 
   # -------------------------------------------------------------------
@@ -243,7 +248,12 @@ jobs:
       - name: Scan git history for secrets
         run: |
           set -euo pipefail
-          gitleaks detect --source . --redact --verbose --exit-code 1
+          gitleaks detect \
+            --source . \
+            --config .gitleaks.toml \
+            --redact \
+            --verbose \
+            --exit-code 1
 
   # -------------------------------------------------------------------
   # IAM grep guard — no `*:*` patterns in shipped IAM samples.
