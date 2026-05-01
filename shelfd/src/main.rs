@@ -12,20 +12,71 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use clap::Parser;
+use futures::future::BoxFuture;
 use shelfd::{
     admission::SizeThresholdPolicy,
+    compaction_rewarm::{FileSpec, RewarmFetcher},
     config::Config,
     head_lru::HeadLru,
     http::{self, ServerState},
     membership::{DrainSignal, Resolver, ResolverConfig},
     metrics,
     origin::S3Origin,
+    rewarm_poller::iceberg as rewarm_iceberg,
     router::Router,
     store::FoyerStore,
     telemetry::{self, TelemetryGuard},
 };
 use tokio_util::sync::CancellationToken;
+
+/// **A3 (rc.7)** — bridges the SHELF-45 reactor's `RewarmFetcher`
+/// trait onto an `aws_sdk_s3::Client`. Mirrors the integration
+/// test's `S3Fetcher` (see `shelfd/tests/it_compaction_rewarm.rs`)
+/// so the production reactor wiring matches the surface that test
+/// already pins. The `path` carried by `FileSpec` is treated as
+/// either an `s3://`-scheme URL or a bare key under
+/// `default_bucket`; the latter shape matches what the
+/// `S3MetadataSource` returns for tables whose data files live in
+/// the same bucket as their metadata.
+#[derive(Debug)]
+struct S3OriginRewarmFetcher {
+    origin: Arc<S3Origin>,
+}
+
+impl S3OriginRewarmFetcher {
+    fn new(origin: Arc<S3Origin>) -> Self {
+        Self { origin }
+    }
+}
+
+impl RewarmFetcher for S3OriginRewarmFetcher {
+    fn fetch_file(&self, file: &FileSpec) -> BoxFuture<'static, shelfd::Result<Bytes>> {
+        let origin = self.origin.clone();
+        let path = file.path.clone();
+        let size = file.size_bytes;
+        Box::pin(async move {
+            let (bucket, key) = match rewarm_iceberg::split_s3_url(&path) {
+                Some(bk) => bk,
+                None => {
+                    // Bare key — fall through to the configured
+                    // origin bucket. The metadata source does emit
+                    // `s3://` URLs in practice, so this branch is
+                    // a defensive fallback rather than a hot path.
+                    let bucket = origin.bucket().to_owned();
+                    (bucket, path)
+                }
+            };
+            // `get_range(bucket, key, 0, size)` is the existing
+            // SHELF-05 surface. The reactor warms a content-
+            // addressed key derived from `(etag, 0, size, 0)`,
+            // so the full-file range matches what the reactor
+            // expects.
+            shelfd::origin::Origin::get_range(origin.as_ref(), &bucket, &key, 0, size).await
+        })
+    }
+}
 
 /// Command-line arguments for `shelfd`. Kept intentionally small; all
 /// tunables live in `Config` (see `shelfd::config::Config` +
@@ -284,6 +335,50 @@ async fn run(args: Args) -> anyhow::Result<()> {
         cost_state.region().to_owned(),
         shutdown.clone(),
     );
+
+    // **A3 (rc.7)** — compaction-rewarm metadata.json poller. Spawns
+    // both the SHELF-45 reactor (no other producer wires it in v1.0
+    // since the SHELF-37 listener is parked) and the new poller
+    // that drives it. Default-OFF via `cache.rewarm.enabled`; even
+    // when on, an empty `cache.rewarm.tables` is the explicit
+    // no-op. Composability with A1/A2/A4 is implicit: the reactor
+    // calls `store.get_or_fetch` which already routes through the
+    // unified admit gate (drain → policy → LODC → rate-limit). See
+    // ADR-0036.
+    if config.rewarm.enabled && !config.rewarm.tables.is_empty() {
+        let fetcher: Arc<dyn shelfd::compaction_rewarm::RewarmFetcher> =
+            Arc::new(S3OriginRewarmFetcher::new(origin.clone()));
+        let rewarm_admission = Arc::new(SizeThresholdPolicy::from_config(&config.admission));
+        let reactor = shelfd::compaction_rewarm::CompactionReactor::new(
+            config.rewarm.clone(),
+            store.clone(),
+            fetcher,
+            rewarm_admission,
+        );
+        let (event_tx, _reactor_handle) = reactor.spawn(tokio_util::sync::CancellationToken::new());
+        let publisher = shelfd::compaction_rewarm::SnapshotPublisher::new(event_tx);
+        let metadata_source: Arc<dyn shelfd::rewarm_poller::MetadataSource> = Arc::new(
+            shelfd::rewarm_poller::S3MetadataSource::new(origin.client().clone()),
+        );
+        let poller = Arc::new(shelfd::rewarm_poller::RewarmPoller::new(
+            config.rewarm.clone(),
+            metadata_source,
+            publisher,
+            drain_signal.clone(),
+        ));
+        let poller_shutdown = shutdown.clone();
+        tokio::spawn(async move { poller.run(poller_shutdown).await });
+        tracing::info!(
+            tables = config.rewarm.tables.len(),
+            poll_interval = ?config.rewarm.poll_interval,
+            cap_bytes = config.rewarm.max_bytes_per_snapshot,
+            "A3 rewarm poller spawned (SHELF-45 reactor wired off the metadata-json source)",
+        );
+    } else if config.rewarm.enabled {
+        tracing::info!(
+            "A3 rewarm poller idle: cache.rewarm.enabled=true but cache.rewarm.tables is empty",
+        );
+    }
 
     if let Some(handle) = reload_handle {
         state = state.with_reload_handle(handle);

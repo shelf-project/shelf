@@ -1149,6 +1149,90 @@ pub static REWARM_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("register rewarm_errors_total")
 });
 
+/// **A3 (rc.7)** — total `metadata.json` polls per watched table,
+/// partitioned by `result`:
+///   `no_change`     — etag matched (304 fast path) or nothing
+///                     interesting changed since `last_seen`.
+///   `new_snapshot`  — a fresh snapshot was observed (regardless of
+///                     `summary["operation"]`).
+///   `error`         — S3 read / parse failed; the loop continues.
+///
+/// One increment per (table, poll_interval) tick; the rate is the
+/// "cheap GET" telemetry the ADR uses to argue the loop's overhead
+/// is trivial (~12 polls/min for 100 tables at the 30 s default).
+pub static REWARM_POLLS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_rewarm_polls_total",
+        "A3 (rc.7): metadata.json polls by the rewarm poller, \
+         partitioned by table label and result \
+         (no_change | new_snapshot | error).",
+        &["table", "result"],
+        REGISTRY
+    )
+    .expect("register rewarm_polls_total")
+});
+
+/// **A3 (rc.7)** — compaction snapshots (`summary["operation"]
+/// == "replace"`) detected per watched table. Subset of the
+/// `new_snapshot` polls — the headline counter for "did the loop
+/// catch a compaction this morning?" alerting.
+pub static REWARM_SNAPSHOTS_DETECTED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_rewarm_snapshots_detected_total",
+        "A3 (rc.7): compaction-class (operation=replace) snapshots \
+         detected per watched table label.",
+        &["table"],
+        REGISTRY
+    )
+    .expect("register rewarm_snapshots_detected_total")
+});
+
+/// **A3 (rc.7)** — added data-files the poller successfully
+/// enqueued onto the SHELF-45 reactor (per detected compaction).
+/// Increments are bounded by `max_bytes_per_snapshot`; files
+/// dropped by the cap bump [`REWARM_BYTES_CAPPED_TOTAL`] instead.
+pub static REWARM_FILES_ENQUEUED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_rewarm_files_enqueued_total",
+        "A3 (rc.7): data files enqueued for SHELF-45 re-warm after \
+         compaction detection, per watched table label.",
+        &["table"],
+        REGISTRY
+    )
+    .expect("register rewarm_files_enqueued_total")
+});
+
+/// **A3 (rc.7)** — bytes corresponding to enqueued data files.
+/// Capped per detected snapshot at `max_bytes_per_snapshot`; the
+/// excess increments [`REWARM_BYTES_CAPPED_TOTAL`].
+pub static REWARM_BYTES_ENQUEUED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_rewarm_bytes_enqueued_total",
+        "A3 (rc.7): bytes (under the per-snapshot cap) enqueued for \
+         SHELF-45 re-warm after compaction detection.",
+        &["table"],
+        REGISTRY
+    )
+    .expect("register rewarm_bytes_enqueued_total")
+});
+
+/// **A3 (rc.7)** — bytes refused by the per-snapshot cap. Movement
+/// here means the poller saw a compaction whose new-file payload
+/// exceeded `max_bytes_per_snapshot`; the cap fired correctly and
+/// the operator should consider raising the cap or excluding the
+/// table.
+pub static REWARM_BYTES_CAPPED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_rewarm_bytes_capped_total",
+        "A3 (rc.7): bytes refused by the rewarm poller's per-snapshot \
+         cap (max_bytes_per_snapshot); paired with one or more \
+         omitted files from shelf_rewarm_files_enqueued_total.",
+        &["table"],
+        REGISTRY
+    )
+    .expect("register rewarm_bytes_capped_total")
+});
+
 /// Track G-11 companion — current rolling hit ratio per pool, in
 /// basis points (0–10_000). Sampled by the same `warm_sampler`
 /// task that flips `WARM_THRESHOLD_CROSSED_SECONDS`. Exposed as
@@ -1553,6 +1637,12 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_rewarm_inflight_files",
     "shelf_rewarm_queue_depth",
     "shelf_rewarm_errors_total",
+    // A3 (rc.7) — compaction-rewarm metadata-json poller.
+    "shelf_rewarm_polls_total",
+    "shelf_rewarm_snapshots_detected_total",
+    "shelf_rewarm_files_enqueued_total",
+    "shelf_rewarm_bytes_enqueued_total",
+    "shelf_rewarm_bytes_capped_total",
 ];
 
 #[cfg(test)]
@@ -1664,6 +1754,11 @@ mod tests {
             REWARM_INFLIGHT_FILES.desc(),
             REWARM_QUEUE_DEPTH.desc(),
             REWARM_ERRORS_TOTAL.desc(),
+            REWARM_POLLS_TOTAL.desc(),
+            REWARM_SNAPSHOTS_DETECTED_TOTAL.desc(),
+            REWARM_FILES_ENQUEUED_TOTAL.desc(),
+            REWARM_BYTES_ENQUEUED_TOTAL.desc(),
+            REWARM_BYTES_CAPPED_TOTAL.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -1912,6 +2007,26 @@ mod tests {
         ] {
             REWARM_ERRORS_TOTAL.with_label_values(&[reason]).inc_by(0);
         }
+        // A3 (rc.7) — touch every poller series so a freshly booted
+        // pod with `cache.rewarm.enabled=false` still publishes the
+        // documented label set as zeros.
+        for result in ["no_change", "new_snapshot", "error"] {
+            REWARM_POLLS_TOTAL
+                .with_label_values(&["__none__", result])
+                .inc_by(0);
+        }
+        REWARM_SNAPSHOTS_DETECTED_TOTAL
+            .with_label_values(&["__none__"])
+            .inc_by(0);
+        REWARM_FILES_ENQUEUED_TOTAL
+            .with_label_values(&["__none__"])
+            .inc_by(0);
+        REWARM_BYTES_ENQUEUED_TOTAL
+            .with_label_values(&["__none__"])
+            .inc_by(0);
+        REWARM_BYTES_CAPPED_TOTAL
+            .with_label_values(&["__none__"])
+            .inc_by(0);
 
         let families = REGISTRY.gather();
         let names: HashSet<String> = families.iter().map(|f| f.name().to_owned()).collect();

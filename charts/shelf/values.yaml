@@ -523,6 +523,27 @@ cache:
     # exceeds this, a warning is logged and the lag is observed via
     # `shelf_rewarm_lag_seconds`. Older snapshots still get re-warmed.
     snapshotLagToleranceSecs: 120
+    # -- A3 (rc.7) — `metadata.json` polling cadence per watched
+    # table (seconds). The cheap path (304 fast-path) is one S3 GET
+    # per table per interval; 30 s × 100 tables ≈ 12 GETs/min,
+    # trivial. See ADR-0036.
+    pollIntervalSecs: 30
+    # -- A3 (rc.7) — hard cap on bytes prefetched per detected
+    # snapshot, per table. Defaults to 5 GiB (5368709120). Defends
+    # against runaway prefetch on a 200 GiB `expire_snapshots`
+    # rewrite. Excess increments `shelf_rewarm_bytes_capped_total`.
+    maxBytesPerSnapshot: 5368709120
+    # -- A3 (rc.7) — list of Iceberg tables to watch. Each entry
+    # is `{ bucket, keyPrefix, label }`. The OSS chart ships an
+    # empty list — operators populate this from their `gen_pin_list`
+    # top-N output before turning `enabled: true`. Bucket names
+    # belong in operator overlays only, not here.
+    # Example shape (do not commit live):
+    #   tables:
+    #     - bucket: my-org-data-lake
+    #       keyPrefix: warehouse/cdp/datamart/silver_user_events
+    #       label: cdp.datamart.silver_user_events
+    tables: []
 
 # ---------------------------------------------------------------------------
 # Origin (S3) client — [plan §4 SHELF-05]

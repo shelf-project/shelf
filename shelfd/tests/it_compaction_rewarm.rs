@@ -121,6 +121,12 @@ async fn rewarm_reactor_warms_minio_object_on_synthetic_compaction() {
         queue_capacity: 8,
         snapshot_lag_tolerance: Duration::from_secs(60),
         byte_equality_tolerance_bps: 500,
+        // A3 (rc.7) — fields shared with the metadata-json
+        // poller; left at their library defaults for the
+        // reactor-only integration test.
+        poll_interval: Duration::from_secs(30),
+        tables: Vec::new(),
+        max_bytes_per_snapshot: 5 * 1024 * 1024 * 1024,
     };
     let reactor = CompactionReactor::new(cfg, store.clone(), fetcher, admission);
     let cancel = CancellationToken::new();

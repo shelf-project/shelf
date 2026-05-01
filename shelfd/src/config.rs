@@ -1051,6 +1051,66 @@ pub struct RewarmConfig {
     /// scientific-notation surprises.
     #[serde(default = "default_rewarm_byte_equality_tolerance_bps")]
     pub byte_equality_tolerance_bps: u32,
+
+    /// **A3 (rc.7)** — `metadata.json` polling cadence per watched
+    /// table. Default 30 s. Each tick issues at most one S3 GET on
+    /// the version-hint object (cheap, ~few-byte body) and, on a
+    /// changed version, one GET against `v<N>.metadata.json` (still
+    /// small — typically 2–4 KiB). 30 s × 100 tables ≈ 12 GETs/min;
+    /// trivial relative to the cold-morning S3 spike this loop is
+    /// designed to absorb. See ADR-0036.
+    #[serde(with = "humantime_serde", default = "default_rewarm_poll_interval")]
+    pub poll_interval: Duration,
+
+    /// **A3 (rc.7)** — list of Iceberg tables whose `metadata.json`
+    /// the poller watches. Empty list (the default) is the safe
+    /// no-op: the poller spawns and immediately parks on a
+    /// `tokio::time::sleep` loop without issuing a single S3 call.
+    /// Operators populate this from their `gen_pin_list` top-N
+    /// before turning the feature on. See [`TableSpec`] and the
+    /// values overlay at `infra/penpencil/charts/shelf/values-prod.yaml`.
+    #[serde(default)]
+    pub tables: Vec<TableSpec>,
+
+    /// **A3 (rc.7)** — hard cap on bytes prefetched per detected
+    /// snapshot, per table. Defends against a runaway compaction
+    /// (e.g. an operator running `expire_snapshots` against a
+    /// freshly-loaded 200 GiB partition) hammering the reactor's
+    /// own rate limiter for hours. Default 5 GiB matches the
+    /// `pin_list` per-table expectation; bumps the
+    /// `shelf_rewarm_bytes_capped_total` counter when a snapshot
+    /// is truncated to fit.
+    #[serde(default = "default_rewarm_max_bytes_per_snapshot")]
+    pub max_bytes_per_snapshot: u64,
+}
+
+/// **A3 (rc.7)** — one Iceberg table the metadata poller is asked
+/// to watch. The fully-qualified S3 root path is
+/// `s3://<bucket>/<key_prefix>/`. The `label` is a low-cardinality
+/// metric label (e.g. `cdp.datamart.silver_user_events`) used in the
+/// `shelf_rewarm_*` counters; it is operator-chosen and need not
+/// match the Iceberg catalog's identifier.
+///
+/// Bucket names appear here only as **operator overlay** input
+/// (`infra/penpencil/charts/shelf/values-prod.yaml`); the OSS chart
+/// default leaves `tables: []` so the upstream values file ships
+/// no penpencil-specific identifiers. See ADR-0036 §OSS hygiene.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TableSpec {
+    /// S3 bucket name (no `s3://` prefix).
+    pub bucket: String,
+    /// S3 key prefix to the table root, no leading or trailing
+    /// slash. The poller appends `/metadata/version-hint.text`
+    /// (HadoopCatalog convention) for the cheap-poll path and
+    /// falls back to listing `<key_prefix>/metadata/` when the
+    /// hint object is absent (catalog-managed tables).
+    pub key_prefix: String,
+    /// Friendly metric label. Must be low-cardinality (operators
+    /// typically have ≤100 watched tables in production); the
+    /// label is emitted on every `shelf_rewarm_*` series the
+    /// poller bumps.
+    pub label: String,
 }
 
 fn default_rewarm_enabled() -> bool {
@@ -1077,6 +1137,14 @@ fn default_rewarm_byte_equality_tolerance_bps() -> u32 {
     500
 }
 
+fn default_rewarm_poll_interval() -> Duration {
+    Duration::from_secs(30)
+}
+
+fn default_rewarm_max_bytes_per_snapshot() -> u64 {
+    5 * 1024 * 1024 * 1024
+}
+
 impl Default for RewarmConfig {
     fn default() -> Self {
         Self {
@@ -1086,6 +1154,9 @@ impl Default for RewarmConfig {
             queue_capacity: default_rewarm_queue_capacity(),
             snapshot_lag_tolerance: default_rewarm_snapshot_lag_tolerance(),
             byte_equality_tolerance_bps: default_rewarm_byte_equality_tolerance_bps(),
+            poll_interval: default_rewarm_poll_interval(),
+            tables: Vec::new(),
+            max_bytes_per_snapshot: default_rewarm_max_bytes_per_snapshot(),
         }
     }
 }
@@ -1509,6 +1580,39 @@ pin_list:
         assert_eq!(rw.queue_capacity, 1024);
         assert_eq!(rw.snapshot_lag_tolerance, Duration::from_secs(120));
         assert_eq!(rw.byte_equality_tolerance_bps, 500);
+        // A3 (rc.7) — poller defaults.
+        assert_eq!(rw.poll_interval, Duration::from_secs(30));
+        assert!(rw.tables.is_empty(), "default tables must be empty");
+        assert_eq!(rw.max_bytes_per_snapshot, 5 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn rewarm_a3_table_block_round_trips() {
+        let yaml = MINIMAL.to_owned()
+            + r#"
+rewarm:
+  enabled: true
+  poll_interval: 60s
+  max_bytes_per_snapshot: 1073741824
+  tables:
+    - bucket: my-bucket
+      key_prefix: warehouse/cdp/datamart/orders
+      label: cdp.datamart.orders
+    - bucket: my-bucket
+      key_prefix: warehouse/cdp/datamart/clicks
+      label: cdp.datamart.clicks
+"#;
+        let cfg = Config::from_yaml_str(&yaml, None).expect("parse");
+        assert!(cfg.rewarm.enabled);
+        assert_eq!(cfg.rewarm.poll_interval, Duration::from_secs(60));
+        assert_eq!(cfg.rewarm.max_bytes_per_snapshot, 1_073_741_824);
+        assert_eq!(cfg.rewarm.tables.len(), 2);
+        assert_eq!(cfg.rewarm.tables[0].bucket, "my-bucket");
+        assert_eq!(
+            cfg.rewarm.tables[0].key_prefix,
+            "warehouse/cdp/datamart/orders"
+        );
+        assert_eq!(cfg.rewarm.tables[0].label, "cdp.datamart.orders");
     }
 
     #[test]
