@@ -126,6 +126,14 @@ Zero to first cache hit on a laptop, in ≤ 10 minutes with k3d + MinIO:
 
 → [docs/quickstart/](./docs/quickstart/index.md)
 
+### Or: install via an LLM agent (no Trino / Helm / K8s expertise required)
+
+Drop a Cursor / Claude / generic agent into your repo with this prompt:
+
+> *"Install Shelf for me — read [.cursor/skills/install-shelf/SKILL.md](./.cursor/skills/install-shelf/SKILL.md) and follow it end-to-end."*
+
+The skill walks the agent through detecting your Trino cluster, installing Shelf via Helm with sensible defaults, smoke-testing the S3 shim, flipping Trino's `s3.endpoint`, validating the cutover, and rolling back on signal. The user only confirms cluster-mutating steps; the agent does the work.
+
 ## Architecture
 
 User-facing summary of the BLUEPRINT with ADR overrides applied:
@@ -133,6 +141,14 @@ User-facing summary of the BLUEPRINT with ADR overrides applied:
 → [docs/architecture.md](./docs/architecture.md)
 
 Full canonical design: [BLUEPRINT.md](./BLUEPRINT.md).
+
+## "Trino is slow — should I reach for Shelf?"
+
+If you're trying to figure out whether Shelf is the right answer for your specific bottleneck (or whether the right fix is JVM tuning, query rewrite, Alluxio, native `fs.cache`, or "do nothing"):
+
+→ [docs/discovery/trino-is-slow.md](./docs/discovery/trino-is-slow.md) — decision tree by symptom, with the profile-before-you-cache step first.
+
+→ [docs/discovery/alternatives.md](./docs/discovery/alternatives.md) — Shelf vs Alluxio vs Warp Speed vs native, with the trade-offs spelled out.
 
 ## Where else does Shelf fit?
 
