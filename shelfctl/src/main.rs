@@ -23,6 +23,7 @@ use tracing_subscriber::EnvFilter;
 mod bundle;
 mod chaos;
 mod install;
+mod pool_status;
 
 /// Shelf cache daemon operator CLI.
 #[derive(Debug, Parser)]
@@ -107,6 +108,11 @@ enum Command {
     /// SHELF-33 — auto-detect Trino catalogs, generate values.yaml,
     /// and `helm upgrade --install` the Shelf chart.
     Install(install::InstallArgs),
+    /// RC7 D1 — aggregate `/stats` from every shelfd pod in a
+    /// namespace. No per-pod port-forward gymnastics: discovers
+    /// pods via the kube apiserver, opens an OS-allocated local
+    /// port per pod, prints a single table.
+    PoolStatus(pool_status::PoolStatusArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -138,6 +144,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Chaos(args) => return chaos::run(args).await,
         Command::Bundle(args) => return bundle::run(args).await,
         Command::Install(args) => return install::run(args).await,
+        Command::PoolStatus(args) => return pool_status::run(args).await,
         _ => {}
     }
 
@@ -153,7 +160,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Unpin { key } => cmd_unpin(&client, &cli.endpoint, &key).await,
         Command::Evict { key, pool } => cmd_evict(&client, &cli.endpoint, &key, pool).await,
         Command::Reload => cmd_reload(&client, &cli.endpoint).await,
-        Command::Chaos(_) | Command::Bundle(_) | Command::Install(_) => unreachable!(),
+        Command::Chaos(_) | Command::Bundle(_) | Command::Install(_) | Command::PoolStatus(_) => {
+            unreachable!()
+        }
     }
 }
 
