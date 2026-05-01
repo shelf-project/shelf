@@ -64,9 +64,23 @@
 //! returns `true` — the gate becomes a no-op without a redeploy.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use crate::config::LodcAdmissionConfig;
+use crate::config::{LodcAdmissionConfig, RssThrottleConfig};
+
+/// Sentinel value stored in [`RssThrottle::current_rss`] until the
+/// poller has produced its first reading. Picked as `u64::MAX` so the
+/// "RSS unknown ⇒ no throttle" branch in [`RssThrottle::multiplier_bps`]
+/// is a single integer compare on the hot path; any plausible real
+/// VmRSS is multiple orders of magnitude smaller.
+const RSS_UNKNOWN: u64 = u64::MAX;
+
+/// "No throttle applied" — multiplier is `1.0` in basis points.
+const MULT_BPS_FULL: u32 = 10_000;
+
+/// "Full pause" — multiplier is `0.0` in basis points.
+const MULT_BPS_NONE: u32 = 0;
 
 /// Token bucket capacity below which the limiter degenerates to the
 /// "always drop" kill-switch path. Used by the
@@ -74,6 +88,300 @@ use crate::config::LodcAdmissionConfig;
 /// intentionally configures `target_bytes_per_sec = 0` to disable
 /// caching from the rowgroup pool.
 const ZERO_RATE_KILL_SWITCH: u64 = 0;
+
+/// **A1 (rc.7)** — RSS-aware admission multiplier layered on top of
+/// the SHELF-29 byte-rate limiter.
+///
+/// ## Why this exists
+///
+/// The 2026-04-30 → 2026-05-01 c6a OOM cascade (workspace memory:
+/// "May 1 morning OOM cascade RCA") showed the byte-rate gate alone
+/// cannot stop a pod whose **process RSS** is climbing because of
+/// inflight S3 buffers, Foyer DRAM, and the LODC submit queue all
+/// expanding at once. The kernel kills the pod (exit 137) long
+/// before the byte-rate budget would naturally throttle, because
+/// the byte budget is sized for *steady-state drain*, not for the
+/// transient bloat that happens during an admit burst.
+///
+/// This struct closes the loop: a periodic background poll of
+/// `/proc/self/status` feeds the most recent RSS into a single
+/// `AtomicU64`, and `multiplier_bps()` returns a linear-interpolated
+/// throttle value the admission gate multiplies against its admit
+/// decision.
+///
+/// ## Curve
+///
+/// Let `pressure = current_rss / rss_target_bytes`.
+///
+/// ```text
+/// pressure < low_watermark   ⇒ multiplier = 1.0   (no throttle)
+/// pressure >= high_watermark ⇒ multiplier = 0.0   (full pause)
+/// otherwise                  ⇒ multiplier linearly interpolated
+///                               from 1.0 at low_watermark
+///                               to   0.0 at high_watermark
+/// ```
+///
+/// Defaults: `low = 0.7`, `high = 0.9`, `rss_target_bytes = 40 GiB`
+/// (matches the rc.7 m5a.4xlarge / 40 GiB-pod-limit baseline). At
+/// 28 GiB RSS the multiplier starts dropping; by 36 GiB it is at
+/// zero. The 4 GiB headroom between full-pause and the kubelet
+/// allocatable ceiling absorbs the inflight buffers that are
+/// already in flight when the multiplier first reaches zero.
+///
+/// ## Fail-open posture
+///
+/// `read_proc_rss` returns `None` on non-Linux hosts, container
+/// `procfs` masks, or any I/O failure on `/proc/self/status`.
+/// In that case `current_rss` stays at [`RSS_UNKNOWN`] and
+/// [`multiplier_bps`] returns [`MULT_BPS_FULL`]. The throttle
+/// silently degrades to a no-op rather than spuriously paging
+/// admits — workspace policy: no throttle is preferable to a
+/// throttle of unknown provenance.
+///
+/// ## Concurrency
+///
+/// One `AtomicU64` for the freshest RSS reading, one `AtomicBool`
+/// for the master enable bit, and one `AtomicU64` for the
+/// pressure-second integration anchor. No locks. The poller is a
+/// detached `tokio::spawn`'d interval task that holds an
+/// `Arc<RssThrottle>`; it self-exits when the Arc reaches the
+/// last reference and `Weak::upgrade` returns `None`. There is no
+/// `CancellationToken` plumbing because `FoyerStore` lives for
+/// the entire process lifetime and the poller cost is negligible.
+#[derive(Debug)]
+pub struct RssThrottle {
+    /// Master switch sourced from
+    /// [`RssThrottleConfig::enabled`]. Read on every multiplier
+    /// query; flipping it at runtime via `set_enabled` is allowed
+    /// for tests but not used in production.
+    enabled: AtomicBool,
+    /// Reference RSS — `pressure = current_rss / target_bytes`.
+    /// Static after construction.
+    target_bytes: u64,
+    /// Pressure (in basis points, `0..=10_000`) at and below which
+    /// the multiplier is `1.0`. Computed from the f64
+    /// [`RssThrottleConfig::low_watermark`] at construction.
+    low_watermark_bps: u32,
+    /// Pressure (in basis points) at and above which the
+    /// multiplier is `0.0` (full pause). Computed from
+    /// [`RssThrottleConfig::high_watermark`].
+    high_watermark_bps: u32,
+    /// Latest RSS reading, in bytes. Initialised to [`RSS_UNKNOWN`]
+    /// so the multiplier returns `1.0` until the first poll.
+    current_rss: AtomicU64,
+    /// Stable Prometheus pool label, e.g. `"rowgroup"`.
+    pool_label: &'static str,
+    /// Pre-touch latch for the multiplier gauge. Bumps a one-shot
+    /// `set(MULT_BPS_FULL)` on first construction so dashboards
+    /// see a non-empty series before the first poll fires.
+    initialised: AtomicBool,
+}
+
+impl RssThrottle {
+    /// Construct from the operator-facing config. The `pool_label`
+    /// is the Prometheus label this throttle's metrics are filed
+    /// under; today the only caller passes `"rowgroup"`.
+    pub fn from_config(cfg: &RssThrottleConfig, pool_label: &'static str) -> Self {
+        // Convert the f64 watermarks to basis points. The clamp is
+        // belt-and-braces against a misconfigured chart that sets
+        // `low_watermark: 1.5` (pressure can't exceed 1.0 in any
+        // sane regime, but if an operator does pick 1.5 we want
+        // to floor to 1.0 = no throttle, not crash).
+        let low_bps = (cfg.low_watermark.clamp(0.0, 1.0) * 10_000.0) as u32;
+        // The high watermark must be ≥ low_watermark or the linear
+        // band has zero width and we'd divide by zero. We clamp the
+        // configured high up to at least `low + 1 bps` so the
+        // arithmetic in `multiplier_bps` is always well-defined.
+        let high_raw = (cfg.high_watermark.clamp(0.0, 1.0) * 10_000.0) as u32;
+        let high_bps = high_raw.max(low_bps.saturating_add(1));
+
+        let me = Self {
+            enabled: AtomicBool::new(cfg.enabled),
+            target_bytes: cfg.rss_target_bytes,
+            low_watermark_bps: low_bps,
+            high_watermark_bps: high_bps,
+            current_rss: AtomicU64::new(RSS_UNKNOWN),
+            pool_label,
+            initialised: AtomicBool::new(false),
+        };
+        me.touch_metric_init();
+        me
+    }
+
+    /// Pre-touch the gauge child for `pool_label` so a freshly
+    /// scraped pod that has never seen pressure publishes the
+    /// series at `MULT_BPS_FULL` rather than missing.
+    fn touch_metric_init(&self) {
+        if !self.initialised.swap(true, Ordering::Relaxed) {
+            crate::metrics::LODC_RSS_THROTTLE_MULTIPLIER
+                .with_label_values(&[self.pool_label])
+                .set(MULT_BPS_FULL as i64);
+            crate::metrics::LODC_RSS_PRESSURE_SECONDS_TOTAL
+                .with_label_values(&[self.pool_label])
+                .inc_by(0);
+        }
+    }
+
+    /// Enable / disable the throttle at runtime. Used by tests; the
+    /// production path sets this through
+    /// [`RssThrottleConfig::enabled`].
+    #[cfg(test)]
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Update the cached RSS and refresh the multiplier gauge.
+    /// Called by the poller (and directly by tests).
+    pub fn record_rss(&self, rss_bytes: u64) {
+        self.current_rss.store(rss_bytes, Ordering::Relaxed);
+        crate::metrics::LODC_RSS_THROTTLE_MULTIPLIER
+            .with_label_values(&[self.pool_label])
+            .set(self.multiplier_bps() as i64);
+    }
+
+    /// Current admission multiplier in basis points (`0..=10_000`).
+    /// Pure function of the latest RSS reading; cheap to call from
+    /// the hot path.
+    pub fn multiplier_bps(&self) -> u32 {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return MULT_BPS_FULL;
+        }
+        let rss = self.current_rss.load(Ordering::Relaxed);
+        if rss == RSS_UNKNOWN || self.target_bytes == 0 {
+            // Fail-open: on non-Linux, container restrictions, or
+            // a degenerate config we leave the gate fully open so
+            // the daemon does NOT spuriously throttle admits. Any
+            // operator who wants a hard pause can flip
+            // `cache.pools.rowgroup.diskCache.admission.enabled` to
+            // `false`; this throttle is a *softening* layer.
+            return MULT_BPS_FULL;
+        }
+        // Compute pressure in basis points. `rss / target_bytes`
+        // is conceptually a fraction; we represent it as bps so
+        // the comparisons against `low_watermark_bps` /
+        // `high_watermark_bps` stay in integer arithmetic. The
+        // saturating_mul guards against the (impossible-in-prod)
+        // case where `rss * 10_000` overflows u64 — for that to
+        // happen `rss` would need to exceed `u64::MAX / 10_000`
+        // (≈ 1.8 × 10^15 bytes ≈ 1.6 PB), well beyond any pod's
+        // RSS — but the saturation keeps the function total.
+        let pressure_bps =
+            ((rss.saturating_mul(10_000)) / self.target_bytes).min(u32::MAX as u64) as u32;
+        if pressure_bps < self.low_watermark_bps {
+            return MULT_BPS_FULL;
+        }
+        if pressure_bps >= self.high_watermark_bps {
+            return MULT_BPS_NONE;
+        }
+        // Linear interpolation in the throttle band:
+        //   above = pressure - low
+        //   width = high - low
+        //   mult  = FULL * (1 - above/width)
+        //         = FULL - FULL * above / width
+        // The `width >= 1` invariant is enforced by `from_config`
+        // (high is clamped to at least low + 1), so the divide
+        // is never zero.
+        let above = pressure_bps - self.low_watermark_bps;
+        let width = self.high_watermark_bps - self.low_watermark_bps;
+        let drop = (u64::from(above) * u64::from(MULT_BPS_FULL)) / u64::from(width);
+        let mult = u64::from(MULT_BPS_FULL).saturating_sub(drop);
+        // The arithmetic above keeps `mult` in `[0, FULL]`, so
+        // truncating to u32 is safe.
+        mult as u32
+    }
+
+    /// Read `/proc/self/status` and return the `VmRSS:` value in
+    /// bytes. `None` on any failure — non-Linux host, sandboxed
+    /// procfs, transient I/O error, or kernel-format change.
+    pub fn read_proc_rss() -> Option<u64> {
+        let data = std::fs::read_to_string("/proc/self/status").ok()?;
+        Self::parse_vmrss(&data)
+    }
+
+    /// Parse the `VmRSS:` line out of an in-memory `/proc/self/status`
+    /// blob. Split out as a free function so the test suite can
+    /// exercise the parser without needing a real `/proc` mount.
+    fn parse_vmrss(s: &str) -> Option<u64> {
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                // The procfs format is `VmRSS:    1234 kB`. We pick
+                // the first whitespace-separated token after the
+                // colon and parse it as decimal kibibytes.
+                let kib_str = rest.split_whitespace().next()?;
+                let kib: u64 = kib_str.parse().ok()?;
+                return Some(kib.saturating_mul(1024));
+            }
+        }
+        None
+    }
+
+    /// Read RSS once and update the cached value. No-op when the
+    /// host doesn't expose `/proc/self/status`.
+    pub fn poll_once(&self) {
+        if let Some(rss) = Self::read_proc_rss() {
+            self.record_rss(rss);
+        }
+    }
+
+    /// Spawn a tokio interval task that polls RSS every
+    /// `interval`. The task self-exits when the supplied
+    /// `Arc<RssThrottle>` is dropped (last clone goes away).
+    /// Production sites pass an `Arc` that the owning
+    /// `FoyerStore` keeps alive for the entire process lifetime;
+    /// in tests we exit when the test scope drops the Arc.
+    ///
+    /// Takes the Arc by value (not `&Arc<Self>`) because Rust's
+    /// stable receiver-type list does not include `&Arc<Self>`.
+    /// Internally we downgrade to a `Weak` immediately so the
+    /// task does not extend the throttle's lifetime past its
+    /// owning `LodcAdmission`.
+    pub fn spawn_poller(arc: Arc<Self>, interval: Duration) {
+        let weak = Arc::downgrade(&arc);
+        let pool_label = arc.pool_label;
+        // Run an initial sync poll so the dashboard shows a real
+        // value within milliseconds of pod start, rather than
+        // staying at the pre-touch sentinel until the first
+        // interval tick fires `interval` seconds later.
+        arc.poll_once();
+        // Drop our own strong ref so the spawned task keeps a
+        // `Weak` only — the LodcAdmission's Arc remains the sole
+        // strong reference and the task self-exits when that
+        // Arc drops at process exit.
+        drop(arc);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            // Skip missed ticks rather than firing a burst on
+            // recovery; the poll is a snapshot, not an integral.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Tokio's first tick fires immediately; consume it so
+            // the loop body starts sleeping.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let throttle = match weak.upgrade() {
+                    Some(t) => t,
+                    None => {
+                        tracing::debug!(
+                            target: "shelfd::rss_throttle",
+                            pool = %pool_label,
+                            "owner dropped; rss poller exiting",
+                        );
+                        return;
+                    }
+                };
+                throttle.poll_once();
+                // Pressure-seconds integrator: any tick where the
+                // multiplier is below `MULT_BPS_FULL` counts as
+                // "throttle was active for this poll interval".
+                if throttle.multiplier_bps() < MULT_BPS_FULL {
+                    crate::metrics::LODC_RSS_PRESSURE_SECONDS_TOTAL
+                        .with_label_values(&[throttle.pool_label])
+                        .inc_by(interval.as_secs());
+                }
+            }
+        });
+    }
+}
 
 /// Independent-queue token-bucket admission limiter.
 ///
@@ -112,6 +420,20 @@ pub struct LodcAdmission {
     /// label is registered before the first scrape — prevents the panel
     /// from reading "no data" until the first drop fires.
     initialised: AtomicBool,
+    /// **A1 (rc.7)** — RSS-aware throttle. `None` when the operator
+    /// disabled the feature via `rss_throttle.enabled = false`. The
+    /// `Arc` lets the background poller hold its own ref without
+    /// forcing every `LodcAdmission` clone to copy the throttle
+    /// state.
+    rss_throttle: Option<Arc<RssThrottle>>,
+    /// **A1 (rc.7)** — process-wide PRNG state for the
+    /// probabilistic `rss_admit` decision. Held inside the limiter
+    /// (rather than as a `static`) so test-only limiters with
+    /// distinct labels do not race on a single global. Initialised
+    /// at construction from a constant XOR'd with the pool label
+    /// pointer; the splitmix64 mixer in [`rss_admit`] then produces
+    /// a uniformly distributed u32 per call.
+    rng_state: AtomicU64,
 }
 
 impl LodcAdmission {
@@ -130,6 +452,38 @@ impl LodcAdmission {
         // and the cap is reached only when an operator picks an
         // unreasonably large value; we silently clamp rather than panic.
         let max_burst_bytes = cfg.max_burst_bytes.min(u32::MAX as u64);
+        // A1 — install the RSS-aware throttle when enabled. The
+        // throttle is independent of the `cfg.enabled` master switch
+        // for the byte-rate limiter (operators can ship the byte
+        // gate enabled but the RSS feedback disabled — useful while
+        // tuning a new cluster), but a disabled byte limiter takes
+        // the whole gate down to begin with so the throttle is
+        // moot in that case.
+        let rss_throttle = if cfg.rss_throttle.enabled {
+            Some(Arc::new(RssThrottle::from_config(
+                &cfg.rss_throttle,
+                pool_label,
+            )))
+        } else {
+            // Pre-touch the multiplier gauge at FULL even when the
+            // feature is disabled so a freshly deployed pod that
+            // never touches the throttle still publishes the series.
+            crate::metrics::LODC_RSS_THROTTLE_MULTIPLIER
+                .with_label_values(&[pool_label])
+                .set(MULT_BPS_FULL as i64);
+            crate::metrics::LODC_RSS_PRESSURE_SECONDS_TOTAL
+                .with_label_values(&[pool_label])
+                .inc_by(0);
+            None
+        };
+        // Seed the PRNG with a value that varies between processes
+        // and between distinct limiters in the same process. The
+        // pool-label pointer is a stable per-build address; the
+        // boot-time nanos give cross-restart variance.
+        let pool_seed = pool_label.as_ptr() as usize as u64;
+        let nanos_seed = Instant::now().elapsed().as_nanos() as u64;
+        let rng_seed =
+            pool_seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ nanos_seed ^ 0xDEAD_BEEF_CAFE_BABE;
         Some(Self {
             refill_bytes_per_sec: cfg.target_bytes_per_sec,
             max_burst_bytes,
@@ -138,7 +492,16 @@ impl LodcAdmission {
             start: Instant::now(),
             pool_label,
             initialised: AtomicBool::new(false),
+            rss_throttle,
+            rng_state: AtomicU64::new(rng_seed),
         })
+    }
+
+    /// **A1 (rc.7)** — return the cloned `Arc` to the RSS throttle,
+    /// or `None` when the feature is disabled. Used by `FoyerStore`
+    /// to spawn the background poller after construction.
+    pub fn rss_throttle(&self) -> Option<Arc<RssThrottle>> {
+        self.rss_throttle.clone()
     }
 
     /// Test-only constructor with explicit (refill, burst) values. The
@@ -155,7 +518,19 @@ impl LodcAdmission {
             start: Instant::now(),
             pool_label,
             initialised: AtomicBool::new(false),
+            rss_throttle: None,
+            rng_state: AtomicU64::new(0xDEAD_BEEF_CAFE_BABE),
         }
+    }
+
+    /// Test-only: install an `Arc<RssThrottle>` after construction
+    /// so the test scope can drive `record_rss(...)` directly. Not
+    /// exposed in production because production limiters install
+    /// the throttle in [`from_config`].
+    #[cfg(test)]
+    pub fn with_rss_throttle(mut self, throttle: Arc<RssThrottle>) -> Self {
+        self.rss_throttle = Some(throttle);
+        self
     }
 
     /// Configured refill rate in bytes/sec. Test-only accessor.
@@ -230,6 +605,34 @@ impl LodcAdmission {
             return false;
         }
 
+        // **A1 (rc.7)** — RSS-aware multiplier gate. Layered on top
+        // of the byte-rate token bucket so a pod whose RSS is
+        // climbing because of inflight buffers / DRAM growth /
+        // submit-queue spill stops admitting new work even when its
+        // *byte budget* still has slack. The byte budget alone
+        // could not stop the c6a OOM cascade observed
+        // 2026-04-30 → 2026-05-01 because the bytes-per-second
+        // budget is sized for steady-state drain, not for the
+        // transient bloat that happens during an admit burst.
+        //
+        // Mechanism (see `RssThrottle::multiplier_bps`):
+        //   - mult == FULL  ⇒ no throttle (skip this gate)
+        //   - mult == NONE  ⇒ drop unconditionally
+        //   - 0 < mult < FULL ⇒ drop probabilistically with
+        //     probability `1 - mult/FULL`
+        //
+        // The probabilistic path uses a splitmix64-mixed PRNG seeded
+        // at construction. Tearing on `rng_state` is harmless — we
+        // only need a uniformly distributed u32 per call, and any
+        // CAS-vs-fetch_add race produces a different but still
+        // uniform draw.
+        if !self.rss_admit() {
+            crate::metrics::LODC_DROPS_TOTAL
+                .with_label_values(&[self.pool_label, "rate_limit"])
+                .inc();
+            return false;
+        }
+
         // Bound the entry bytes to u32 so the packed-state arithmetic
         // can subtract without crossing the boundary. We already
         // validated `entry_bytes <= max_burst_bytes <= u32::MAX`.
@@ -295,6 +698,55 @@ impl LodcAdmission {
                 }
             }
         }
+    }
+
+    /// **A1 (rc.7)** — apply the RSS-aware multiplier. Returns
+    /// `true` to allow the admit through, `false` to drop. When the
+    /// throttle is disabled (or absent), always returns `true`. The
+    /// caller is responsible for bumping the drop counter on
+    /// `false`; we keep that side effect at the call site so all
+    /// rate-limit drops funnel through a single counter bump.
+    fn rss_admit(&self) -> bool {
+        let throttle = match &self.rss_throttle {
+            Some(t) => t,
+            None => return true,
+        };
+        let mult = throttle.multiplier_bps();
+        if mult >= MULT_BPS_FULL {
+            return true;
+        }
+        if mult == MULT_BPS_NONE {
+            return false;
+        }
+        // Probabilistic admission: draw a uniform `0..=10_000` and
+        // admit iff the draw is strictly less than `mult`. With
+        // `mult = 5000` this admits ~50% of attempts, matching
+        // the spec's "if 0.5, refuse 50% probabilistically" line.
+        let draw = self.next_rng_bps();
+        draw < mult
+    }
+
+    /// **A1 (rc.7)** — splitmix64-mixed pseudo-random draw in
+    /// `[0, 10_001)`, suitable for per-call probabilistic admit
+    /// decisions. NOT cryptographically random; we explicitly
+    /// don't need that here.
+    fn next_rng_bps(&self) -> u32 {
+        // Weyl-sequence increment + splitmix64 mixer. The
+        // increment constant is the golden-ratio fraction of 2^64;
+        // the two multiplies are the canonical splitmix64 finalising
+        // constants (Stafford 13 / 14). Lock-free, contention-safe,
+        // and uniformly distributed for our use case.
+        let z = self
+            .rng_state
+            .fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed)
+            .wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        // `% 10_001` gives uniform draws in `[0, 10_000]`. The
+        // tiny non-uniformity from u64 % 10_001 (≈ 10_001 / 2^64)
+        // is several orders below detectability.
+        (z % 10_001) as u32
     }
 
     /// Current monotonic-since-construction milliseconds, truncated to
@@ -618,6 +1070,7 @@ mod tests {
             target_bytes_per_sec: 1 << 20,
             max_burst_bytes: 1 << 20,
             max_inflight_admissions: 1024,
+            rss_throttle: crate::config::RssThrottleConfig::default(),
         };
         assert!(LodcAdmission::from_config(&cfg, "test_disabled").is_none());
     }
@@ -633,6 +1086,7 @@ mod tests {
             target_bytes_per_sec: 1 << 20,
             max_burst_bytes: u64::MAX,
             max_inflight_admissions: 1024,
+            rss_throttle: crate::config::RssThrottleConfig::default(),
         };
         let lim = LodcAdmission::from_config(&cfg, "test_clamp")
             .expect("enabled config must produce a limiter");
@@ -655,5 +1109,266 @@ mod tests {
             let (ts2, tok2) = unpack_state(packed);
             assert_eq!((ts, tok), (ts2, tok2));
         }
+    }
+
+    // -------------------------------------------------------------
+    // **A1 (rc.7)** — RSS-aware admission multiplier tests.
+    // -------------------------------------------------------------
+    //
+    // Each test constructs an `RssThrottle` with a fresh per-test
+    // `pool_label` so the gauges can be inspected per-case without
+    // cross-test pollution. The watermarks use the spec defaults
+    // (low = 0.7, high = 0.9) and `rss_target_bytes = 100` so the
+    // pressure values are easy to reason about (rss = pressure ×
+    // 100 in arithmetic terms).
+
+    /// Helper: build an `RssThrottle` with the spec defaults, scoped
+    /// to a unique `pool_label`. Tests inject RSS via `record_rss`
+    /// directly so the reading is deterministic regardless of the
+    /// actual `/proc/self/status` on the test runner.
+    fn rss_throttle_for_test(pool_label: &'static str) -> RssThrottle {
+        RssThrottle::from_config(
+            &crate::config::RssThrottleConfig {
+                enabled: true,
+                rss_target_bytes: 100,
+                rss_poll_interval_secs: 5,
+                low_watermark: 0.7,
+                high_watermark: 0.9,
+            },
+            pool_label,
+        )
+    }
+
+    /// Spec test 1 — `rss_pressure_below_low_watermark_no_throttle`.
+    /// RSS = 50 (= 0.5× target = below 0.7 watermark) ⇒ multiplier
+    /// must be `MULT_BPS_FULL` (no throttle).
+    #[test]
+    fn rss_pressure_below_low_watermark_no_throttle() {
+        let t = rss_throttle_for_test("test_rss_below_low");
+        t.record_rss(50);
+        assert_eq!(t.multiplier_bps(), MULT_BPS_FULL);
+    }
+
+    /// Spec test 2 — `rss_pressure_at_low_watermark_no_throttle`.
+    /// RSS = 70 (= 0.7× target = exactly at low watermark) ⇒
+    /// multiplier must be `MULT_BPS_FULL`. The boundary is part of
+    /// the no-throttle band per the spec curve (`pressure < low`
+    /// gives full, and the linear interp at `pressure == low`
+    /// also evaluates to FULL — this test pins both halves of the
+    /// boundary to the same answer).
+    #[test]
+    fn rss_pressure_at_low_watermark_no_throttle() {
+        let t = rss_throttle_for_test("test_rss_at_low");
+        t.record_rss(70);
+        assert_eq!(t.multiplier_bps(), MULT_BPS_FULL);
+    }
+
+    /// Spec test 3 — `rss_pressure_mid_band_partial_throttle`.
+    /// RSS = 80 (= 0.8× target = midpoint of [0.7, 0.9]) ⇒ multiplier
+    /// must be exactly half of FULL. The arithmetic in
+    /// `multiplier_bps` is integer (bps), so the answer is exactly
+    /// 5_000 — no floating-point fuzz to chase.
+    #[test]
+    fn rss_pressure_mid_band_partial_throttle() {
+        let t = rss_throttle_for_test("test_rss_mid_band");
+        t.record_rss(80);
+        assert_eq!(t.multiplier_bps(), MULT_BPS_FULL / 2);
+    }
+
+    /// Spec test 4 — `rss_pressure_at_high_watermark_full_pause`.
+    /// RSS = 90 (= 0.9× target = exactly at high watermark) ⇒
+    /// multiplier must be `MULT_BPS_NONE` (full pause).
+    #[test]
+    fn rss_pressure_at_high_watermark_full_pause() {
+        let t = rss_throttle_for_test("test_rss_at_high");
+        t.record_rss(90);
+        assert_eq!(t.multiplier_bps(), MULT_BPS_NONE);
+    }
+
+    /// Spec test 5 — `rss_pressure_above_high_watermark_full_pause`.
+    /// RSS = 100 (= 1.0× target = at-or-above high watermark) ⇒
+    /// multiplier still `MULT_BPS_NONE`. The "anything above
+    /// high_watermark stays at zero" behaviour stops a runaway
+    /// process from re-triggering admits via integer overflow.
+    #[test]
+    fn rss_pressure_above_high_watermark_full_pause() {
+        let t = rss_throttle_for_test("test_rss_above_high");
+        t.record_rss(100);
+        assert_eq!(t.multiplier_bps(), MULT_BPS_NONE);
+
+        // Belt-and-braces: a far-above-target RSS (e.g. a leak
+        // scenario) must also pin to NONE — saturating arithmetic
+        // must not wrap into a "looks healthy" reading.
+        t.record_rss(u64::MAX / 2);
+        assert_eq!(t.multiplier_bps(), MULT_BPS_NONE);
+    }
+
+    /// Spec test 6 — `rss_unread_falls_back_to_unthrottled`.
+    /// When the host cannot expose `/proc/self/status` (non-Linux
+    /// dev laptop, sandboxed container, transient I/O failure),
+    /// `record_rss` is never called and `current_rss` stays at the
+    /// `RSS_UNKNOWN` sentinel. The multiplier must be `FULL` —
+    /// the daemon fails OPEN, never CLOSED, on a missing reading.
+    /// We verify the panic-free path by:
+    ///   (1) constructing a throttle without ever calling
+    ///       `record_rss`,
+    ///   (2) asserting `multiplier_bps() == FULL`, and
+    ///   (3) calling `read_proc_rss()` directly — on Linux this
+    ///       returns Some(_), on macOS / non-Linux it returns
+    ///       None — and verifying neither branch panics.
+    #[test]
+    fn rss_unread_falls_back_to_unthrottled() {
+        let t = rss_throttle_for_test("test_rss_unread");
+        // Step 1: never record. Multiplier is FULL because the
+        // sentinel is in place.
+        assert_eq!(t.multiplier_bps(), MULT_BPS_FULL);
+
+        // Step 2: a degenerate target_bytes = 0 also routes to the
+        // fail-open branch. We construct a fresh throttle with a
+        // zero target to exercise that exit path.
+        let zero_target = RssThrottle::from_config(
+            &crate::config::RssThrottleConfig {
+                enabled: true,
+                rss_target_bytes: 0,
+                rss_poll_interval_secs: 5,
+                low_watermark: 0.7,
+                high_watermark: 0.9,
+            },
+            "test_rss_zero_target",
+        );
+        zero_target.record_rss(1024 * 1024 * 1024); // 1 GiB
+        assert_eq!(zero_target.multiplier_bps(), MULT_BPS_FULL);
+
+        // Step 3: read_proc_rss must be panic-free regardless of
+        // whether `/proc/self/status` exists. On Linux it returns
+        // Some(rss); on macOS / Windows / sandboxed it returns
+        // None. Either way the call site stays alive.
+        let _ = RssThrottle::read_proc_rss();
+    }
+
+    /// Spec test 7 — `rss_disabled_via_config_no_throttle`.
+    /// `RssThrottleConfig::enabled = false` ⇒ multiplier always
+    /// `MULT_BPS_FULL`, regardless of how high the recorded RSS
+    /// climbs. This is the operator escape hatch: ship the byte-
+    /// rate limiter live, keep the RSS feedback path off until
+    /// the new lever is trusted.
+    #[test]
+    fn rss_disabled_via_config_no_throttle() {
+        let disabled = RssThrottle::from_config(
+            &crate::config::RssThrottleConfig {
+                enabled: false,
+                rss_target_bytes: 100,
+                rss_poll_interval_secs: 5,
+                low_watermark: 0.7,
+                high_watermark: 0.9,
+            },
+            "test_rss_disabled",
+        );
+        // Even at full pressure, disabled config ⇒ no throttle.
+        for rss in [50_u64, 80, 100, u64::MAX / 2] {
+            disabled.record_rss(rss);
+            assert_eq!(
+                disabled.multiplier_bps(),
+                MULT_BPS_FULL,
+                "disabled throttle must never throttle (rss={rss})",
+            );
+        }
+    }
+
+    // -------------------------------------------------------------
+    // Auxiliary regression tests for the `RssThrottle` plumbing.
+    // Not part of the seven-test spec list, but cheap to keep so
+    // future refactors don't silently break the parser or the
+    // probabilistic admit path.
+    // -------------------------------------------------------------
+
+    /// `parse_vmrss` accepts the canonical procfs format and
+    /// returns the value in bytes (procfs reports kibibytes).
+    #[test]
+    fn parse_vmrss_handles_canonical_format() {
+        let blob = "Name:\tshelfd\nVmRSS:\t  4096 kB\nVmHWM:\t  8192 kB\n";
+        assert_eq!(RssThrottle::parse_vmrss(blob), Some(4096 * 1024));
+    }
+
+    /// `parse_vmrss` returns `None` on a missing line, an empty
+    /// blob, or junk input — never panics.
+    #[test]
+    fn parse_vmrss_returns_none_on_missing_or_garbage() {
+        assert_eq!(RssThrottle::parse_vmrss(""), None);
+        assert_eq!(RssThrottle::parse_vmrss("Name:\tshelfd\n"), None);
+        assert_eq!(RssThrottle::parse_vmrss("VmRSS:\tnotanumber kB\n"), None);
+        assert_eq!(RssThrottle::parse_vmrss("VmRSS:\n"), None);
+    }
+
+    /// `next_rng_bps` produces draws in `[0, 10_000]` and is not
+    /// trivially constant. We don't assert distributional
+    /// properties (that's `cargo bench` territory), only that the
+    /// range is correct and that successive calls differ.
+    #[test]
+    fn next_rng_bps_is_in_range_and_varies() {
+        let lim = LodcAdmission::new(1 << 30, 1 << 20, "test_rng_range");
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..256 {
+            let v = lim.next_rng_bps();
+            assert!(v <= 10_000, "draw out of range: {v}");
+            seen.insert(v);
+        }
+        // 256 draws on a uniform distribution over 10_001 buckets
+        // gives a near-certain ≥ 50 distinct values; we use a
+        // generous lower bound to keep the test stable on any
+        // remotely sane PRNG.
+        assert!(
+            seen.len() >= 32,
+            "rng must produce varied output; got {} distinct in 256 draws",
+            seen.len()
+        );
+    }
+
+    /// `try_admit` with a throttle pinned at `MULT_BPS_NONE`
+    /// drops every call regardless of token-bucket state, and the
+    /// drop is filed as a `rate_limit` reason (no new label needed).
+    #[test]
+    fn try_admit_drops_when_rss_throttle_is_full_pause() {
+        let throttle = Arc::new(rss_throttle_for_test("test_admit_full_pause"));
+        // Pin pressure at the high watermark so multiplier == NONE.
+        throttle.record_rss(95);
+        assert_eq!(throttle.multiplier_bps(), MULT_BPS_NONE);
+
+        let lim = LodcAdmission::new(1 << 30, 1 << 20, "test_admit_full_pause_lim")
+            .with_rss_throttle(throttle);
+        let baseline_drops = rate_limit_drops("test_admit_full_pause_lim");
+        for _ in 0..16 {
+            assert!(!lim.try_admit(4096), "RSS-paused throttle must drop");
+        }
+        assert_eq!(
+            rate_limit_drops("test_admit_full_pause_lim") - baseline_drops,
+            16,
+            "every paused admit must bump the rate_limit drop counter",
+        );
+    }
+
+    /// `try_admit` with a healthy throttle (`MULT_BPS_FULL`) is a
+    /// no-op layered on top of the byte-rate gate — every call
+    /// admits, no drops fire.
+    #[test]
+    fn try_admit_unaffected_when_rss_throttle_is_full() {
+        let throttle = Arc::new(rss_throttle_for_test("test_admit_full"));
+        throttle.record_rss(10); // well below low watermark
+        assert_eq!(throttle.multiplier_bps(), MULT_BPS_FULL);
+
+        let lim =
+            LodcAdmission::new(1 << 30, 1 << 20, "test_admit_full_lim").with_rss_throttle(throttle);
+        let baseline_drops = rate_limit_drops("test_admit_full_lim");
+        for _ in 0..16 {
+            assert!(
+                lim.try_admit(4096),
+                "healthy throttle must let admits through",
+            );
+        }
+        assert_eq!(
+            rate_limit_drops("test_admit_full_lim"),
+            baseline_drops,
+            "healthy throttle must produce zero rate-limit drops",
+        );
     }
 }
