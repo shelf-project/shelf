@@ -130,4 +130,15 @@ data:
       max_concurrent_files: {{ .maxConcurrentFiles | int }}
       queue_capacity: {{ .queueCapacity | int }}
       snapshot_lag_tolerance: {{ .snapshotLagToleranceSecs | int }}s
+      # A3 (rc.7) — metadata.json polling worker. `tables: []` is
+      # the explicit no-op (poller spawns and parks). See
+      # ADR-0036 + values.yaml docstrings.
+      poll_interval: {{ .pollIntervalSecs | default 30 | int }}s
+      max_bytes_per_snapshot: {{ .maxBytesPerSnapshot | default 5368709120 | int64 }}
+      tables:
+      {{- range .tables | default list }}
+        - bucket: {{ .bucket | quote }}
+          key_prefix: {{ .keyPrefix | quote }}
+          label: {{ .label | quote }}
+      {{- end }}
     {{- end }}

@@ -971,6 +971,12 @@ mod tests {
             queue_capacity: 32,
             snapshot_lag_tolerance: Duration::from_secs(30),
             byte_equality_tolerance_bps: 500,
+            // A3 (rc.7) — poller fields are part of the same
+            // struct now; defaults keep the reactor-only tests
+            // unaffected.
+            poll_interval: Duration::from_secs(30),
+            tables: Vec::new(),
+            max_bytes_per_snapshot: 5 * 1024 * 1024 * 1024,
         }
     }
 

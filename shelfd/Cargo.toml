@@ -55,6 +55,13 @@ prost = { workspace = true }
 # SHELF-34 — Apache Parquet page-index parser for the
 # `/predicate-prune` sidecar. See parquet_meta.rs.
 parquet = { workspace = true }
+# A3 (rc.7) — Iceberg manifest list / manifest reader for the
+# compaction-rewarm metadata-poller (`shelfd::rewarm_poller`). The
+# poller is default-OFF; this dep is compiled unconditionally so the
+# module never falls behind a feature flag, but runtime cost is zero
+# until an operator flips `cache.rewarm.enabled=true` AND populates
+# `cache.rewarm.tables`.
+apache-avro = { workspace = true }
 # SHELF E2 — Pool::Metadata compression (gated behind `zstd_metadata`
 # feature). The dep compiles fine off-feature; only the wrapper in
 # `compression.rs` is disabled.

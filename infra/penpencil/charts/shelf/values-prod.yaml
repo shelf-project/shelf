@@ -173,20 +173,31 @@ cache:
     minFooterBytes: 65536
 
   # SHELF-45 — compaction-aware re-warm reactor. Stays OFF on this
-  # overlay until the Tier-1 measurement substrate (#66 / #67 / #68)
-  # is green for 7 days. The reactor's first cluster on this overlay
-  # will be co-resident with the SHELF-37 listener, which is the
-  # natural event producer; flipping `enabled: true` here without
-  # the listener wired makes the reactor park on an empty channel
-  # (safe but pointless). Re-quote `maxBytesPerSec` against the live
+  # overlay until the post-A3 soak window proves the metadata-poll
+  # source is stable. The A3 (rc.7) poller (ADR-0036) is the
+  # designated default trigger source now that SHELF-37 (PR #66) is
+  # parked on the JDK-25 absence; flip `enabled: true` AND populate
+  # `tables` from the latest `gen_pin_list` top-N before the
+  # cutover MR. Re-quote `maxBytesPerSec` against the live
   # `alluxio` NodePool's gp3 read budget once the soak proves the
   # default 50 MiB/s/pod does not leak into client read latency.
+  #
+  # A3 example shape (kept commented — operators uncomment + edit
+  # ahead of the cutover MR; bucket names belong in this overlay
+  # only, never in the upstream OSS chart):
   # rewarm:
   #   enabled: true
   #   maxBytesPerSec: 52428800
   #   maxConcurrentFiles: 4
   #   queueCapacity: 1024
   #   snapshotLagToleranceSecs: 120
+  #   pollIntervalSecs: 30
+  #   maxBytesPerSnapshot: 5368709120  # 5 GiB cap per detected snapshot
+  #   tables:
+  #     - bucket: pw-data-cdp-prod-gold-layer
+  #       keyPrefix: warehouse/cdp/datamart/silver_user_events
+  #       label: cdp.datamart.silver_user_events
+  #     # populate the rest from gen_pin_list top-N before cutover
 
 origin:
   # Origin bucket (the data lake Trino reads).

@@ -60,6 +60,11 @@ pub mod coalesce;
 // config; the module is always compiled so EXPOSED_SERIES sees the
 // Prometheus families on every build.
 pub mod compaction_rewarm;
+// A3 (rc.7) — Iceberg metadata.json polling worker that drives the
+// SHELF-45 reactor without depending on the SHELF-37 listener (PR
+// #66, parked on JDK 25). Default-off; module always compiled so
+// the Prometheus series are pre-touched.
+pub mod rewarm_poller;
 // Dormant modules — present in the tree but with zero non-test callers
 // in the current hot/control paths. Gated behind off-by-default Cargo
 // features so default `shelfd` builds ship a smaller binary; the source

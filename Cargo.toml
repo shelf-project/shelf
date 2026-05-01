@@ -92,6 +92,14 @@ lru = "0.12"
 # literal construction for FileMetaData / SchemaElement in tests)
 # stay compatible across 53→58.
 parquet = { version = "58", default-features = false }
+# A3 (rc.7) — Apache Avro reader for Iceberg manifest list + manifest
+# files. Only needed by `shelfd::rewarm_poller`; the poller is
+# default-OFF (`cache.rewarm.enabled=false`) so this dep adds compile
+# time but no runtime cost on stock deployments. `default-features =
+# false` skips the snappy/zstd/bzip codec backends — Iceberg manifests
+# are written with the `deflate` codec which `apache-avro` decodes
+# from its built-in flate2 dep.
+apache-avro = { version = "0.21", default-features = false }
 
 [profile.release]
 lto = "thin"
