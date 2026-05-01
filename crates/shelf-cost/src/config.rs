@@ -89,6 +89,27 @@ pub struct CostConfig {
     /// don't want a u16 overflow to fold into the u16 wrap.)
     #[serde(default)]
     pub nat_traversal_basis_points: Option<u32>,
+
+    /// **A4 (rc.7)** — amortized shelf-pool cost in **dollars per
+    /// hour**. Used by `shelfd::cost::NetCostAccountant` (see
+    /// `shelfd/src/cost.rs`) to subtract the operating cost of the
+    /// shelf pool from the gross savings on
+    /// `shelf_s3_dollars_saved_total` and publish a *net* counter
+    /// `shelf_s3_dollars_saved_net_total`.
+    ///
+    /// Anti-overclaim guard: `None` (or any non-finite / non-positive
+    /// value) means the net counter **does not publish**. Procurement
+    /// numbers must be authoritative — silently defaulting to zero
+    /// would inflate net savings whenever an operator forgot to set
+    /// it. The `shelf_pool_amortized_dollars_per_hour` gauge is
+    /// always exposed so dashboards can flag a `0` reading.
+    ///
+    /// Reference figure: a 6-pod shelf pool on `m5a.4xlarge` in
+    /// `ap-south-1` costs ~`6 × $0.864/hr ≈ $5.18/hr`. Operators
+    /// must verify against their actual EKS bill before merging
+    /// (Spot vs On-Demand vs Reserved Instances all change this).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amortized_dollars_per_hour: Option<f64>,
 }
 
 fn default_enabled() -> bool {
@@ -115,6 +136,7 @@ impl Default for CostConfig {
             cross_az_micro_cents_per_gib: None,
             nat_processing_micro_cents_per_gib: None,
             nat_traversal_basis_points: None,
+            amortized_dollars_per_hour: None,
         }
     }
 }

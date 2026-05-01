@@ -110,6 +110,7 @@ proptest! {
             cross_az_micro_cents_per_gib: None,
             nat_processing_micro_cents_per_gib: None,
             nat_traversal_basis_points: None,
+            amortized_dollars_per_hour: None,
         };
         let err = cfg.into_model().unwrap_err();
         prop_assert!(matches!(err, CostConfigError::NegativeCoefficient));

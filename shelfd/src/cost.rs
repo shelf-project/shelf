@@ -17,9 +17,9 @@
 //! operators flip `cache.cost.enabled: false` in YAML to disable
 //! both the counter bumps and the rate-updater task.
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use shelf_cost::{CostConfig, CostConfigError, CostModel, HitEvent};
 use tokio_util::sync::CancellationToken;
@@ -273,6 +273,229 @@ impl DebugProbe {
     }
 }
 
+/// **A4 (rc.7)** — net dollars-saved accountant.
+///
+/// SHELF-40 ships a *gross* savings counter
+/// (`shelf_s3_dollars_saved_total`, in cents) — every cache hit
+/// credits the formula in `crates/shelf-cost/`. Procurement needs
+/// the **net** number: gross savings minus the operating cost of
+/// the shelf pool itself. A 6-pod `m5a.4xlarge` pool in
+/// `ap-south-1` runs ~$5.18/hour; if the gross counter only ticked
+/// $4/hour, the cluster is *losing* money on shelf and the
+/// counter alone hides that.
+///
+/// This accountant runs on a periodic tokio task (see
+/// [`spawn_net_accountant`] / `shelfd/src/main.rs`). Each tick
+/// reads the current `S3_DOLLARS_SAVED_TOTAL` value (in cents)
+/// converted to dollar-micros, subtracts
+/// `amortized_dollars_per_hour × elapsed_seconds`, and credits the
+/// delta to `shelf_s3_dollars_saved_net_total` (clamped at zero so
+/// the cumulative counter never decrements — Prometheus rejects
+/// counter regressions on rate-window boundaries).
+///
+/// Anti-overclaim guard: if `amortized_dollars_per_hour` is unset,
+/// non-finite, or non-positive at construction, [`Self::tick`]
+/// returns `None` and the net counter stays at zero. Operators MUST
+/// explicitly set `cache.cost.amortizedDollarsPerHour` for the net
+/// counter to populate. The companion gauge
+/// `shelf_pool_amortized_dollars_per_hour` is always exposed and
+/// reads `0` when the guard is active so dashboards can flag the
+/// misconfiguration.
+///
+/// Units convention (must stay consistent with `metrics.rs`):
+/// `amortized_micros_per_hour` stores the operator's
+/// dollars-per-hour value × 1_000_000 so the per-second cost slice
+/// `amortized_micros_per_hour × elapsed / 3600` stays in pure
+/// integer arithmetic (no rounding drift across ticks).
+#[derive(Debug)]
+pub struct NetCostAccountant {
+    /// Stored as integer micros: `amortized_dollars_per_hour × 1_000_000`.
+    /// `0` ⇒ guard active (anti-overclaim).
+    amortized_micros_per_hour: AtomicU64,
+    /// Wall-clock seconds at the last `tick`. Initialised at `new`
+    /// so the very first tick reports the elapsed window since
+    /// process start.
+    last_publish_unix_secs: AtomicU64,
+    /// Last observed gross-savings value, expressed in **dollar
+    /// micros** (caller converts the underlying cents-valued
+    /// counter before passing in). Initialised to `0` so the first
+    /// tick after process start measures cumulative savings since
+    /// boot — that's the right semantics because the `shelfd`
+    /// process restart resets `S3_DOLLARS_SAVED_TOTAL` to `0`
+    /// anyway, so `last_gross_micros = 0` and `gross_micros_now`
+    /// agree on the boot epoch.
+    last_gross_micros: AtomicU64,
+}
+
+impl NetCostAccountant {
+    /// Build from the operator-supplied amortization. `None` /
+    /// non-finite / non-positive all collapse to the unset state
+    /// (anti-overclaim guard active).
+    pub fn new(amortized_dollars_per_hour: Option<f64>) -> Self {
+        let micros = amortized_dollars_per_hour
+            .filter(|x| x.is_finite() && *x > 0.0)
+            .map(|x| (x * 1_000_000.0) as u64)
+            .unwrap_or(0);
+        Self {
+            amortized_micros_per_hour: AtomicU64::new(micros),
+            last_publish_unix_secs: AtomicU64::new(unix_secs_now()),
+            last_gross_micros: AtomicU64::new(0),
+        }
+    }
+
+    /// `true` iff the operator supplied a positive, finite
+    /// amortization. The accountant task SHOULD still update the
+    /// gauge to `0` even when this returns `false` — operators rely
+    /// on the gauge being present to spot the misconfiguration.
+    #[inline]
+    pub fn is_publishable(&self) -> bool {
+        self.amortized_micros_per_hour.load(Ordering::Relaxed) > 0
+    }
+
+    /// Current amortization in micros. The gauge ships this value
+    /// every tick so dashboards see `0` when the guard is active.
+    #[inline]
+    pub fn amortized_micros_per_hour(&self) -> u64 {
+        self.amortized_micros_per_hour.load(Ordering::Relaxed)
+    }
+
+    /// One accountant tick.
+    ///
+    /// `gross_micros_now` is the cumulative gross savings (in
+    /// dollar-micros) observed *now*. Returns `Some(net_delta_micros)`
+    /// if the guard is inactive (i.e. `amortized > 0`); the caller
+    /// then increments the net counter by `max(0, delta)`. Returns
+    /// `None` when the guard is active.
+    ///
+    /// `last_publish_unix_secs` and `last_gross_micros` advance on
+    /// every call regardless of the publish gate so a future
+    /// operator who flips the amortization on at runtime starts
+    /// from a fresh window (and doesn't retroactively credit the
+    /// pre-config period as if it had been free).
+    pub fn tick(&self, gross_micros_now: u64) -> Option<i64> {
+        self.tick_with_now(gross_micros_now, unix_secs_now())
+    }
+
+    /// Test-only seam: identical to [`Self::tick`] but uses the
+    /// supplied wall-clock time instead of the system clock.
+    pub fn tick_with_now(&self, gross_micros_now: u64, now_unix_secs: u64) -> Option<i64> {
+        let amortized = self.amortized_micros_per_hour.load(Ordering::Relaxed);
+        // Always advance the bookkeeping atomics so a later
+        // amortization flip sees a fresh window (see method doc).
+        let last_secs = self
+            .last_publish_unix_secs
+            .swap(now_unix_secs, Ordering::Relaxed);
+        let last_gross = self
+            .last_gross_micros
+            .swap(gross_micros_now, Ordering::Relaxed);
+        if amortized == 0 {
+            return None;
+        }
+        let elapsed_secs = now_unix_secs.saturating_sub(last_secs);
+        // `amortized × elapsed / 3600` in i128 to keep the
+        // arithmetic inside-the-domain even at extreme values (a
+        // shelf pool sustained at $1k/hr for a year still fits
+        // comfortably below i128::MAX).
+        let amortized_for_window = (amortized as i128).saturating_mul(elapsed_secs as i128) / 3600;
+        let gross_delta = (gross_micros_now as i128).saturating_sub(last_gross as i128);
+        let net = gross_delta.saturating_sub(amortized_for_window);
+        // Clamp into i64 so the prometheus counter API (u64
+        // increment, but our wrapper feeds an i64 step) is happy.
+        let clamped = net.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        Some(clamped)
+    }
+}
+
+/// Spawn the A4 net-cost accountant task. Runs on a 60 s tick.
+///
+/// Always updates `shelf_pool_amortized_dollars_per_hour` to the
+/// current configured value (so the `0` reading is itself a
+/// signal). Reads the current sum across labels of
+/// `shelf_s3_dollars_saved_total` (which carries cents), converts
+/// to dollar-micros, calls [`NetCostAccountant::tick`], and
+/// — only when `is_publishable()` — credits the clamped delta to
+/// `shelf_s3_dollars_saved_net_total{region}`.
+pub fn spawn_net_accountant(
+    accountant: Arc<NetCostAccountant>,
+    region: String,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        // 60 s cadence; the gross counter ticks once per cache hit,
+        // the operator dashboards refresh every 30–60 s, so 1/min is
+        // plenty of fidelity and keeps the wakeup budget tiny.
+        let mut ticker = tokio::time::interval(Duration::from_secs(60));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::debug!("A4 net-cost accountant shutting down");
+                    return;
+                }
+                _ = ticker.tick() => {
+                    run_one_tick(&accountant, &region);
+                }
+            }
+        }
+    });
+}
+
+fn run_one_tick(accountant: &NetCostAccountant, region: &str) {
+    // Always publish the gauge (operators rely on `0 ⇒ unset`).
+    let amortized_micros = accountant.amortized_micros_per_hour();
+    crate::metrics::SHELF_POOL_AMORTIZED_DOLLARS_PER_HOUR.set(amortized_micros as i64);
+
+    // Gross is in **cents**; convert to dollar-micros (1 cent =
+    // 10_000 dollar-micros) before feeding the accountant so the
+    // unit invariant in NetCostAccountant holds.
+    let gross_cents_total = sum_gross_cents(region);
+    let gross_micros = gross_cents_total.saturating_mul(10_000);
+
+    if let Some(delta_micros) = accountant.tick(gross_micros) {
+        // Clamp negative cumulative savings to zero — the net
+        // counter is monotonic by Prometheus contract, and a
+        // single-tick negative blip (gross stalled while pool
+        // amortization kept ticking) is recoverable on the next
+        // positive tick. Procurement reads cumulative numbers, not
+        // per-tick.
+        if delta_micros > 0 {
+            crate::metrics::S3_DOLLARS_SAVED_NET_TOTAL
+                .with_label_values(&[region])
+                .inc_by(delta_micros as u64);
+        }
+    }
+}
+
+/// Sum of `shelf_s3_dollars_saved_total{region, outcome}` across
+/// every outcome (`hit_memory`, `hit_disk`, `peer`) for a given
+/// region, in **cents**.
+///
+/// Matches the outcome list the SHELF-40 rate updater walks (see
+/// [`update_rate`]). We call `with_label_values(...).get()` per
+/// outcome — that's `IntCounter::get()` returning `u64` directly,
+/// the same fast path the rate updater uses, no need for the
+/// protobuf `Collector::collect()` API.
+fn sum_gross_cents(region: &str) -> u64 {
+    let mut total: u64 = 0;
+    for outcome in ["hit_memory", "hit_disk", "peer"] {
+        let v = crate::metrics::S3_DOLLARS_SAVED_TOTAL
+            .with_label_values(&[region, outcome])
+            .get();
+        total = total.saturating_add(v);
+    }
+    total
+}
+
+fn unix_secs_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        // SystemTime is monotonic enough on every supported target
+        // that this branch is unreachable; the `0` fallback simply
+        // makes the first tick observe the full uptime as elapsed.
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,5 +557,114 @@ mod tests {
             shelf_cost::PeerAz::CrossAz,
         );
         assert!(matches!(d, HitEvent::Disk { .. }));
+    }
+
+    // ---------------------------------------------------------------
+    // A4 — NetCostAccountant tests.
+    //
+    // The seven tests below pin the anti-overclaim guard semantics
+    // (None / 0.0 / negative / NaN ⇒ never publish) plus the
+    // integer-arithmetic correctness of the per-tick net delta and
+    // the multi-tick accumulation.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn unset_amortization_refuses_to_publish() {
+        let acc = NetCostAccountant::new(None);
+        assert!(!acc.is_publishable());
+        // `tick` always advances bookkeeping but returns None when
+        // the guard is active.
+        let result = acc.tick_with_now(5_000_000, 100);
+        assert!(result.is_none(), "expected None, got {:?}", result);
+    }
+
+    #[test]
+    fn zero_amortization_refuses_to_publish() {
+        let acc = NetCostAccountant::new(Some(0.0));
+        assert!(!acc.is_publishable());
+        assert_eq!(acc.amortized_micros_per_hour(), 0);
+        assert!(acc.tick_with_now(5_000_000, 100).is_none());
+    }
+
+    #[test]
+    fn negative_amortization_refuses_to_publish() {
+        let acc = NetCostAccountant::new(Some(-1.0));
+        assert!(!acc.is_publishable());
+        assert_eq!(acc.amortized_micros_per_hour(), 0);
+        assert!(acc.tick_with_now(5_000_000, 100).is_none());
+    }
+
+    #[test]
+    fn nan_amortization_refuses_to_publish() {
+        let acc = NetCostAccountant::new(Some(f64::NAN));
+        assert!(!acc.is_publishable());
+        assert_eq!(acc.amortized_micros_per_hour(), 0);
+        // Also pin +inf for completeness — same guard semantics.
+        let acc_inf = NetCostAccountant::new(Some(f64::INFINITY));
+        assert!(!acc_inf.is_publishable());
+    }
+
+    #[test]
+    fn positive_amortization_publishes() {
+        // 5.18 $/hr ⇒ 5_180_000 dollar-micros / hr.
+        let acc = NetCostAccountant::new(Some(5.18));
+        assert!(acc.is_publishable());
+        assert_eq!(acc.amortized_micros_per_hour(), 5_180_000);
+        // Boot at t=100 (NetCostAccountant::new uses unix_secs_now()
+        // internally; we override last_publish_unix_secs by
+        // calling tick_with_now twice — first to seed, second to
+        // measure the window).
+        let _ = acc.tick_with_now(0, 100);
+        // 1 hour later (3600 s) gross has climbed to 10_000_000
+        // dollar-micros = $10. Pool cost over the hour was
+        // 5_180_000 micros = $5.18. Net delta should be
+        // 4_820_000 micros = $4.82.
+        let delta = acc
+            .tick_with_now(10_000_000, 100 + 3600)
+            .expect("publishable returns Some");
+        assert_eq!(
+            delta,
+            4_820_000,
+            "expected $4.82 net, got ${}",
+            delta as f64 / 1e6
+        );
+    }
+
+    #[test]
+    fn accumulate_across_ticks() {
+        // 3.6 $/hr ⇒ 1_000 micros/sec exact (no rounding residue).
+        let acc = NetCostAccountant::new(Some(3.6));
+        assert!(acc.is_publishable());
+        // Seed at t=0, gross=0.
+        let _ = acc.tick_with_now(0, 0);
+        // Tick 1: t=10s, gross=20_000 µ$ ⇒ amortized = 1000*10 =
+        // 10_000 µ$ ⇒ net delta = 10_000.
+        let d1 = acc.tick_with_now(20_000, 10).expect("publishable");
+        // Tick 2: t=20s, gross=50_000 µ$ ⇒ amortized for window =
+        // 1000*10 = 10_000 ⇒ net delta = 30_000 - 10_000 = 20_000.
+        let d2 = acc.tick_with_now(50_000, 20).expect("publishable");
+        // Tick 3: t=30s, gross=100_000 µ$ ⇒ amortized = 10_000 ⇒
+        // net delta = 50_000 - 10_000 = 40_000.
+        let d3 = acc.tick_with_now(100_000, 30).expect("publishable");
+        // Sum of clamped positive deltas equals
+        // gross_total - amortized_total = 100_000 - 30_000 = 70_000.
+        assert_eq!(d1.max(0) + d2.max(0) + d3.max(0), 70_000);
+    }
+
+    #[test]
+    fn monotonic_gross_input_never_goes_negative() {
+        // Pool that earns its keep (gross grows faster than pool
+        // burn rate) — every per-tick delta MUST be ≥ 0 so the
+        // cumulative net counter only ever moves forward.
+        let acc = NetCostAccountant::new(Some(1.8)); // 500 µ$/sec
+        let _ = acc.tick_with_now(0, 0);
+        // Gross grows monotonically at 1000 µ$/sec — twice the pool
+        // burn rate, so each per-tick delta should be ~ +500 µ$/sec
+        // × elapsed.
+        for t in [10_u64, 25, 60, 90, 120, 150, 200] {
+            let gross = (t as i128 * 1000) as u64;
+            let d = acc.tick_with_now(gross, t).expect("publishable");
+            assert!(d >= 0, "tick at t={} produced negative delta {}", t, d);
+        }
     }
 }

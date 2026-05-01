@@ -1131,6 +1131,67 @@ pub static S3_DOLLARS_SAVED_RATE_CENTS_PER_SEC: Lazy<IntGaugeVec> = Lazy::new(||
     .expect("register s3_dollars_saved_rate_cents_per_sec")
 });
 
+/// **A4 (rc.7)** — *net* dollars-saved counter.
+///
+/// SHELF-40 ships the gross savings counter
+/// ([`S3_DOLLARS_SAVED_TOTAL`]); procurement asks the next
+/// question — *minus the cost of running the shelf pool itself*.
+/// This counter answers it by subtracting the operator-supplied
+/// amortized pool cost (`cache.cost.amortizedDollarsPerHour`,
+/// stored in [`SHELF_POOL_AMORTIZED_DOLLARS_PER_HOUR`]) from the
+/// per-tick gross delta. The accountant runs in
+/// `crate::cost::spawn_net_accountant`.
+///
+/// **Unit**: integer **dollar-micros** (`1 cent = 10_000 µ$`,
+/// `1 dollar = 1_000_000 µ$`). Divide by `1e6` to render dollars.
+/// The gross counter ships in cents; the accountant converts
+/// before subtracting so the units inside this counter stay
+/// consistent.
+///
+/// **Anti-overclaim guard**: this counter is only credited when
+/// the operator has explicitly set
+/// `cache.cost.amortizedDollarsPerHour` to a positive, finite
+/// number. Unset / zero / negative / NaN ⇒ counter stays at zero
+/// (reading the gauge confirms the misconfig). Defaulting to a
+/// silent zero would inflate net savings procurement-side by the
+/// full pool cost.
+pub static S3_DOLLARS_SAVED_NET_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_s3_dollars_saved_net_total",
+        "A4 (rc.7) Cumulative *net* dollars saved (gross S3 + \
+         data-transfer savings on shelf_s3_dollars_saved_total \
+         minus amortized shelf-pool cost). Stored as integer \
+         **dollar-micros**; divide by 1e6 for dollars. Only \
+         credited when cache.cost.amortizedDollarsPerHour is \
+         explicitly set; the SHELF_POOL_AMORTIZED_DOLLARS_PER_HOUR \
+         gauge reports the active configuration.",
+        &["region"],
+        REGISTRY
+    )
+    .expect("register s3_dollars_saved_net_total")
+});
+
+/// **A4 (rc.7)** — amortized shelf-pool cost gauge.
+///
+/// Always exposed (regardless of whether the net counter
+/// publishes) so dashboards can flag the unset state explicitly.
+/// `0` ⇒ operator has not configured `cache.cost.amortizedDollarsPerHour`
+/// and the net counter will stay at zero until they do.
+///
+/// **Unit**: integer **dollar-micros per hour**. Divide by `1e6`
+/// for dollars-per-hour.
+pub static SHELF_POOL_AMORTIZED_DOLLARS_PER_HOUR: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge_with_registry!(
+        "shelf_pool_amortized_dollars_per_hour",
+        "A4 (rc.7) Amortized shelf-pool cost per hour, in integer \
+         **dollar-micros** (divide by 1e6 for $/hr). 0 = unset; \
+         operator must configure cache.cost.amortizedDollarsPerHour \
+         for shelf_s3_dollars_saved_net_total to publish.",
+        REGISTRY
+    )
+    .expect("register shelf_pool_amortized_dollars_per_hour")
+});
+
 /// SHELF-46 — bloom-aware footer admission classification counter.
 /// Bumped once per s3-shim GET request that runs through
 /// [`crate::parquet_admit::BloomAdmission::record_classification`].
@@ -1347,6 +1408,9 @@ pub const EXPOSED_SERIES: &[&str] = &[
     // SHELF-40 — audit-able dollars-saved counter + rolling rate.
     "shelf_s3_dollars_saved_total",
     "shelf_s3_dollars_saved_rate_cents_per_sec",
+    // A4 (rc.7) — net dollars-saved counter + amortized-cost gauge.
+    "shelf_s3_dollars_saved_net_total",
+    "shelf_pool_amortized_dollars_per_hour",
     // SHELF-42 — A/B tag receive path.
     "shelf_hits_by_tag_total",
     "shelf_misses_by_tag_total",
@@ -1461,6 +1525,8 @@ mod tests {
             CONDITIONAL_ERROR_TOTAL.desc(),
             S3_DOLLARS_SAVED_TOTAL.desc(),
             S3_DOLLARS_SAVED_RATE_CENTS_PER_SEC.desc(),
+            S3_DOLLARS_SAVED_NET_TOTAL.desc(),
+            SHELF_POOL_AMORTIZED_DOLLARS_PER_HOUR.desc(),
             HITS_BY_TAG_TOTAL.desc(),
             MISSES_BY_TAG_TOTAL.desc(),
             S3_SHIM_RESPONSE_BYTES_BY_TAG_TOTAL.desc(),
@@ -1624,6 +1690,11 @@ mod tests {
         S3_DOLLARS_SAVED_RATE_CENTS_PER_SEC
             .with_label_values(&["us-east-1", "hit_memory"])
             .set(0);
+        // A4 (rc.7) — touch net counter + amortized-cost gauge.
+        S3_DOLLARS_SAVED_NET_TOTAL
+            .with_label_values(&["us-east-1"])
+            .inc_by(0);
+        SHELF_POOL_AMORTIZED_DOLLARS_PER_HOUR.set(0);
         HITS_BY_TAG_TOTAL
             .with_label_values(&["metadata", "none"])
             .inc_by(0);
