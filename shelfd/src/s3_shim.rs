@@ -746,21 +746,34 @@ async fn run_conditional_get(
             // not affect correctness — we still serve `bytes` to the
             // caller. The closure-based `get_or_fetch` is the only
             // public ingress that runs admission consistently.
+            //
+            // **B3 (rc.7)** — derive the table label from the same
+            // raw S3 `key` the conditional GET used so the
+            // intermediate-table gate sees the same admission
+            // signal as the regular path. Re-population for a
+            // table flagged transient should also short-circuit.
             if let Some(new_etag) = new_etag.as_deref() {
                 if let Ok(new_key) = key_from_tuple(new_etag.as_bytes(), offset, length, 0) {
                     let bytes_for_cache = bytes.clone();
+                    let table_label_for_admit = table_label(key);
                     let _ = state
                         .store
-                        .get_or_fetch(pool, new_key, state.admission.as_ref(), async move {
-                            // **A6 (rc.7)** — repopulate-on-revalidate
-                            // is logically an *origin* fetch: the
-                            // bytes came from the conditional GET to
-                            // origin, not from a peer. Tagging as
-                            // `Origin` keeps the cooperative gate
-                            // out of the way of cross-snapshot
-                            // freshness recovery.
-                            Ok((bytes_for_cache, crate::coop_admission::FetchSource::Origin))
-                        })
+                        .get_or_fetch_for_table(
+                            pool,
+                            new_key,
+                            table_label_for_admit.as_ref(),
+                            state.admission.as_ref(),
+                            async move {
+                                // **A6 (rc.7)** — repopulate-on-revalidate
+                                // is logically an *origin* fetch: the
+                                // bytes came from the conditional GET to
+                                // origin, not from a peer. Tagging as
+                                // `Origin` keeps the cooperative gate
+                                // out of the way of cross-snapshot
+                                // freshness recovery.
+                                Ok((bytes_for_cache, crate::coop_admission::FetchSource::Origin))
+                            },
+                        )
                         .await;
                 }
             }
@@ -1175,9 +1188,22 @@ pub async fn handle_get_object(
         }
         crate::parquet_admit::BloomKind::NotApplicable => state.admission.as_ref(),
     };
+    // **B3 (rc.7)** — derive the Iceberg `schema.table` label from
+    // the raw S3 key BEFORE calling `get_or_fetch_for_table` so the
+    // intermediate-table admission gate can short-circuit before
+    // the policy / LODC / rate / coop chain. Falls back to the
+    // `"other"` sentinel for non-Iceberg paths; the gate is a
+    // strict no-op on `"other"`. See ADR-0038 + s3_shim::table_label.
+    let table_label_for_admit = table_label(&key);
     let outcome = state
         .store
-        .get_or_fetch(pool, key_obj, admission_for_call, fetcher)
+        .get_or_fetch_for_table(
+            pool,
+            key_obj,
+            table_label_for_admit.as_ref(),
+            admission_for_call,
+            fetcher,
+        )
         .await;
 
     // SHELF-30 — publish the leader's bytes to any followers that

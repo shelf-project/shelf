@@ -1432,6 +1432,60 @@ pub static COOP_PRIMARY_FORCE_ADMITS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("register coop_primary_force_admits_total")
 });
 
+/// **B3 (rc.7)** — admit refusals from the transient-table gate.
+/// Each tick is one Foyer insert AND one NVMe write the cache
+/// declined to pay because the table's snapshot retention (or
+/// explicit `shelf.cache-policy` property) flagged it as
+/// intermediate / scratch. Pair with
+/// `shelf_admissions_total{decision="reject_transient"}` for
+/// cross-check. Stays flat on a stock OSS deployment because the
+/// gate ships default-off (`cache.transientAdmission.enabled =
+/// false`). See ADR-0038.
+pub static TRANSIENT_REFUSALS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_transient_refusals_total",
+        "B3 (rc.7) Admit refusals for tables flagged transient \
+         (intermediate / scratch). Saves NVMe + write amplification.",
+        &["table"],
+        REGISTRY
+    )
+    .expect("register transient_refusals_total")
+});
+
+/// **B3 (rc.7)** — number of per-table policy decisions held in
+/// the in-memory cache. Bounded by the actual table count seen
+/// since boot (≤ ~500 tables in cdp; see
+/// `HITS_BY_TABLE_TOTAL` for the cardinality budget). Useful as a
+/// quick saturation signal: if the gauge exceeds the expected
+/// table count the operator should investigate cardinality leaks
+/// (hex-blob keys, attacker traffic).
+pub static TRANSIENT_DECISIONS_CACHED: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge_with_registry!(
+        "shelf_transient_decisions_cached",
+        "B3 (rc.7) Number of table-level policy decisions \
+         currently held in the in-memory decision cache.",
+        REGISTRY
+    )
+    .expect("register transient_decisions_cached")
+});
+
+/// **B3 (rc.7)** — `metadata.json` fetch failures during a
+/// transient-policy refresh. Per-table label (low cardinality —
+/// bounded by the cluster's table count). On error the gate
+/// stays at fail-open `Admit`, so a non-zero value here is an
+/// operability signal (S3 throttling? wrong bucket policy?), not
+/// a correctness signal.
+pub static TRANSIENT_REFRESH_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_transient_refresh_errors_total",
+        "B3 (rc.7) metadata.json fetch errors during \
+         transient-policy refresh. Falls back to Admit (fail-open).",
+        &["table"],
+        REGISTRY
+    )
+    .expect("register transient_refresh_errors_total")
+});
+
 /// **A4 (rc.7)** — amortized shelf-pool cost gauge.
 ///
 /// Always exposed (regardless of whether the net counter
@@ -1682,6 +1736,10 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_coop_peer_admits_total",
     "shelf_coop_peer_drops_total",
     "shelf_coop_primary_force_admits_total",
+    // B3 (rc.7) — intermediate-table opt-out admission gate.
+    "shelf_transient_refusals_total",
+    "shelf_transient_decisions_cached",
+    "shelf_transient_refresh_errors_total",
     // SHELF-42 — A/B tag receive path.
     "shelf_hits_by_tag_total",
     "shelf_misses_by_tag_total",
@@ -1811,6 +1869,9 @@ mod tests {
             COOP_PEER_ADMITS_TOTAL.desc(),
             COOP_PEER_DROPS_TOTAL.desc(),
             COOP_PRIMARY_FORCE_ADMITS_TOTAL.desc(),
+            TRANSIENT_REFUSALS_TOTAL.desc(),
+            TRANSIENT_DECISIONS_CACHED.desc(),
+            TRANSIENT_REFRESH_ERRORS_TOTAL.desc(),
             HITS_BY_TAG_TOTAL.desc(),
             MISSES_BY_TAG_TOTAL.desc(),
             S3_SHIM_RESPONSE_BYTES_BY_TAG_TOTAL.desc(),
@@ -2008,6 +2069,22 @@ mod tests {
         // includes it on every freshly booted pod.
         ADMISSIONS_TOTAL
             .with_label_values(&["rowgroup", "reject_coop"])
+            .inc_by(0);
+        // B3 (rc.7) — pre-touch the new transient-gate series so
+        // a stock OSS deploy publishes them as zeros even with the
+        // gate default-off.
+        TRANSIENT_REFUSALS_TOTAL
+            .with_label_values(&["other"])
+            .inc_by(0);
+        TRANSIENT_DECISIONS_CACHED.set(0);
+        TRANSIENT_REFRESH_ERRORS_TOTAL
+            .with_label_values(&["other"])
+            .inc_by(0);
+        // B3 (rc.7) — also pre-touch the new `reject_transient`
+        // decision label on the existing `shelf_admissions_total`
+        // series so dashboards see the child on every booted pod.
+        ADMISSIONS_TOTAL
+            .with_label_values(&["rowgroup", "reject_transient"])
             .inc_by(0);
         HITS_BY_TAG_TOTAL
             .with_label_values(&["metadata", "none"])

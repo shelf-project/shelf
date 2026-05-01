@@ -512,6 +512,16 @@ pub struct FoyerStore {
     /// `enabled = false` and short-circuits inside
     /// `should_admit_peer_bytes` for ~zero overhead. See ADR-0037.
     coop_gate: crate::coop_admission::CoopAdmissionGate,
+    /// **B3 (rc.7)** — intermediate-table opt-out admission gate.
+    /// Consulted on every admit chain run AFTER the A2 drain check
+    /// but BEFORE the SHELF-25 / SHELF-21e / SHELF-29 / A6 chain so
+    /// it short-circuits the more expensive W-TinyLFU + LODC + rate
+    /// work. Held behind `Arc<_>` so the same gate instance can be
+    /// cheaply cloned to background-refresh tasks. The default-
+    /// constructed gate has `enabled = false` and is a strict no-op
+    /// at the admit site, so non-opt-in deployments pay nothing.
+    /// See ADR-0038.
+    transient_gate: std::sync::Arc<crate::transient_admission::TransientGate>,
 }
 
 impl FoyerStore {
@@ -756,6 +766,22 @@ impl FoyerStore {
                 .inc_by(0);
         }
 
+        // **B3 (rc.7)** — pre-touch the transient-gate counters so a
+        // freshly booted, idle pod publishes them as zeros. The
+        // `other` label is the s3_shim sentinel for non-Iceberg
+        // paths; pre-touching it keeps dashboards green even on a
+        // cluster whose first request hits a non-Iceberg key.
+        crate::metrics::TRANSIENT_REFUSALS_TOTAL
+            .with_label_values(&["other"])
+            .inc_by(0);
+        crate::metrics::TRANSIENT_REFRESH_ERRORS_TOTAL
+            .with_label_values(&["other"])
+            .inc_by(0);
+        crate::metrics::TRANSIENT_DECISIONS_CACHED.set(0);
+        crate::metrics::ADMISSIONS_TOTAL
+            .with_label_values(&[pool_label(Pool::RowGroup), "reject_transient"])
+            .inc_by(0);
+
         Ok(Self {
             metadata,
             rowgroup,
@@ -769,6 +795,9 @@ impl FoyerStore {
             coop_gate: crate::coop_admission::CoopAdmissionGate::new(
                 crate::coop_admission::CoopAdmissionConfig::default(),
             ),
+            transient_gate: std::sync::Arc::new(crate::transient_admission::TransientGate::new(
+                crate::transient_admission::TransientAdmissionConfig::default(),
+            )),
         })
     }
 
@@ -831,6 +860,35 @@ impl FoyerStore {
     /// directly via `should_admit_peer_bytes`.
     pub fn coop_admission_enabled(&self) -> bool {
         self.coop_gate.is_enabled()
+    }
+
+    /// **B3 (rc.7)** — wire the operator-configured intermediate-table
+    /// admit gate. Builder mirrors [`FoyerStore::with_coop_admission`]
+    /// so `main.rs` reads as a one-liner. Called ONCE during boot.
+    /// The default-constructed gate (built in `open`) has
+    /// `enabled = false` and is a strict no-op at the admit site, so
+    /// this builder is only required when the operator opts in via
+    /// `cache.transientAdmission.enabled = true`. See ADR-0038.
+    pub fn with_transient_admission(
+        mut self,
+        gate: std::sync::Arc<crate::transient_admission::TransientGate>,
+    ) -> Self {
+        self.transient_gate = gate;
+        self
+    }
+
+    /// **B3 (rc.7)** — `true` when the transient-admission gate's
+    /// master switch is flipped on. Exposed for `/stats` and tests.
+    pub fn transient_admission_enabled(&self) -> bool {
+        self.transient_gate.is_enabled()
+    }
+
+    /// **B3 (rc.7)** — clone the live gate handle. Useful for
+    /// background tasks (e.g. a Prometheus updater) that want to
+    /// publish [`crate::transient_admission::TransientGate::decisions_cached`]
+    /// without holding the entire `FoyerStore`.
+    pub fn transient_gate(&self) -> std::sync::Arc<crate::transient_admission::TransientGate> {
+        self.transient_gate.clone()
     }
 
     /// **B1** — reconcile the configured compression mode with the
@@ -1092,10 +1150,42 @@ impl FoyerStore {
     ///    the bytes are returned but not cached.
     ///
     /// Errors from `fetch` propagate to every concurrent caller.
+    ///
+    /// **B3 (rc.7)**: this entry point passes the sentinel
+    /// `"other"` for the transient-gate's table label so the gate
+    /// is a strict no-op for callers that do not already know the
+    /// originating Iceberg `schema.table`. Use
+    /// [`FoyerStore::get_or_fetch_for_table`] to opt in to the
+    /// gate from a call site that has the raw S3 key (and therefore
+    /// can compute the label via [`crate::s3_shim::table_label`]).
     pub async fn get_or_fetch<A, F>(
         &self,
         pool: Pool,
         key: Key,
+        admission: &A,
+        fetch: F,
+    ) -> crate::Result<ReadOutcome>
+    where
+        A: crate::admission::AdmissionPolicy + ?Sized,
+        F: Future<Output = crate::Result<(Bytes, crate::coop_admission::FetchSource)>> + Send,
+    {
+        self.get_or_fetch_for_table(pool, key, "other", admission, fetch)
+            .await
+    }
+
+    /// **B3 (rc.7)** — opt-in variant of [`FoyerStore::get_or_fetch`]
+    /// that lets the caller hand in the originating Iceberg
+    /// `schema.table` label. The label is consulted by the
+    /// transient-table admission gate (see ADR-0038); the rest of
+    /// the admit chain (drain → policy → LODC → rate → coop) is
+    /// unchanged. Pass `"other"` (or call [`FoyerStore::get_or_fetch`]
+    /// directly) when the originating path is not Iceberg or when
+    /// the label cannot be derived without extra work.
+    pub async fn get_or_fetch_for_table<A, F>(
+        &self,
+        pool: Pool,
+        key: Key,
+        table_label: &str,
         admission: &A,
         fetch: F,
     ) -> crate::Result<ReadOutcome>
@@ -1221,6 +1311,33 @@ impl FoyerStore {
                 .inc();
             crate::metrics::ADMISSIONS_TOTAL
                 .with_label_values(&[pool_label, "reject_drain"])
+                .inc();
+            return Ok(ReadOutcome::Miss(bytes));
+        }
+
+        // **B3 (rc.7)** — intermediate-table opt-out. Consulted AFTER
+        // the A2 drain check (drain wins because the pod is going
+        // away) but BEFORE the SHELF-25 / SHELF-21e / SHELF-29 / A6
+        // chain so a refusal short-circuits the more expensive
+        // W-TinyLFU + LODC + rate-limiter work. The gate is a strict
+        // no-op when:
+        //   - `cache.transientAdmission.enabled = false` (default), or
+        //   - the table label is the `"other"` sentinel (non-Iceberg
+        //     path, or caller used `get_or_fetch` instead of
+        //     `get_or_fetch_for_table`), or
+        //   - no override or refreshed metadata flags the table.
+        // Pinned keys bypass the gate (operator-blessed; same
+        // invariant the cooperative gate honours).
+        // See `transient_admission.rs` + ADR-0038.
+        if !ctx.pinned
+            && self.transient_gate.decide(table_label)
+                == crate::transient_admission::TableAdmission::RefuseTransient
+        {
+            crate::metrics::TRANSIENT_REFUSALS_TOTAL
+                .with_label_values(&[table_label])
+                .inc();
+            crate::metrics::ADMISSIONS_TOTAL
+                .with_label_values(&[pool_label, "reject_transient"])
                 .inc();
             return Ok(ReadOutcome::Miss(bytes));
         }

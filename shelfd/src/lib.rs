@@ -121,6 +121,9 @@ pub mod store;
 pub mod table_props;
 pub mod telemetry;
 pub mod text_index;
+// **B3 (rc.7)** — intermediate-table opt-out admission gate. See
+// ADR-0038. Default-off via `cache.transientAdmission.enabled=false`.
+pub mod transient_admission;
 #[cfg(feature = "ui")]
 pub mod ui;
 pub mod warm_sampler;

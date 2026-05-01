@@ -522,6 +522,58 @@ cache:
     replicationFactor: 2
 
   # ---------------------------------------------------------------------------
+  # B3 (rc.7) — Intermediate-table opt-out admission gate.
+  #
+  # dbt batch + scratch tables on a busy replica churn through cache:
+  # they are written, read once, and snapshot-expire in 1-3 days —
+  # well before a cache admission has paid itself back. B3 refuses
+  # admits for tables flagged transient so the saved NVMe + write-
+  # amplification stay on the hot tables that actually benefit.
+  #
+  # `enabled = false` is the safety default. A freshly deployed pod
+  # behaves identically to pre-B3 (the gate is a strict no-op).
+  # Operators flip the switch per-cluster after the
+  # `shelf_transient_refusals_total` /
+  # `shelf_transient_decisions_cached` /
+  # `shelf_transient_refresh_errors_total` panels have been added.
+  #
+  # Decision sources, highest priority first:
+  #   1. `overrides[<schema.table>]` — explicit operator override.
+  #   2. `shelf.cache-policy = transient` Iceberg table property.
+  #   3. `history.expire.max-snapshot-age-ms` < `transientThreshold`.
+  # Tables not matching any source admit normally (fail-open).
+  #
+  # B3 is admit-only: reads are never gated. Composes with the rest
+  # of the chain (drain → B3 → policy → LODC → rate → coop) and each
+  # gate's blast radius stays observable on
+  # `shelf_admissions_total{decision=...}`. See ADR-0038.
+  # ---------------------------------------------------------------------------
+  transientAdmission:
+    # -- Master switch. Default OFF; turn on per-cluster after the
+    # operator dashboards have been sized for the new counters.
+    enabled: false
+    # -- Tables whose Iceberg `history.expire.max-snapshot-age-ms`
+    # is below this duration are flagged transient. Default 7 days,
+    # matching the typical dbt batch + scratch retention window.
+    transientThreshold: 168h
+    # -- How long a refreshed per-table decision stays authoritative
+    # before the next admission triggers a background refresh.
+    # Default 10 min; table policy changes are rare so a long TTL
+    # keeps the metadata.json fetch budget low.
+    decisionCacheTtl: 10m
+    # -- Explicit per-table overrides, keyed on `<schema>.<table>`.
+    # Wins over anything derived from metadata.json. Use this to
+    # force-refuse known scratch namespaces without waiting for the
+    # property-based detection to land. Each value is one of
+    # `admit` | `refuseTransient`.
+    # Example shape (do not commit live; bucket / namespace names
+    # belong in operator overlays):
+    #   overrides:
+    #     scratch.tmp_join_a: refuseTransient
+    #     analytics.gold_revenue: admit
+    overrides: {}
+
+  # ---------------------------------------------------------------------------
   # SHELF-45 — compaction-aware re-warm reactor.
   #
   # When an Iceberg table is compacted (`ALTER TABLE … EXECUTE optimize`,

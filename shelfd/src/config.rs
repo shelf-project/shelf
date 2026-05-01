@@ -136,6 +136,20 @@ pub struct Config {
     /// See ADR-0037.
     #[serde(default)]
     pub coop_admission: crate::coop_admission::CoopAdmissionConfig,
+
+    /// **B3 (rc.7)** — intermediate-table opt-out admission gate.
+    /// Default-OFF (opt-in for safety; first deploy turns it on
+    /// per-cluster after the dashboards have been sized for the
+    /// new `shelf_transient_refusals_total` /
+    /// `shelf_transient_decisions_cached` /
+    /// `shelf_transient_refresh_errors_total` counters). Refuses
+    /// cache admission for tables whose Iceberg
+    /// `history.expire.max-snapshot-age-ms` is below
+    /// `transient_threshold` (default 7 days) OR whose
+    /// `shelf.cache-policy` table property is `transient`.
+    /// Reads are unaffected — B3 is admit-only. See ADR-0038.
+    #[serde(default)]
+    pub transient_admission: crate::transient_admission::TransientAdmissionConfig,
 }
 
 fn default_head_lru_entries() -> u64 {
