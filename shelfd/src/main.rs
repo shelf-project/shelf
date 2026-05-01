@@ -163,11 +163,27 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // surfaced on the dashboard. See ADR-0037.
     let coop_gate = shelfd::coop_admission::CoopAdmissionGate::new(config.coop_admission.clone());
 
+    // **B3 (rc.7)** — wire the intermediate-table opt-out gate from
+    // `cache.transientAdmission`. Default-off; a stock OSS deploy
+    // behaves identically to pre-B3 (the gate is a strict no-op
+    // when `enabled = false`). v1 ships without an automatic
+    // metadata.json refresher: the gate consults the `overrides`
+    // map only, which gives operators an immediate-value lever
+    // without the bucket-routing wiring a full refresher would
+    // require. A follow-up B3.1 will plug an
+    // `S3MetadataReader` impl that mirrors the rewarm-poller's
+    // `S3MetadataSource` and consumes a watchedTables list. See
+    // ADR-0038.
+    let transient_gate = std::sync::Arc::new(shelfd::transient_admission::TransientGate::new(
+        config.transient_admission.clone(),
+    ));
+
     let store = Arc::new(
         FoyerStore::open(&config.pools)
             .await?
             .with_drain(drain_signal.clone(), config.drain.refuse_admits)
-            .with_coop_admission(coop_gate),
+            .with_coop_admission(coop_gate)
+            .with_transient_admission(transient_gate.clone()),
     );
     if config.drain.refuse_admits {
         tracing::info!(
@@ -190,6 +206,20 @@ async fn run(args: Args) -> anyhow::Result<()> {
             replication_factor = config.coop_admission.replication_factor,
             "A6 cooperative peer-admission gate disabled (cache.coopAdmission.enabled=false); \
              every peer-fetched byte will admit unchanged"
+        );
+    }
+    if config.transient_admission.enabled {
+        tracing::info!(
+            transient_threshold = ?config.transient_admission.transient_threshold,
+            decision_cache_ttl = ?config.transient_admission.decision_cache_ttl,
+            overrides = config.transient_admission.overrides.len(),
+            "B3 intermediate-table admission gate engaged (enabled=true)"
+        );
+    } else {
+        tracing::debug!(
+            "B3 intermediate-table admission gate disabled \
+             (cache.transientAdmission.enabled=false); every Iceberg \
+             table admits unchanged"
         );
     }
     let router = Arc::new(Router::new());
