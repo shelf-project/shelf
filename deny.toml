@@ -57,6 +57,14 @@ ignore = [
     # CRLs (no client-cert auth on the data plane); rustls bump
     # tracked under SHELF-30.
     { id = "RUSTSEC-2026-0104", reason = "ticket: SHELF-30; expiry: 2026-07-27" },
+
+    # lru 0.12.5 IterMut soundness issue (RUSTSEC-2026-0002). shelfd's
+    # LRU usage (head_lru.rs) only ever iterates via `iter()` (shared),
+    # never `iter_mut()`, so the unsound aliasing path is not reachable
+    # in our code paths. Fix is `cargo update -p lru` to >=0.16.3 which
+    # cascades a non-trivial set of breaking API renames; bump tracked
+    # under SHELF-30.
+    { id = "RUSTSEC-2026-0002", reason = "ticket: SHELF-30; expiry: 2026-07-27" },
 ]
 
 [licenses]

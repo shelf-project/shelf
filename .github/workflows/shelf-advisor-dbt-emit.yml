@@ -26,6 +26,13 @@ permissions:
 jobs:
   emit:
     runs-on: ubuntu-latest
+    # Only run when the fork-specific configuration is actually set.
+    # The OSS canonical repo at shelf-project/shelf does NOT define
+    # these vars (they are fork-scoped), so the nightly schedule would
+    # otherwise fail the `aws-actions/configure-aws-credentials` step
+    # every morning and email the maintainers. Guarding the job keeps
+    # the schedule useful for real forks while staying silent here.
+    if: ${{ vars.SHELF_DBT_REPO != '' && vars.SHELF_ADVISOR_AWS_ROLE != '' && vars.MV_CANDIDATES_S3_PREFIX != '' }}
     env:
       DBT_REPO: "${{ vars.SHELF_DBT_REPO }}"
       # S3 prefix for nightly recommendations.json. Set the

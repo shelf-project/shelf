@@ -127,11 +127,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Run OSV-Scanner
+        # osv-scanner v2 CLI removed the `--skip-git` flag (the docker
+        # image rejects it with "flag provided but not defined"). Git
+        # metadata isn't a lockfile source anyway; the scanner falls
+        # back to the configured lockfiles under clients/trino.
         uses: google/osv-scanner-action/osv-scanner-action@v2.3.5
         with:
           scan-args: |-
             --recursive
-            --skip-git
             --config=.osv-scanner.toml
             clients/trino
 
@@ -210,30 +213,37 @@ jobs:
           fi
 
   # -------------------------------------------------------------------
-  # Secret scanning (gitleaks on diff, trufflehog on PR range)
+  # Secret scanning — gitleaks CLI (MIT-licensed, free for org use).
+  # The stock `gitleaks/gitleaks-action@v2` requires a paid licence for
+  # GitHub-organisation-owned repos ("[org] is an organization. License
+  # key is required."), which we intentionally do not pay for on the
+  # OSS tree. Invoke the upstream CLI directly instead — it is the same
+  # scanner, same rules, same exit code, just without the Actions
+  # wrapper that gates on GITLEAKS_LICENSE.
   # -------------------------------------------------------------------
   gitleaks:
     name: gitleaks
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # The action posts a PR summary, which requires `pull-requests: read`
-    # in addition to the workflow-level `contents: read`. Without it,
-    # the action fails on PRs from forks with
-    # "Resource not accessible by integration".
     permissions:
       contents: read
-      pull-requests: read
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_ENABLE_COMMENTS: "false"
-          GITLEAKS_ENABLE_SUMMARY: "true"
+      - name: Install gitleaks CLI
+        run: |
+          set -euo pipefail
+          ver="8.18.0"
+          curl -fsSL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${ver}/gitleaks_${ver}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Scan git history for secrets
+        run: |
+          set -euo pipefail
+          gitleaks detect --source . --redact --verbose --exit-code 1
 
   # -------------------------------------------------------------------
   # IAM grep guard — no `*:*` patterns in shipped IAM samples.
