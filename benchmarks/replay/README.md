@@ -15,7 +15,7 @@ continues as a project.
 The five gate metrics (all must hold for 7 consecutive days):
 
 1. Cumulative hit rate ≥ 71 %.
-2. `GOLD_DBT` ok-rate ≥ 99.9 %.
+2. `<your_critical_dag>` ok-rate ≥ 99.9 %.
 3. p95 ≤ 120 % of Alluxio baseline.
 4. Shelf-attributed pages = 0.
 5. Oncall surface ≤ 50 % of Alluxio's 7-day rolling rate.

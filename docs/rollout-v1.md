@@ -323,7 +323,7 @@ at the affected replica.
 
 ## 15. References
 
-- [`docs/cluster-handoff.md`](cluster-handoff.md) — prior state;
+- [`docs/rollout-v1/cluster-handoff.md`](cluster-handoff.md) — prior state;
   lists the cluster-gated tickets this rollout closes.
 - [`docs/capacity.md`](capacity.md) — sizing doc, v1-cluster
   worked example in §4.

@@ -26,7 +26,7 @@ bottom of this doc.
 | Facet                   | Value |
 |-------------------------|-------|
 | Primary metric          | Trino `fs.cache` cumulative hit rate (scan-operator `cacheHitPct`) |
-| Guardrails              | `QueryFailedEvent` rate ≤ 1.2× baseline; `GOLD_DBT` ok-rate ≥ 99.9% |
+| Guardrails              | `QueryFailedEvent` rate ≤ 1.2× baseline; `<your_critical_dag>` ok-rate ≥ 99.9% |
 | Target                  | ≥ 45% (5-day rolling) |
 | Rollback threshold      | < 20% for 24h → revert hostPath migration on affected replica |
 | Dashboard               | `trino-stability-overview` (existing) |
@@ -108,19 +108,19 @@ sum(rate(shelf_hits_total[7d]))
   / (sum(rate(shelf_hits_total[7d])) + sum(rate(shelf_misses_total[7d])))
 ```
 
-### 6.4.2 `GOLD_DBT` ok-rate
+### 6.4.2 `<your_critical_dag>` ok-rate
 
 | Facet                   | Value |
 |-------------------------|-------|
-| Primary metric          | `GOLD_DBT` DAG task ok-rate (Airflow) |
+| Primary metric          | `<your_critical_dag>` DAG task ok-rate (Airflow) |
 | Guardrails              | No increase in dbt failure reasons attributed to Shelf |
 | Target                  | ≥ 99.9% over rolling 7 days |
 | Rollback threshold      | < 99.5% for 24h → flip `fs.shelf.enabled=false` |
 | Dashboard               | `airflow-dbt` (existing) + cross-linked from `shelf-overview` |
 
 ```promql
-sum(rate(airflow_task_instance_success_total{dag_id="GOLD_DBT"}[7d]))
-  / sum(rate(airflow_task_instance_end_total{dag_id="GOLD_DBT"}[7d]))
+sum(rate(airflow_task_instance_success_total{dag_id="<your_critical_dag>"}[7d]))
+  / sum(rate(airflow_task_instance_end_total{dag_id="<your_critical_dag>"}[7d]))
 ```
 
 ### 6.4.3 Rep-2 p95 query latency

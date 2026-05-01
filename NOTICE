@@ -1,11 +1,6 @@
 Shelf
 Copyright 2026 The Shelf Authors.
 
-This product was originally developed against an internal Trino-on-EKS
-deployment (see docs/cluster-handoff.md for the operational context the
-project was hardened against) and contributed to the Shelf open-source
-project.
-
 This product includes software from the following third-party projects:
 
 - foyer — https://github.com/foyer-rs/foyer — Apache-2.0

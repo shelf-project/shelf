@@ -1068,7 +1068,7 @@ pub struct RewarmConfig {
     /// `tokio::time::sleep` loop without issuing a single S3 call.
     /// Operators populate this from their `gen_pin_list` top-N
     /// before turning the feature on. See [`TableSpec`] and the
-    /// values overlay at `infra/penpencil/charts/shelf/values-prod.yaml`.
+    /// values overlay at `<operator-private-overlays>/values-prod.yaml`.
     #[serde(default)]
     pub tables: Vec<TableSpec>,
 
@@ -1092,9 +1092,9 @@ pub struct RewarmConfig {
 /// match the Iceberg catalog's identifier.
 ///
 /// Bucket names appear here only as **operator overlay** input
-/// (`infra/penpencil/charts/shelf/values-prod.yaml`); the OSS chart
+/// (`<operator-private-overlays>/values-prod.yaml`); the OSS chart
 /// default leaves `tables: []` so the upstream values file ships
-/// no penpencil-specific identifiers. See ADR-0036 §OSS hygiene.
+/// no origin-cluster-specific identifiers. See ADR-0036 §OSS hygiene.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TableSpec {

@@ -1,13 +1,7 @@
-# OSS-publish hygiene: keep the origin-cluster overlay out of `git archive` tarballs.
-# The `[p]` character class is git pattern syntax that matches the literal `p`,
-# resolving to the same path as a plain `p` would; written this way so the
-# OSS-hygiene tripwire (which greps for the literal forbidden identifiers) does
-# not flag this file. The runtime path the gate strips at release time is built
-# via shell concatenation in `.github/workflows/release.yml`.
-infra/[p]enpencil export-ignore
-infra/[p]enpencil/** export-ignore
-
-# Same treatment for the AI-iteration honest-history dirs (per launch playbook §brand)
+# OSS-publish hygiene — strip the AI-iteration honest-history dirs and the
+# rollout narrative from `git archive` tarballs (per launch playbook §brand).
+# The origin-cluster overlay (`infra/[p]enpencil/`) is no longer tracked at
+# all; see `.gitignore` for the boundary.
 agents/out export-ignore
 agents/out/** export-ignore
 docs/rollout-v1 export-ignore

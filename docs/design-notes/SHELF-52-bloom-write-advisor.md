@@ -5,7 +5,7 @@
 | Status | Implemented (this PR) |
 | Crate | `shelf-advisor` (workspace member; not under `crates/`) |
 | Tier (cost-reduction plan) | Tier-3 |
-| Plan link | `/Users/aamir/.cursor/plans/shelf-cost-reduction-research_97107ffb.plan.md` § Tier-3 #9 |
+| Plan link | `agents/out/03-plan.md` § Tier-3 #9 (cost-reduction research plan) |
 | Related design note | `agents/out/SHELF-52-bloom-advisor.md` (original 2026-04-25 draft) |
 | Depends on | SHELF-37 (event-listener jar, PR #66 — open), SHELF-46 (footer admission, PR #50 — open), SHELF-40 (`Cents` newtype, PR #68 — open) |
 | Blocks | Tier-4 SHELF-G2 (`shelfd::side_bloom`) — wired only if SHELF-52 shows > 30 % of cost in no-writer-bloom tables |

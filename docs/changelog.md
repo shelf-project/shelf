@@ -33,7 +33,7 @@ seeding from 7-day `QueryCompletedEvent` traces, wrapped by
 - SHELF-13 / SHELF-14 / SHELF-18 (cluster half) / SHELF-20 /
 SHELF-21 / SHELF-27 / SHELF-28 — all closed by rollout-v1 and
 14-day post-rollout soak. Cluster-gated chapter in
-`docs/cluster-handoff.md` is retired.
+`docs/rollout-v1/cluster-handoff.md` is retired.
 
 ## Unreleased
 
@@ -77,7 +77,7 @@ client has no UDS transport — full analysis in
 
 - SHELF-13, SHELF-14, SHELF-18 acceptance, SHELF-20 E7,
 SHELF-21 rollout, SHELF-28 drills. See
-`[cluster-handoff.md](./cluster-handoff.md)` for the handoff packet.
+`[cluster-handoff.md](./rollout-v1/cluster-handoff.md)` for the handoff packet.
 
 ## v0.0.1-pre — 2026-04-24
 

@@ -136,4 +136,4 @@ Every scaffold gap here maps to a ticket in the plan. Look for
 | SHELF-28    | Chaos drill driver for `spot-churn/`.                  |
 | SHELF-12    | Docker-compose smoke fixture reused in CI gate.        |
 
-See `/Users/aamir/trino/shelf/agents/out/03-plan.md` §4 for ticket bodies.
+See `agents/out/03-plan.md` §4 for ticket bodies.

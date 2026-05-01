@@ -50,7 +50,7 @@ all* — TPC-DS says nothing about our dashboard cohort; this does.
      scheduled wall-clock offset (scaled by replay speed).
    - Record: latency, hit rate snapshot, scanned bytes, admitted bytes,
      $/query, failure.
-3. Every 10 s, sample cumulative hit rate and GOLD_DBT-equivalent
+3. Every 10 s, sample cumulative hit rate and <your-critical-dag>-equivalent
    ok-rate (computed over the dbt subset of the trace).
 4. Run ends when the last query of the trace is issued.
 

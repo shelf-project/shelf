@@ -4,8 +4,9 @@ Three Python CLIs that gate a per-replica `s3.endpoint` cutover from direct
 S3 to the shelf S3 shim, plus the existing `gen_pin_list.py` (strict-pin
 mode for shelfd `PinListLoader`). The new tools were added on the
 `shelf-tools-stage3` branch and target plan stages **3a** (pin-list
-prewarm) and **3b** (byte-diff smoke harness) of
-`/Users/aamir/.cursor/plans/shelf_zero-downtime_+_capacity_a2fa5fe7.plan.md`.
+prewarm) and **3b** (byte-diff smoke harness) of the
+zero-downtime + capacity rollout plan (see
+`agents/out/03-plan.md` for the canonical plan reference).
 
 | File | Stage | Purpose |
 |---|---|---|

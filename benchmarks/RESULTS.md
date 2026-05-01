@@ -39,14 +39,14 @@ This sub-table is the **kill-switch**. It is the single view the eng-lead
 signs off on before Phase 2 can begin. The gate is evaluated from the
 7-day rolling window of the `replay` benchmark on rep-2.
 
-| date (UTC) | backend | 7-day hit rate | GOLD_DBT ok% | p95 vs Alluxio | Shelf-caused pages | Oncall surface | Verdict |
+| date (UTC) | backend | 7-day hit rate | <your_critical_dag> ok% | p95 vs Alluxio | Shelf-caused pages | Oncall surface | Verdict |
 | ---------- | ------- | -------------- | ------------ | -------------- | ------------------ | -------------- | ------- |
 | _TBD_      | shelf   | —              | —            | —              | —                  | —              | pending |
 
 Targets (all five must hold for 7 consecutive days):
 
 - 7-day cumulative hit rate ≥ 71 %
-- `GOLD_DBT` DAG ok-rate ≥ 99.9 %
+- `<your_critical_dag>` DAG ok-rate ≥ 99.9 %
 - p95 ≤ 120 % of Alluxio baseline
 - Shelf-attributed pages = 0
 - Oncall surface ≤ 50 % of Alluxio's 7-day rolling rate

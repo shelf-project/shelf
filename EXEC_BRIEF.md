@@ -141,7 +141,7 @@ the whole idea.
 
 For the cluster-side hand-off ledger (what was rolled out where, what
 remained on the cluster operator's side), see
-[`docs/cluster-handoff.md`](./docs/cluster-handoff.md).
+[`docs/rollout-v1/cluster-handoff.md`](./docs/rollout-v1/cluster-handoff.md).
 
 ---
 

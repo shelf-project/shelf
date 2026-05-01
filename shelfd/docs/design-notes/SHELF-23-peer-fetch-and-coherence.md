@@ -1,9 +1,9 @@
 # SHELF-23 — Peer-fetch + ETag-conditional GET
 
 Status: in-progress (Agent C, branch `shelf-23-peer-fetch`)
-Plan: `/Users/aamir/.cursor/plans/shelf_zero-downtime_+_capacity_a2fa5fe7.plan.md`,
-Stage 1b. Audit answer 2 ("in-scope") confirms that write-side cross-pod
-coherence (ETag-conditional GET) is in scope for this PR.
+Plan: see `agents/out/03-plan.md` (Stage 1b — zero-downtime + capacity
+rollout plan). Audit answer 2 ("in-scope") confirms that write-side
+cross-pod coherence (ETag-conditional GET) is in scope for this PR.
 
 ## Problem statement
 
@@ -202,6 +202,6 @@ expected to be tiny in steady state, spikes during dbt batch windows.
   integration test using axum-based mock peers, defer the real kind
   harness to a follow-up if needed.
 - **Q4 — RCA report.** Plan refers to
-  `/Users/aamir/trino/shelf/docs/rollout-v1/rca-stage0bc.md` (Agent B's
+  `docs/rollout-v1/rca-stage0bc.md` (Agent B's
   output) for the MR description. Will reference as
   "see rca-stage0bc.md when published" until B publishes.
