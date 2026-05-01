@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-05-01
+
+Hygiene patch — **no functional / runtime / API changes**. Operators
+already on v1.0.0 do not need to upgrade for behaviour reasons; the
+upgrade is recommended only for the OSS-cleanliness improvements
+listed below.
+
+### Changed — OSS hygiene scrub (PR #102)
+
+Targeted user-flagged leak audit on `origin/main` post-v1.0.0:
+
+- Deleted the origin-cluster overlay directory under `infra/`
+  entirely. Previously kept in-tree under `.gitattributes
+  export-ignore` on the assumption that "tarball-excluded" was
+  sufficient — github.com browses the directory at any reachable
+  SHA and Google indexes the default-branch tree within hours of a
+  public flip, so the directory is now `git rm`-d and added to
+  `.gitignore`. Operators keep their site-specific overlay locally
+  untracked.
+- Stripped `/Users/aamir/...` developer-machine paths from 10 files,
+  most importantly `charts/shelf/templates/NOTES.txt` (which printed
+  those paths to every operator on `helm install`). All replaced with
+  repo-relative paths or `github.com/shelf-project/shelf/...` URLs.
+- Stripped the "internal Trino-on-EKS deployment" stanza + the
+  `docs/cluster-handoff.md` cross-reference from `NOTICE`. Keeps only
+  the third-party attribution block.
+- Moved 3 operationally-narrative docs under `docs/rollout-v1/`
+  (already excluded path):
+    * `docs/cluster-handoff.md` → `docs/rollout-v1/cluster-handoff.md`
+    * `shelfd/docs/runbooks/2026-04-preview-{4,8}-rollout.md`
+      → `docs/rollout-v1/shelfd-runbooks/`
+- Replaced `GOLD_DBT` (a specific in-cluster Airflow DAG name) with
+  `<your_critical_dag>` placeholder in 5 docs (`docs/SLO.md`,
+  `docs/runbook.md`, `benchmarks/replay/{SPEC,README}.md`,
+  `benchmarks/RESULTS.md`). SLO formulas still work; operators
+  substitute their own DAG name.
+- Replaced overlay-path references in `shelfd/src/config.rs` doc
+  comments with `<operator-private-overlays>/...` generic wording.
+- `.gitattributes` — dropped now-redundant overlay export-ignore
+  lines (path is gone from `main`).
+- `.github/workflows/release.yml` — simplified the hygiene tripwire:
+  dropped the dead overlay strip step, kept the forbidden-identifier
+  grep as defense-in-depth.
+
+### Note on v1.0.0
+
+The `v1.0.0` tag pins a commit that still contains the origin-cluster
+overlay directory in its tree. Anyone clicking on
+`github.com/shelf-project/shelf/tree/v1.0.0` sees it; pre-v1.0.1
+SHAs reachable through the commit graph likewise. The `main` branch
+(the surface Google indexes) is fully clean as of this release. Per
+supply-chain best practice, the v1.0.0 tag is **not** mutated — its
+image / chart / SBOM / SLSA artefacts at
+`ghcr.io/shelf-project/shelfd:1.0.0` and
+`oci://ghcr.io/shelf-project/charts/shelf:1.0.0` keep their original
+digests. Operators are encouraged to use v1.0.1 going forward.
+
 ## [1.0.0] — 2026-04-30
 
 Initial public release. Shelf is feature-complete for the v1 surface
