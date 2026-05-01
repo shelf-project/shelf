@@ -1,9 +1,9 @@
 # Default values for the Shelf Helm chart.
 #
 # Every non-obvious default below is annotated with its source. Legend:
-#   [plan §N]           = /Users/aamir/trino/shelf/agents/out/03-plan.md section
-#   [BLUEPRINT §N]      = /Users/aamir/trino/shelf/BLUEPRINT.md section
-#   [ADR-NNNN]          = /Users/aamir/trino/shelf/agents/out/adr/NNNN-*.md
+#   [plan §N]           = agents/out/03-plan.md, section N
+#   [BLUEPRINT §N]      = BLUEPRINT.md, section N
+#   [ADR-NNNN]          = agents/out/adr/NNNN-*.md
 #   [placeholder: ...]  = phase-0 benchmark TBD; value is a starting point
 #
 # Overlays in values-dev.yaml / values-staging.yaml / values-prod.yaml refine

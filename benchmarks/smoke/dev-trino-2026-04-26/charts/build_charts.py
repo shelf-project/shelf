@@ -18,7 +18,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-ROOT = pathlib.Path("/Users/aamir/trino/shelf/benchmarks/smoke/dev-trino-2026-04-26")
+ROOT = pathlib.Path(__file__).resolve().parent.parent  # benchmarks/smoke/dev-trino-2026-04-26/
 OUT = ROOT / "charts"
 OUT.mkdir(exist_ok=True)
 

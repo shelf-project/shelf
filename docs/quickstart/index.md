@@ -108,6 +108,6 @@ docker compose down -v     # also wipes MinIO data + Foyer cache
   for the protocol subset Shelf speaks.
 - **Production deploy**: see the Helm chart in `charts/shelfd/` — the
   CI `helm-lint` job keeps it release-clean. A full EKS playbook
-  lives in [`docs/cluster-handoff.md`](../cluster-handoff.md) (ops
+  lives in [`docs/rollout-v1/cluster-handoff.md`](../rollout-v1/cluster-handoff.md) (ops
   handoff packet, not a formal user guide yet — tracked under
   SHELF-13).

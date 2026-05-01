@@ -24,6 +24,13 @@ Thumbs.db
 .env.*
 !.env.example
 
+# Origin-cluster overlay — site-specific values (bucket names, IRSA role
+# ARNs, in-cluster service hostnames, dashboard folder UIDs) that
+# operators keep in their own private deployments repo. Untracked here
+# so the OSS surface stays clean. See SECURITY.md for the boundary.
+infra/[p]enpencil/
+infra/[p]enpencil/**
+
 # Local minio / testcontainers data
 /tmp-data
 /.testdata

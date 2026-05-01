@@ -201,7 +201,7 @@ roll (`helm rev 16`, 2026-04-28 04:31 UTC — see
 `shelfd/docs/runbooks/2026-04-shelf-1-oom.md`) did not actually
 close. No new HTTP verbs, no chart shape changes outside a single
 optional field, no memory-layout changes.
-Rollout runbook: `shelfd/docs/runbooks/2026-04-preview-8-rollout.md`.
+Rollout runbook: `docs/rollout-v1/shelfd-runbooks/2026-04-preview-8-rollout.md`.
 
 ### Why rev 16 was not enough
 

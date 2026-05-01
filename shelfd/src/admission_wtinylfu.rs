@@ -23,7 +23,7 @@
 //! ## Plan citation
 //!
 //! This module implements lever 6 in
-//! `/Users/aamir/.cursor/plans/shelf_algorithmic_optimization_roadmap_e40a11c9.plan.md`
+//! `agents/out/03-plan.md` (algorithmic optimization roadmap)
 //! ("W-TinyLFU admission layer in front of Foyer", SHELF-33, P1).
 //! Composability with the existing size-threshold policy is the
 //! design choice of ADR-0020: W-TinyLFU is the *outer* gate;

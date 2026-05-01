@@ -97,7 +97,7 @@ exactly once when they install the Helm chart. Files affected:
   the evidence. Do not rewrite; link to it from the announce post
   with the "measured internally on the example cluster that
   originated the project" framing.
-- `docs/cluster-handoff.md` — historical record of the v0.5
+- `docs/rollout-v1/cluster-handoff.md` — historical record of the v0.5
   handoff; stays. Add a one-line pointer at the top noting the
   project is now neutral-org.
 
@@ -108,7 +108,7 @@ exactly once when they install the Helm chart. Files affected:
   Internal production query logs cannot go public. Check:
 
   ```bash
-  git -C /Users/aamir/trino/shelf ls-files benchmarks/trino_logs/traces/
+  git ls-files benchmarks/trino_logs/traces/
   # Expected: empty, or only synthetic fixtures.
   ```
 

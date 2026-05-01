@@ -16,14 +16,14 @@ and `[SLO.md](./SLO.md)` for steady-state operation.
 | Prereq                                               | Where                                                                    |
 | ---------------------------------------------------- | ------------------------------------------------------------------------ |
 | `kubectl` context pointed at the rep-2 Trino cluster | `kubectl config current-context` must print `rep-2`                      |
-| 3-pod Shelf StatefulSet live in `shelf-staging`      | SHELF-21 rollout. See `[cluster-handoff.md](./cluster-handoff.md)`       |
+| 3-pod Shelf StatefulSet live in `shelf-staging`      | SHELF-21 rollout. See `[cluster-handoff.md](./rollout-v1/cluster-handoff.md)`       |
 | Grafana dashboard `shelf-read-path`                  | `charts/shelf/grafana/dashboards/shelf-read-path.json`                   |
 | Alluxio baseline numbers                             | E12 output in `agents/out/experiments/E12-alluxio-baseline.md`           |
 | `shelfctl` on PATH                                   | `cargo build --release -p shelfctl && cp target/release/shelfctl ~/bin/` |
 
 
 The rest of this runbook assumes those are in place. If any is missing,
-stop here and route back to `cluster-handoff.md`.
+stop here and route back to `docs/rollout-v1/cluster-handoff.md`.
 
 ---
 
@@ -38,7 +38,7 @@ the gap or trigger the kill-switch (§4).
 | #   | Criterion                                        | Source                                                                                      | Target                                                            |
 | --- | ------------------------------------------------ | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
 | 1   | Cumulative hit rate (all pools combined)         | Prom `shelf_hits_total / (shelf_hits_total + shelf_misses_total)` — "hit ratio" panel row 1 | ≥ **71 %** for 7 consecutive days (the Alluxio baseline from E12) |
-| 2   | `GOLD_DBT` ok-rate                               | Airflow DAG SLA from the dbt job catalog                                                    | ≥ **99.9 %**                                                      |
+| 2   | `<your_critical_dag>` ok-rate                               | Airflow DAG SLA from the dbt job catalog                                                    | ≥ **99.9 %**                                                      |
 | 3   | p95 query latency                                | Trino `QueryCompletedEvent` p95, 7-day window                                               | ≤ **120 %** of Alluxio baseline                                   |
 | 4   | Shelf-attributed pages                           | PagerDuty filter `service=shelf`                                                            | **0** in 7 days                                                   |
 | 5   | Oncall surface (pages + runbook lookups + Slack) | Manual count in a weekly log                                                                | ≤ **50 %** of Alluxio's 7-day rolling rate                        |
@@ -98,7 +98,7 @@ green for the last 2 runs. When that lines up:
   decommission — that's Phase 5 / SHELF-retire-alluxio). The flip is
    a Trino config change, not a Shelf change.
 4. Page a note in `#shelf` linking the green-gate ticket. Update
-  `cluster-handoff.md` status header.
+  `docs/rollout-v1/cluster-handoff.md` status header.
 5. Rotate on-call playbook from this file to `[oncall.md](./oncall.md)`.
 
 ---
@@ -112,7 +112,7 @@ slowly. Triggers:
 - Hit-rate criterion #1 misses for two consecutive observation windows
 (14 days total).
 - Any **Shelf-attributed page** in the 7-day observation window.
-- `GOLD_DBT` ok-rate < 99.9 % for any single day.
+- `<your_critical_dag>` ok-rate < 99.9 % for any single day.
 - p95 query latency > 120 % of Alluxio baseline for any 24-hour window
 that the team cannot diagnose + close inside 72 h.
 - Two consecutive chaos drills fail with the same root cause.
@@ -276,7 +276,7 @@ on at least one pod.
 - ADR-0010: v0.5 gate — beat Alluxio on rep-2.
 - On-call conventions: `[docs/oncall.md](./oncall.md)`.
 - SLOs: `[docs/SLO.md](./SLO.md)`.
-- Cluster handoff: `[docs/cluster-handoff.md](./cluster-handoff.md)`.
+- Cluster handoff: `[docs/rollout-v1/cluster-handoff.md](./rollout-v1/cluster-handoff.md)`.
 - Per-failure runbooks: `[runbooks/](../runbooks)`.
 - Chaos drills: `[chaos/](../chaos)` + `make chaos-`* targets.
 
