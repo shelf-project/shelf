@@ -376,6 +376,14 @@ impl CostModel {
     /// region; this just plugs the validated numbers into the
     /// model.
     pub fn from_config(cfg: &CostConfig) -> Result<Self, CostConfigError> {
+        // SHELF-A4 — fail loud at config load if the operator
+        // shipped a non-finite or negative `amortized_dollars_per_hour`.
+        // The field doesn't flow into `CostModel` itself (it's a
+        // pod-level operating cost, not a per-hit coefficient), but
+        // we validate here so the existing `from_config` path is the
+        // single chokepoint that surfaces every YAML mistake.
+        cfg.validated_amortized_dollars_per_hour()?;
+
         // If the operator provided an explicit override block,
         // honour it; else fall back to the regional preset. The
         // override path is what

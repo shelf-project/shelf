@@ -89,6 +89,28 @@ pub struct CostConfig {
     /// don't want a u16 overflow to fold into the u16 wrap.)
     #[serde(default)]
     pub nat_traversal_basis_points: Option<u32>,
+
+    /// SHELF-A4 — amortised pool operating cost in **dollars per
+    /// hour**. When set, shelfd publishes
+    /// `shelf_s3_dollars_saved_net_total` = gross savings minus
+    /// `amortized_dollars_per_hour × elapsed`. When unset (`None`),
+    /// the net counter is **silent** — anti-overclaim guard so a
+    /// procurement-facing dashboard can never read "we saved $X net"
+    /// off a series the operator never authorised.
+    ///
+    /// The companion gauge `shelf_pool_amortized_dollars_per_hour`
+    /// is **always** published; an unset (or zero) value is the
+    /// dashboard signal that net accounting is dormant.
+    ///
+    /// Type is `f64` because real-world per-cluster pool costs
+    /// (`6 × m5a.4xlarge × $0.864/hr ≈ $5.18/hr` for the canonical
+    /// data-platform overlay) are fractional dollars and operators
+    /// copy the number from the AWS Cost Explorer / EKS bill which
+    /// reports cents. The loader rejects negative / non-finite
+    /// values at config-load time so a typo cannot silently zero
+    /// out the term.
+    #[serde(default)]
+    pub amortized_dollars_per_hour: Option<f64>,
 }
 
 fn default_enabled() -> bool {
@@ -115,6 +137,7 @@ impl Default for CostConfig {
             cross_az_micro_cents_per_gib: None,
             nat_processing_micro_cents_per_gib: None,
             nat_traversal_basis_points: None,
+            amortized_dollars_per_hour: None,
         }
     }
 }
@@ -133,6 +156,11 @@ pub enum CostConfigError {
     #[error("cache.cost.nat_traversal_basis_points = {bps} is out of range (must be 0..=10_000)")]
     NatBpsOutOfRange { bps: u32 },
 
+    #[error(
+        "cache.cost.amortized_dollars_per_hour = {value} is invalid (must be finite and >= 0)"
+    )]
+    InvalidAmortization { value: f64 },
+
     #[error("cache.cost: failed to parse YAML: {0}")]
     Yaml(String),
 }
@@ -143,6 +171,20 @@ impl CostConfig {
     /// who already hold a `CostConfig` don't need a second import.
     pub fn into_model(&self) -> Result<CostModel, CostConfigError> {
         CostModel::from_config(self)
+    }
+
+    /// SHELF-A4 — surface the validated amortisation rate without
+    /// requiring the caller to materialise a [`CostModel`]. Returns
+    /// `Ok(None)` when the operator left the field unset (the
+    /// anti-overclaim default). `Err(InvalidAmortization)` on
+    /// `NaN` / `Inf` / negative — same fail-loud discipline as the
+    /// other coefficient validations.
+    pub fn validated_amortized_dollars_per_hour(&self) -> Result<Option<f64>, CostConfigError> {
+        match self.amortized_dollars_per_hour {
+            None => Ok(None),
+            Some(v) if v.is_finite() && v >= 0.0 => Ok(Some(v)),
+            Some(v) => Err(CostConfigError::InvalidAmortization { value: v }),
+        }
     }
 
     /// Convenience for tests + dev clusters: parse from a YAML
@@ -231,5 +273,65 @@ get_request_micro_cents: 99
         let cfg = CostConfig::from_yaml(yaml).expect("yaml parses");
         let m = cfg.into_model().unwrap();
         assert_eq!(m.nat_traversal_basis_points, 0);
+    }
+
+    // SHELF-A4 amortisation field tests.
+
+    #[test]
+    fn amortization_unset_by_default() {
+        let cfg = CostConfig::default();
+        assert!(cfg.amortized_dollars_per_hour.is_none());
+        assert_eq!(cfg.validated_amortized_dollars_per_hour().unwrap(), None);
+    }
+
+    #[test]
+    fn amortization_explicit_zero_is_publishable() {
+        let yaml = "region: us-east-1\namortized_dollars_per_hour: 0.0\n";
+        let cfg = CostConfig::from_yaml(yaml).expect("yaml parses");
+        assert_eq!(
+            cfg.validated_amortized_dollars_per_hour().unwrap(),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn amortization_explicit_positive_validates() {
+        let yaml = "region: us-east-1\namortized_dollars_per_hour: 5.18\n";
+        let cfg = CostConfig::from_yaml(yaml).expect("yaml parses");
+        assert_eq!(
+            cfg.validated_amortized_dollars_per_hour().unwrap(),
+            Some(5.18)
+        );
+        // `from_config` validates as a side effect.
+        cfg.into_model().expect("model constructs");
+    }
+
+    #[test]
+    fn amortization_negative_is_rejected() {
+        let yaml = "region: us-east-1\namortized_dollars_per_hour: -1.0\n";
+        let cfg = CostConfig::from_yaml(yaml).expect("yaml parses");
+        assert!(matches!(
+            cfg.validated_amortized_dollars_per_hour().unwrap_err(),
+            CostConfigError::InvalidAmortization { .. }
+        ));
+        assert!(matches!(
+            cfg.into_model().unwrap_err(),
+            CostConfigError::InvalidAmortization { .. }
+        ));
+    }
+
+    #[test]
+    fn amortization_nan_is_rejected() {
+        // f64::NAN cannot reach this path through plain YAML
+        // (serde_yaml rejects `.nan` literal for f64 fields), but
+        // a constructed-by-hand config still must trip the check.
+        let cfg = CostConfig {
+            amortized_dollars_per_hour: Some(f64::NAN),
+            ..CostConfig::default()
+        };
+        assert!(matches!(
+            cfg.validated_amortized_dollars_per_hour().unwrap_err(),
+            CostConfigError::InvalidAmortization { .. }
+        ));
     }
 }

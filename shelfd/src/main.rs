@@ -238,6 +238,25 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // cost state is disabled. Cancelled on shutdown via the same
     // `shutdown` token the data plane already observes.
     cost_state.spawn_rate_updater(shutdown.clone());
+
+    // SHELF-A4 — net dollars-saved accountant. Constructs the
+    // `shelf_pool_amortized_dollars_per_hour` gauge unconditionally
+    // (even on the unset path) so dashboards see `0` as the
+    // dormant-accounting signal. Spawns a slow-path updater task
+    // ONLY when the operator opted in via
+    // `cache.cost.amortized_dollars_per_hour`; the anti-overclaim
+    // default keeps `shelf_s3_dollars_saved_net_total` silent.
+    let net_accountant = shelfd::cost::NetCostAccountant::new(
+        config.cost.region.clone(),
+        config.cost.amortized_dollars_per_hour,
+    );
+    tracing::info!(
+        region = %config.cost.region,
+        amortized_dollars_per_hour = ?config.cost.amortized_dollars_per_hour,
+        publishable = net_accountant.is_publishable(),
+        "SHELF-A4 net cost accountant initialised"
+    );
+    net_accountant.spawn_updater(shutdown.clone());
     if let Some(handle) = reload_handle {
         state = state.with_reload_handle(handle);
     }

@@ -123,6 +123,30 @@ cache:
     # override (e.g. EDP discount), set the matching field below
     # in your overlay and update the citation block above.
     # natTraversalBasisPoints: 0   # default; S3 VPC endpoint = no NAT charge
+    #
+    # SHELF-A4 — amortised pool operating cost in **dollars per hour**.
+    # Triggers `shelf_s3_dollars_saved_net_total` = gross − amortised.
+    #
+    # Rough on-demand sizing (verify against the actual AWS bill before
+    # merging this value to a new cluster):
+    #   6 pods × m5a.4xlarge × $0.864/hr (ap-south-1 on-demand)
+    #   = $5.184/hr  →  rounded to $5.18/hr
+    #
+    # The number above is **EC2-only**. Real cluster $/hr also includes:
+    #   • EBS volumes attached to each pod (~$0.10–$0.30/hr per node).
+    #   • EKS control plane ($0.10/hr per cluster, prorated).
+    #   • Spot vs on-demand mix — the alluxio NodePool is on-demand
+    #     today (locked to m-family after the May 1 OOM cascade),
+    #     but contracts may shift this.
+    #   • RI / Savings Plans / EDP discounts.
+    #
+    # Pull the actual number from `cost-db` Postgres
+    # (`cloud_costs` AWS CUR table; filter
+    # `resource_tags_aws_eks_namespace='alluxio'` and
+    # `line_item_product_code='AmazonEKS'` per the Apr 29
+    # CUR-Split-Cost-Allocation note in workspace memory) divided by
+    # the period in hours, then round to two decimals here.
+    amortizedDollarsPerHour: 5.18
 
   # SHELF-42 — A/B query tagging. Penpencil opts in: Prometheus
   # retention is already sized for the per-tag series and the

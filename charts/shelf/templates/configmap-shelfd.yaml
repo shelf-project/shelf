@@ -99,6 +99,10 @@ data:
       {{- with .natTraversalBasisPoints }}
       nat_traversal_basis_points: {{ . | int }}
       {{- end }}
+      {{- with .amortizedDollarsPerHour }}
+      # SHELF-A4 — amortised pool $/hr; net counter publishes when set.
+      amortized_dollars_per_hour: {{ . }}
+      {{- end }}
     {{- end }}
     {{- with .Values.cache.abTag }}
     # SHELF-42 — A/B tag receive path. Default off; flip

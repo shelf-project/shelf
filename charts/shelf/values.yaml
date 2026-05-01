@@ -366,6 +366,26 @@ cache:
     # for the modelled traffic; without it, the NAT term
     # contributes zero cents.
     # natTraversalBasisPoints: 0
+    # -- SHELF-A4 — amortised pool operating cost in **dollars per
+    # hour**. When set, shelfd publishes
+    # `shelf_s3_dollars_saved_net_total` = gross savings minus
+    # `amortizedDollarsPerHour × elapsed`. When unset (the OSS
+    # default), the net counter is **silent** — anti-overclaim
+    # guard so a procurement-facing dashboard never reads "$X net"
+    # off a series the operator did not authorise.
+    #
+    # The companion gauge `shelf_pool_amortized_dollars_per_hour`
+    # is always published; an unset (or zero) value is the
+    # dashboard signal that net accounting is dormant.
+    #
+    # Example calculation for the canonical data-platform overlay:
+    #   6 × m5a.4xlarge × $0.864/hr  ≈  $5.18/hr (on-demand list).
+    # Operators **MUST** verify this against their actual EKS bill
+    # (Cost Explorer or CUR `cur` table) before merging the
+    # overlay — savings/discount tiers, spot instance fractions,
+    # EBS volume costs, and EKS control-plane charges are NOT
+    # covered by the rough EC2-only multiplier.
+    # amortizedDollarsPerHour: 5.18
 
   # ---------------------------------------------------------------------------
   # SHELF-42 — A/B query tagging receive path.
