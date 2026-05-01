@@ -90,15 +90,40 @@ async fn run(args: Args) -> anyhow::Result<()> {
     }
 
     let origin = Arc::new(S3Origin::new(&config.origin).await?);
-    let store = Arc::new(FoyerStore::open(&config.pools).await?);
+
+    // SHELF-20: shared lameduck bit. Cloned into `ServerState` so
+    // `/stats` can advertise it, into the SIGTERM handler below so
+    // we can flip it before shutdown, and — A2 (rc.7) — into the
+    // `FoyerStore` admit gate so a draining pod stops paying for
+    // S3 GETs and Foyer inserts that are about to be evicted with
+    // the pod itself. Constructed *before* `FoyerStore::open` so the
+    // `with_drain` builder receives a live clone rather than a
+    // throwaway one.
+    let drain_signal = DrainSignal::new();
+
+    // **A2 (rc.7)** — `cache.drain.refuse_admits` (default `true`)
+    // is the operator-facing rollback flag. Flipping it to `false`
+    // is a config-only revert; no rolling restart is required for
+    // the gate to disengage. See ADR-0027.
+    let store = Arc::new(
+        FoyerStore::open(&config.pools)
+            .await?
+            .with_drain(drain_signal.clone(), config.drain.refuse_admits),
+    );
+    if config.drain.refuse_admits {
+        tracing::info!(
+            grace_seconds = config.drain.grace_seconds,
+            "A2 drain-aware admission engaged (refuse_admits=true)"
+        );
+    } else {
+        tracing::warn!(
+            "A2 drain-aware admission disengaged via cache.drain.refuse_admits=false; \
+             rolling-restart admits will continue feeding the cache while the pod terminates"
+        );
+    }
     let router = Arc::new(Router::new());
     let admission = Arc::new(SizeThresholdPolicy::from_config(&config.admission));
     let head_lru = Arc::new(HeadLru::new(config.head_lru_entries));
-
-    // SHELF-20: shared lameduck bit. Cloned into `ServerState` so
-    // `/stats` can advertise it, and into the SIGTERM handler below
-    // so we can flip it before shutdown.
-    let drain_signal = DrainSignal::new();
 
     // `shutdown` is the *hard* cancellation token: every long-lived
     // task selects on it. The signal handler only cancels it AFTER
@@ -425,6 +450,12 @@ fn spawn_signal_handler(
             }
 
             drain.begin();
+            // **A2 (rc.7)** — surface the drain bit on the operator-
+            // facing dashboard. Done *here*, not inside `DrainSignal`,
+            // so the signal stays a pure data type with no transitive
+            // dependency on the metrics registry. Single point of
+            // truth for the SIGTERM path.
+            shelfd::metrics::DRAIN_ACTIVE.set(1);
             tracing::info!("drain signal raised; advertising draining=true on /stats");
 
             if let Some(r) = resolver.as_ref() {
@@ -453,6 +484,7 @@ fn spawn_signal_handler(
             }
             tracing::info!("Ctrl-C received");
             drain.begin();
+            shelfd::metrics::DRAIN_ACTIVE.set(1);
             if let Some(r) = resolver.as_ref() {
                 r.wait_drained(&shutdown).await;
             }

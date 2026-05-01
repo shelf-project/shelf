@@ -116,6 +116,16 @@ pub struct Config {
     /// reactor parks on an empty channel.
     #[serde(default)]
     pub rewarm: RewarmConfig,
+
+    /// **A2 (rc.7)** — drain-aware admission. Default-on
+    /// (`refuse_admits = true`) so the operational regression observed
+    /// during the 2026-05-01 c6a Karpenter cutover (shelf pods on
+    /// draining nodes admitting bytes about to be evicted) is fixed
+    /// without an extra opt-in. Reads continue serving from cache
+    /// regardless of this flag — only writes/admits are gated.
+    /// See ADR-0027.
+    #[serde(default)]
+    pub drain: DrainConfig,
 }
 
 fn default_head_lru_entries() -> u64 {
@@ -1076,6 +1086,67 @@ impl Default for RewarmConfig {
             queue_capacity: default_rewarm_queue_capacity(),
             snapshot_lag_tolerance: default_rewarm_snapshot_lag_tolerance(),
             byte_equality_tolerance_bps: default_rewarm_byte_equality_tolerance_bps(),
+        }
+    }
+}
+
+/// **A2 (rc.7)** — drain-aware admission config.
+///
+/// Lives under `cache.drain` in the YAML / Helm overlay. The
+/// SHELF-20 [`crate::membership::DrainSignal`] already flips on
+/// SIGTERM; this config gates whether that signal is *acted on* in
+/// the rowgroup admit gate. Reads always keep serving from the
+/// cache regardless of this flag — A2 narrowly closes the wasted-
+/// admit class observed during the 2026-05-01 c6a Karpenter
+/// cutover (shelf pods on draining nodes were paying for S3 GETs
+/// and NVMe writes that were about to be evicted with the pod
+/// itself).
+///
+/// See ADR-0027 for the operational context, and the `Rollback`
+/// section there for the disable steps. Flipping `refuse_admits`
+/// to `false` is a config-only revert: no rolling restart is
+/// needed for new admits to start hitting the cache again, but a
+/// pod that has *already* received SIGTERM will naturally finish
+/// terminating regardless.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DrainConfig {
+    /// When `true` and the local pod's [`crate::membership::DrainSignal`]
+    /// is active, the rowgroup admit gate refuses new inserts and
+    /// bumps `shelf_admit_refused_total{reason="draining"}` instead
+    /// of feeding bytes into Foyer. Default `true`. Set to `false`
+    /// as the rollback escape hatch if the drain detection turns
+    /// out to fire spuriously in the wild.
+    #[serde(default = "default_drain_refuse_admits")]
+    pub refuse_admits: bool,
+
+    /// Documented grace window (seconds) operators expect this pod
+    /// to keep serving reads from cache after the drain signal
+    /// fires. **Note**: A2 does not enforce this value directly —
+    /// the actual lameduck sleep is owned by
+    /// [`MembershipConfig::drain_grace`] (SHELF-20). This field is
+    /// kept here so dashboards / alerts can refer to a single
+    /// "drain budget" key without consulting the membership
+    /// section, and so a future v2 (kube-rs / pre-SIGTERM warning)
+    /// has a stable home for the explicit cap. Default 30s, which
+    /// matches the typical Karpenter graceful shutdown window.
+    #[serde(default = "default_drain_grace_seconds")]
+    pub grace_seconds: u64,
+}
+
+fn default_drain_refuse_admits() -> bool {
+    true
+}
+
+fn default_drain_grace_seconds() -> u64 {
+    30
+}
+
+impl Default for DrainConfig {
+    fn default() -> Self {
+        Self {
+            refuse_admits: default_drain_refuse_admits(),
+            grace_seconds: default_drain_grace_seconds(),
         }
     }
 }

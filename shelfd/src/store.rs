@@ -478,6 +478,26 @@ pub struct FoyerStore {
     /// key against two pools would be a contract violation, not an
     /// operator convenience.
     pin_set: RwLock<HashMap<Key, (Pool, u64)>>,
+    /// **A2 (rc.7)** — SHELF-20 [`crate::membership::DrainSignal`]
+    /// shared with `main` and the membership resolver. Defaults to a
+    /// fresh signal that is permanently inactive — a fine
+    /// approximation for unit tests and dev boots that do not wire
+    /// the SIGTERM path. Production wires the real one via
+    /// [`FoyerStore::with_drain`].
+    ///
+    /// Held inline (not behind `Option<_>`) so the admit hot path
+    /// reads a single atomic — the same cost as the no-throttle
+    /// branch on the existing A1 RSS gauge — instead of paying a
+    /// branch on `Option::is_some` followed by the load.
+    drain_signal: crate::membership::DrainSignal,
+    /// **A2 (rc.7)** — when `true`, an active `drain_signal`
+    /// triggers a refused admit and a bump of
+    /// [`crate::metrics::ADMIT_REFUSED_TOTAL`]; when `false` (the
+    /// rollback escape hatch from `cache.drain.refuse_admits`), the
+    /// signal is observed for `/stats` and metrics but does *not*
+    /// gate writes. Default `false` so a bare `FoyerStore::open`
+    /// from tests does not accidentally engage A2.
+    drain_refuse_admits: bool,
 }
 
 impl FoyerStore {
@@ -672,6 +692,11 @@ impl FoyerStore {
             crate::metrics::ADMISSIONS_TOTAL
                 .with_label_values(&[label, "reject_rate"])
                 .inc_by(0);
+            // **A2 (rc.7)** — pre-touch the drain-rejection child so
+            // dashboards see a non-empty series on a healthy pod.
+            crate::metrics::ADMISSIONS_TOTAL
+                .with_label_values(&[label, "reject_drain"])
+                .inc_by(0);
             crate::metrics::EVICTIONS_TOTAL
                 .with_label_values(&[label, "capacity"])
                 .inc_by(0);
@@ -686,6 +711,14 @@ impl FoyerStore {
                 .set(0);
         }
 
+        // **A2 (rc.7)** — pre-touch the drain-aware admission series
+        // so dashboards see a non-empty value on a freshly booted,
+        // non-draining pod (same pattern the rest of `open()` uses).
+        crate::metrics::ADMIT_REFUSED_TOTAL
+            .with_label_values(&["draining"])
+            .inc_by(0);
+        crate::metrics::DRAIN_ACTIVE.set(0);
+
         Ok(Self {
             metadata,
             rowgroup,
@@ -694,7 +727,46 @@ impl FoyerStore {
             rowgroup_compression,
             inflight: Mutex::new(HashMap::new()),
             pin_set: RwLock::new(HashMap::new()),
+            drain_signal: crate::membership::DrainSignal::new(),
+            drain_refuse_admits: false,
         })
+    }
+
+    /// **A2 (rc.7)** — wire the SHELF-20
+    /// [`crate::membership::DrainSignal`] into the rowgroup admit
+    /// gate. When `refuse_admits` is `true` and the signal flips
+    /// active (SIGTERM), `get_or_fetch` short-circuits before the
+    /// SHELF-21e / SHELF-29 / A1 gates and bumps the new
+    /// `shelf_admit_refused_total{reason="draining"}` counter.
+    ///
+    /// `refuse_admits = false` is the operator escape hatch
+    /// (`cache.drain.refuse_admits = false`): the signal still
+    /// flows out via `/stats` so peers' membership resolvers drop
+    /// us from their HRW rings, but the local admit gate keeps
+    /// behaving as it did before A2. Pinned (memory-resident) keys
+    /// are unaffected either way — pin replay during drain stays
+    /// observably the same.
+    ///
+    /// Builder shape (consumes `self` and returns the modified
+    /// store) mirrors [`crate::http::ServerState::with_drain_signal`]
+    /// so the call-site reads as a one-liner in `main.rs`.
+    pub fn with_drain(
+        mut self,
+        signal: crate::membership::DrainSignal,
+        refuse_admits: bool,
+    ) -> Self {
+        self.drain_signal = signal;
+        self.drain_refuse_admits = refuse_admits;
+        self
+    }
+
+    /// **A2 (rc.7)** — `true` when this store is currently configured
+    /// to refuse admits on drain *and* the local pod's drain bit is
+    /// flipped. Hot-path test: two atomic loads, one `&&`. Exposed
+    /// for tests and for `/stats` instrumentation that wants to
+    /// surface the *effective* gate state (vs the raw signal).
+    pub fn drain_refuses_admits(&self) -> bool {
+        self.drain_refuse_admits && self.drain_signal.is_active()
     }
 
     /// **B1** — reconcile the configured compression mode with the
@@ -1063,6 +1135,32 @@ impl FoyerStore {
             // the admission bypass flag.
             pinned: self.is_pinned(&key),
         };
+
+        // **A2 (rc.7)** — drain-aware admission, evaluated before the
+        // policy / level / rate gates so a draining pod does not pay
+        // for a Foyer insert it is about to lose.
+        //
+        // Cost: two atomic loads (the `bool` and the `AtomicBool`
+        // inside [`crate::membership::DrainSignal`]). Same shape as
+        // the existing A1 multiplier check — the hot path stays
+        // branch-predictable when neither signal is active.
+        //
+        // We bypass the gate when `pinned == true`: pin-set entries
+        // are operator-blessed, must round-trip through
+        // [`FoyerStore::insert`] for the pin-list reload to behave,
+        // and a pin during drain is rare-enough-to-ignore traffic
+        // (the pod is going away in <60s; a pin replay racing the
+        // signal will simply land on a still-warm peer next round).
+        if !ctx.pinned && self.drain_refuses_admits() {
+            crate::metrics::ADMIT_REFUSED_TOTAL
+                .with_label_values(&["draining"])
+                .inc();
+            crate::metrics::ADMISSIONS_TOTAL
+                .with_label_values(&[pool_label, "reject_drain"])
+                .inc();
+            return Ok(ReadOutcome::Miss(bytes));
+        }
+
         // Track E8 — categorise the admission outcome. The
         // `AdmissionDecision` enum only exposes Admit / Reject, so
         // "why rejected" is reconstructed here from the context: if
@@ -2600,6 +2698,245 @@ mod store_tests {
         assert!(
             message.contains("pre-existing uncompressed data"),
             "expected ring-already-populated diagnostic, got: {message}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // A2 (rc.7) — SIGTERM-only drain-aware admission tests.
+    //
+    // These cover the spec list from `agents/out/adr/0027-rc7-drain-
+    // aware-admission.md`:
+    //   1. drain_inactive_admits_normally
+    //   2. drain_active_refuses_all_admits
+    //   3. drain_active_reads_succeed
+    //   4. drain_signal_flips_during_admit_loop
+    //   5. drain_disabled_via_config_no_refuse
+    //
+    // We use a unique per-test pool label only where the test reads
+    // back a metric child; otherwise we rely on the `inserted into
+    // Foyer or not` observation, which is a strictly local check
+    // and does not race other tests in the binary.
+    // ---------------------------------------------------------------
+
+    fn drained_admit_refused_count() -> u64 {
+        crate::metrics::ADMIT_REFUSED_TOTAL
+            .with_label_values(&["draining"])
+            .get()
+    }
+
+    /// Spec 1 — a healthy, non-draining store admits as normal under
+    /// the always-admit policy. The drain gate is the cheap up-front
+    /// check; any regression that mistakenly engages it on a healthy
+    /// pod would make every test in this module fail, so the
+    /// happy-path coverage here doubles as the primary canary.
+    #[tokio::test]
+    async fn drain_inactive_admits_normally() {
+        let signal = crate::membership::DrainSignal::new();
+        let store = FoyerStore::open(&test_pools())
+            .await
+            .expect("open")
+            .with_drain(signal, true);
+        let key = k(120);
+        let outcome = store
+            .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
+                Ok(Bytes::from_static(b"healthy"))
+            })
+            .await
+            .expect("get_or_fetch");
+        assert!(matches!(outcome, ReadOutcome::Miss(_)));
+        // Insert side-effect: the key is now resident.
+        let resident = store
+            .get(Pool::RowGroup, &key)
+            .await
+            .expect("get")
+            .expect("resident");
+        assert_eq!(resident.as_ref(), b"healthy");
+    }
+
+    /// Spec 2 — a draining store refuses every admit, the byte
+    /// payload still flows back to the caller (read keeps working
+    /// against the origin), and Foyer never ends up holding the
+    /// bytes for any subsequent read.
+    #[tokio::test]
+    async fn drain_active_refuses_all_admits() {
+        let signal = crate::membership::DrainSignal::new();
+        signal.begin();
+        let store = FoyerStore::open(&test_pools())
+            .await
+            .expect("open")
+            .with_drain(signal.clone(), true);
+        assert!(store.drain_refuses_admits());
+
+        let baseline = drained_admit_refused_count();
+        let key = k(121);
+        let outcome = store
+            .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
+                Ok(Bytes::from_static(b"refused"))
+            })
+            .await
+            .expect("get_or_fetch");
+        // Caller still receives the bytes — a cache miss, not an error.
+        assert!(matches!(outcome, ReadOutcome::Miss(_)));
+        assert_eq!(outcome.into_bytes(), Bytes::from_static(b"refused"));
+        // Foyer must not have absorbed the insert.
+        assert!(
+            store
+                .get(Pool::RowGroup, &key)
+                .await
+                .expect("get")
+                .is_none(),
+            "draining pod must not cache the refused admit",
+        );
+        // Counter ticks exactly once for the refused admit.
+        assert_eq!(
+            drained_admit_refused_count() - baseline,
+            1,
+            "shelf_admit_refused_total{{reason=\"draining\"}} must tick once per refused admit",
+        );
+    }
+
+    /// Spec 3 — drain *only* gates writes/admits. Reads continue
+    /// serving from cache for the grace window so peers get a
+    /// chance to reroute without the local pod going dark on the
+    /// data plane mid-drain. We pre-populate a key, flip drain on,
+    /// and assert the read still hits.
+    #[tokio::test]
+    async fn drain_active_reads_succeed() {
+        let signal = crate::membership::DrainSignal::new();
+        let store = FoyerStore::open(&test_pools())
+            .await
+            .expect("open")
+            .with_drain(signal.clone(), true);
+
+        let key = k(122);
+        // Warm the cache *before* drain flips so we know the
+        // residence is from a healthy admit, not a racing one.
+        store
+            .insert(Pool::RowGroup, key.clone(), Bytes::from_static(b"warmed"))
+            .await
+            .expect("insert");
+
+        signal.begin();
+        assert!(store.drain_refuses_admits());
+
+        let resident = store
+            .get(Pool::RowGroup, &key)
+            .await
+            .expect("get")
+            .expect("read must still serve from cache during drain");
+        assert_eq!(resident.as_ref(), b"warmed");
+    }
+
+    /// Spec 4 — race / flip-mid-loop sanity. The drain bit is an
+    /// `AtomicBool`: `try_admit`-style gates that read it once per
+    /// call must observe the flip on the next iteration cleanly,
+    /// never producing torn state. We model that by running a
+    /// burst of admits, flipping mid-burst, and asserting the
+    /// pre-flip admits inserted while the post-flip ones did not.
+    #[tokio::test]
+    async fn drain_signal_flips_during_admit_loop() {
+        let signal = crate::membership::DrainSignal::new();
+        let store = FoyerStore::open(&test_pools())
+            .await
+            .expect("open")
+            .with_drain(signal.clone(), true);
+
+        let pre_baseline = drained_admit_refused_count();
+        for ord in 0..3u8 {
+            let key = k(140 + ord);
+            store
+                .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
+                    Ok(Bytes::from_static(b"pre-drain"))
+                })
+                .await
+                .expect("pre-drain admit");
+            assert!(
+                store
+                    .get(Pool::RowGroup, &key)
+                    .await
+                    .expect("get")
+                    .is_some(),
+                "pre-drain admit (ord={ord}) must be cached"
+            );
+        }
+        assert_eq!(
+            drained_admit_refused_count() - pre_baseline,
+            0,
+            "no drain refusals before signal flips"
+        );
+
+        signal.begin();
+
+        let post_baseline = drained_admit_refused_count();
+        for ord in 0..3u8 {
+            let key = k(150 + ord);
+            store
+                .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
+                    Ok(Bytes::from_static(b"post-drain"))
+                })
+                .await
+                .expect("post-drain admit");
+            assert!(
+                store
+                    .get(Pool::RowGroup, &key)
+                    .await
+                    .expect("get")
+                    .is_none(),
+                "post-drain admit (ord={ord}) must NOT be cached"
+            );
+        }
+        assert_eq!(
+            drained_admit_refused_count() - post_baseline,
+            3,
+            "every post-flip admit must bump the refused counter exactly once",
+        );
+    }
+
+    /// Spec 5 — `cache.drain.refuse_admits = false` is the
+    /// operator escape hatch. Even with the signal active, admits
+    /// must continue to flow into Foyer; the dedicated counter
+    /// stays flat. The signal is still observable via
+    /// [`crate::membership::DrainSignal::is_active`] so `/stats`
+    /// keeps advertising drain (peers still rotate us out of
+    /// their rings); this test asserts only the local admit-gate
+    /// behaviour.
+    #[tokio::test]
+    async fn drain_disabled_via_config_no_refuse() {
+        let signal = crate::membership::DrainSignal::new();
+        signal.begin();
+        let store = FoyerStore::open(&test_pools())
+            .await
+            .expect("open")
+            .with_drain(signal.clone(), false);
+
+        // Effective gate: signal is active but disabled by config,
+        // so the helper reports `false` and the admit flows.
+        assert!(signal.is_active(), "raw signal still flipped");
+        assert!(
+            !store.drain_refuses_admits(),
+            "config opt-out must short-circuit the gate"
+        );
+
+        let baseline = drained_admit_refused_count();
+        let key = k(170);
+        store
+            .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
+                Ok(Bytes::from_static(b"escape-hatch"))
+            })
+            .await
+            .expect("get_or_fetch");
+        assert!(
+            store
+                .get(Pool::RowGroup, &key)
+                .await
+                .expect("get")
+                .is_some(),
+            "escape-hatch admit must still cache",
+        );
+        assert_eq!(
+            drained_admit_refused_count(),
+            baseline,
+            "refused counter must not move while refuse_admits=false"
         );
     }
 }

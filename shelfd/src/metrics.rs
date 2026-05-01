@@ -819,6 +819,56 @@ pub static LODC_RSS_PRESSURE_SECONDS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("register lodc_rss_pressure_seconds_total")
 });
 
+/// **A2 (rc.7)** — admits refused because the local pod is
+/// draining. Bumped by [`crate::store::FoyerStore::get_or_fetch`]
+/// when the SHELF-20 [`crate::membership::DrainSignal`] is active
+/// **and** [`crate::config::DrainConfig::refuse_admits`] is `true`.
+///
+/// `reason` is a free-form label kept for forward-compat with a
+/// possible v2 (e.g. pre-SIGTERM warning via kube-rs); v1 only
+/// emits `"draining"`. Pair with `shelf_drain_active` for a "did
+/// the gate engage on the right signal" cross-check on dashboards.
+///
+/// Why a dedicated counter (vs another `decision` value on
+/// [`ADMISSIONS_TOTAL`]): the existing counter conflates
+/// admission *policy* outcomes with *operational* gates; drain is
+/// strictly the latter and graphs at a different timescale (one
+/// burst per pod-lifetime, not steady-state). Keeping the two
+/// series separate lets `rate(shelf_admit_refused_total[5m])`
+/// stand alone as the SLO trip wire.
+pub static ADMIT_REFUSED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_admit_refused_total",
+        "A2 admits refused for an operational reason rather than \
+         an admission-policy decision. v1 only emits \
+         `reason=\"draining\"`, fired by the rowgroup admit gate \
+         when the local DrainSignal is active and \
+         `cache.drain.refuse_admits=true`.",
+        &["reason"],
+        REGISTRY
+    )
+    .expect("register admit_refused_total")
+});
+
+/// **A2 (rc.7)** — `0`/`1` snapshot of the local pod's
+/// [`crate::membership::DrainSignal`]. Kept as a labelless
+/// [`IntGauge`] (not `IntGaugeVec`) because the value is per-pod
+/// by definition; the operator-facing dashboard gets the pod
+/// dimension for free from the `pod` external label Prometheus
+/// stamps onto every series. Updated by `main` once on SIGTERM
+/// receipt — no polling overhead.
+pub static DRAIN_ACTIVE: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge_with_registry!(
+        "shelf_drain_active",
+        "A2 SHELF-20 DrainSignal state for this pod. 0 = healthy, \
+         1 = draining (SIGTERM observed). Read alongside \
+         `shelf_admit_refused_total{reason=\"draining\"}` to see \
+         the gate engage.",
+        REGISTRY
+    )
+    .expect("register drain_active")
+});
+
 /// SHELF-21e — current in-flight bytes the back-pressure controller
 /// observes per pool. Computed as `admitted_bytes − cache_write_bytes`
 /// (both monotonic). Zero in steady state; climbs toward the
@@ -1445,6 +1495,9 @@ pub const EXPOSED_SERIES: &[&str] = &[
     // A1 (rc.7) — RSS-aware admission multiplier on top of SHELF-29.
     "shelf_lodc_rss_throttle_multiplier",
     "shelf_lodc_rss_pressure_seconds_total",
+    // A2 (rc.7) — SIGTERM-only drain-aware admission.
+    "shelf_admit_refused_total",
+    "shelf_drain_active",
     // SHELF-33 — W-TinyLFU admission gate observability.
     "shelf_wtinylfu_decisions_total",
     "shelf_wtinylfu_decays_total",
@@ -1568,6 +1621,8 @@ mod tests {
             LODC_ADMIT_BURST_CAPACITY.desc(),
             LODC_RSS_THROTTLE_MULTIPLIER.desc(),
             LODC_RSS_PRESSURE_SECONDS_TOTAL.desc(),
+            ADMIT_REFUSED_TOTAL.desc(),
+            DRAIN_ACTIVE.desc(),
             WTINYLFU_DECISIONS_TOTAL.desc(),
             WTINYLFU_DECAYS_TOTAL.desc(),
             PEER_HIT_TOTAL.desc(),
@@ -1721,6 +1776,10 @@ mod tests {
         LODC_RSS_PRESSURE_SECONDS_TOTAL
             .with_label_values(&["rowgroup"])
             .inc_by(0);
+        ADMIT_REFUSED_TOTAL
+            .with_label_values(&["draining"])
+            .inc_by(0);
+        DRAIN_ACTIVE.set(0);
         WTINYLFU_DECISIONS_TOTAL
             .with_label_values(&["admit"])
             .inc_by(0);
