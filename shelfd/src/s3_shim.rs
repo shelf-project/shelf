@@ -752,7 +752,14 @@ async fn run_conditional_get(
                     let _ = state
                         .store
                         .get_or_fetch(pool, new_key, state.admission.as_ref(), async move {
-                            Ok(bytes_for_cache)
+                            // **A6 (rc.7)** — repopulate-on-revalidate
+                            // is logically an *origin* fetch: the
+                            // bytes came from the conditional GET to
+                            // origin, not from a peer. Tagging as
+                            // `Origin` keeps the cooperative gate
+                            // out of the way of cross-snapshot
+                            // freshness recovery.
+                            Ok((bytes_for_cache, crate::coop_admission::FetchSource::Origin))
                         })
                         .await;
                 }

@@ -722,11 +722,21 @@ pub mod handlers {
         // local cache miss, *unless* this request is itself a peer
         // hop (in which case we are the peer being probed and must
         // not recurse).
+        //
+        // **A6 (rc.7)** — both arms now return `(Bytes, FetchSource)`
+        // so the downstream `get_or_fetch` can route the result
+        // through the cooperative-admission gate when the source is
+        // `Peer`. The peer-hop arm is logically an origin fetch
+        // (we are the peer being probed; our cache miss falls
+        // through to S3, never to a third-pod), so it gets tagged
+        // `Origin` unconditionally.
         let state_for_peer = state.clone();
         let key_for_peer = key.clone();
         let fetcher = async move {
             if is_peer_hop {
-                origin_fut.await
+                origin_fut
+                    .await
+                    .map(|b| (b, crate::coop_admission::FetchSource::Origin))
             } else {
                 crate::peer_fetch::peer_or_origin_fetch(
                     &state_for_peer,

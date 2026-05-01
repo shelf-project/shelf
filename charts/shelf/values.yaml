@@ -482,6 +482,46 @@ cache:
     minFooterBytes: 65536
 
   # ---------------------------------------------------------------------------
+  # A6 (rc.7) — Cooperative peer-admission probabilistic gate.
+  #
+  # When a non-primary pod fetches bytes from the HRW primary peer
+  # (SHELF-23 `peer_or_origin_fetch`), today the secondary also caches
+  # the response in its own Foyer pool — *defensive replication*.
+  # Under HRW skew that doubles NVMe pressure on hot keys for little
+  # benefit (the primary stays warm). A6 gates the secondary admit
+  # with probability `1 / replicationFactor`.
+  #
+  # `enabled = false` is the safety default — a freshly deployed pod
+  # behaves identically to pre-A6 (every peer-fetched byte still
+  # admits). Operators flip the switch per-cluster after the
+  # `shelf_coop_peer_admits_total` / `shelf_coop_peer_drops_total`
+  # dashboards have been sized.
+  #
+  # `replicationFactor` is the intended in-cluster replication factor
+  # per object:
+  #   1 ⇒ admit with probability 1.0 (no behaviour change vs pre-A6)
+  #   2 ⇒ admit with probability 0.5 (defensive 2× replication;
+  #        recommended starting point)
+  #   N ⇒ admit with probability 1/N (cluster-wide replication factor N)
+  # `0` is treated as `1` defensively (no admit-everything → admit-nothing
+  # foot-gun on an accidental YAML typo).
+  #
+  # Origin admits are unchanged — A6 ONLY gates `FetchSource::Peer`.
+  # Reads are untouched. Composition with the existing admit chain
+  # (drain → policy → LODC → rate-limiter → A6) keeps each gate's
+  # blast radius observable independently via
+  # `shelf_admissions_total{decision=...}`.
+  # See ADR-0037.
+  # ---------------------------------------------------------------------------
+  coopAdmission:
+    # -- Master switch. Default OFF; turn on per-cluster after the
+    # operator dashboards have been sized for the new counters.
+    enabled: false
+    # -- Intended in-cluster replication factor per object. `2` is
+    # the recommended starting point once the gate is enabled.
+    replicationFactor: 2
+
+  # ---------------------------------------------------------------------------
   # SHELF-45 — compaction-aware re-warm reactor.
   #
   # When an Iceberg table is compacted (`ALTER TABLE … EXECUTE optimize`,

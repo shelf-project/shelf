@@ -126,6 +126,16 @@ pub struct Config {
     /// See ADR-0027.
     #[serde(default)]
     pub drain: DrainConfig,
+
+    /// **A6 (rc.7)** — cooperative peer-admission probabilistic gate.
+    /// Default-OFF (opt-in for safety; first deploy turns it on
+    /// per-cluster). Only consulted when the bytes returned by the
+    /// SHELF-23 peer-fetch race are tagged
+    /// [`crate::coop_admission::FetchSource::Peer`]; origin admits
+    /// are unchanged. Reads are unaffected.
+    /// See ADR-0037.
+    #[serde(default)]
+    pub coop_admission: crate::coop_admission::CoopAdmissionConfig,
 }
 
 fn default_head_lru_entries() -> u64 {

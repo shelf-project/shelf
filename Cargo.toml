@@ -100,6 +100,14 @@ parquet = { version = "58", default-features = false }
 # are written with the `deflate` codec which `apache-avro` decodes
 # from its built-in flate2 dep.
 apache-avro = { version = "0.21", default-features = false }
+# A6 (rc.7) — cooperative peer admission probabilistic gate. Pinned at
+# 0.9 (the latest line; 0.9.4 is already in the lock file as a
+# transitive dep). `default-features = false + std + small_rng` keeps
+# the dep surface narrow: no `rand_chacha` / `rand_pcg` codepaths get
+# pulled in, only `SmallRng` (xoshiro128++) which is what
+# `coop_admission.rs` uses with a deterministic seed in tests and a
+# per-task non-shared seed in production.
+rand = { version = "0.9", default-features = false, features = ["std", "std_rng", "small_rng"] }
 
 [profile.release]
 lto = "thin"

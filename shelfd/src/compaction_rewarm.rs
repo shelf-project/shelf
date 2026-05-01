@@ -676,7 +676,17 @@ where
     async fn do_fetch(&self, key: &crate::store::Key, file: &FileSpec) -> Result<(), FetchFail> {
         let fetcher = self.fetcher.clone();
         let file_for_fetch = file.clone();
-        let fetch = async move { fetcher.fetch_file(&file_for_fetch).await };
+        // **A6 (rc.7)** — re-warm fetches go through the SHELF-45
+        // reactor's `RewarmFetcher` (an S3 client in production), so
+        // the bytes always come from origin. Tag explicitly so the
+        // cooperative gate stays out of the rewarm path: re-warm is
+        // best-effort prefetch, not a peer race.
+        let fetch = async move {
+            fetcher
+                .fetch_file(&file_for_fetch)
+                .await
+                .map(|b| (b, crate::coop_admission::FetchSource::Origin))
+        };
         match self
             .store
             .get_or_fetch(Pool::RowGroup, key.clone(), self.admission.as_ref(), fetch)
@@ -1151,7 +1161,7 @@ mod tests {
         let bytes_for_seed = bytes.clone();
         let _ = store
             .get_or_fetch(Pool::RowGroup, key.clone(), &admit, async move {
-                Ok(bytes_for_seed)
+                Ok((bytes_for_seed, crate::coop_admission::FetchSource::Origin))
             })
             .await;
         assert!(

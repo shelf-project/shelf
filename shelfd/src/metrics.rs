@@ -1355,6 +1355,83 @@ pub static S3_DOLLARS_SAVED_NET_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("register s3_dollars_saved_net_total")
 });
 
+/// **A6 (rc.7)** — bytes-from-peer admissions accepted by the
+/// cooperative gate. Numerator of the "what fraction of peer-fetched
+/// bytes did we admit?" panel. Pair with [`COOP_PEER_DROPS_TOTAL`]
+/// for the full denominator (both counters tick exactly once per
+/// `FetchSource::Peer` admit decision in
+/// [`crate::store::FoyerStore::get_or_fetch`]).
+///
+/// `pool` matches the existing `shelf_admissions_total` cardinality
+/// (`metadata` / `rowgroup`). The gate is consulted at the rowgroup
+/// admit site only in v1 — metadata pool peer-fetch races are rare —
+/// but the label is kept symmetric with the rest of the admit-chain
+/// counters so dashboards can graph both pools without renaming the
+/// metric later.
+pub static COOP_PEER_ADMITS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_coop_peer_admits_total",
+        "A6 (rc.7) Bytes-from-peer admissions accepted by the \
+         cooperative gate (numerator of the admit-ratio panel). \
+         Ticks exactly once per `FetchSource::Peer` admit decision; \
+         pair with `shelf_coop_peer_drops_total` for the denominator.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register coop_peer_admits_total")
+});
+
+/// **A6 (rc.7)** — bytes-from-peer admissions dropped by the
+/// cooperative probabilistic gate. Each tick represents one Foyer
+/// insert AND one NVMe write the cache *did not* pay; the dashboard
+/// "saved NVMe bytes" panel uses
+/// `rate(shelf_coop_peer_drops_total) × avg_admission_size` as a
+/// rough estimate.
+///
+/// A drop here means the upstream pressure-aware chain (drain /
+/// policy / LODC / rate-limiter) all said admit, but A6's secondary
+/// gate said "trust the primary". Compose with
+/// `shelf_admissions_total{decision="reject_coop"}` for cross-check.
+pub static COOP_PEER_DROPS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_coop_peer_drops_total",
+        "A6 (rc.7) Bytes-from-peer admissions dropped by the \
+         cooperative probabilistic gate. Saved NVMe bytes per drop \
+         ≈ avg admission size; pair with shelf_admissions_total\
+         {decision=reject_coop} for cross-check.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register coop_peer_drops_total")
+});
+
+/// **A6 (rc.7)** — peer-fetch admits force-accepted because this
+/// pod is the HRW primary for the key (defensive invariant — see
+/// [`crate::coop_admission::CoopAdmissionGate::should_admit_peer_bytes`]).
+///
+/// Today this counter stays flat: by construction
+/// [`crate::peer_fetch::peer_or_origin_fetch`] short-circuits to
+/// `Origin` before returning `Peer` when the local pod is primary,
+/// so the gate never observes `key_primary_is_self = true`. The
+/// counter exists so a future code path that ever lands `Peer`
+/// bytes on the primary (e.g. a manual replay tool, an admin
+/// `/admin/replay` endpoint) bumps it visibly — operators read the
+/// counter as the "did the invariant ever fire?" telemetry.
+pub static COOP_PRIMARY_FORCE_ADMITS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_coop_primary_force_admits_total",
+        "A6 (rc.7) Peer-fetch admissions force-accepted because the \
+         local pod is the HRW primary for the key (defensive \
+         invariant). Stays at 0 in v1 — peer_or_origin_fetch never \
+         tags primary-resident bytes as `Peer`. A non-zero value \
+         means a future code path landed `Peer` bytes on the primary \
+         and the invariant kept the cache populated.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register coop_primary_force_admits_total")
+});
+
 /// **A4 (rc.7)** — amortized shelf-pool cost gauge.
 ///
 /// Always exposed (regardless of whether the net counter
@@ -1601,6 +1678,10 @@ pub const EXPOSED_SERIES: &[&str] = &[
     // A4 (rc.7) — net dollars-saved counter + amortized-cost gauge.
     "shelf_s3_dollars_saved_net_total",
     "shelf_pool_amortized_dollars_per_hour",
+    // A6 (rc.7) — cooperative peer-admission probabilistic gate.
+    "shelf_coop_peer_admits_total",
+    "shelf_coop_peer_drops_total",
+    "shelf_coop_primary_force_admits_total",
     // SHELF-42 — A/B tag receive path.
     "shelf_hits_by_tag_total",
     "shelf_misses_by_tag_total",
@@ -1727,6 +1808,9 @@ mod tests {
             S3_DOLLARS_SAVED_RATE_CENTS_PER_SEC.desc(),
             S3_DOLLARS_SAVED_NET_TOTAL.desc(),
             SHELF_POOL_AMORTIZED_DOLLARS_PER_HOUR.desc(),
+            COOP_PEER_ADMITS_TOTAL.desc(),
+            COOP_PEER_DROPS_TOTAL.desc(),
+            COOP_PRIMARY_FORCE_ADMITS_TOTAL.desc(),
             HITS_BY_TAG_TOTAL.desc(),
             MISSES_BY_TAG_TOTAL.desc(),
             S3_SHIM_RESPONSE_BYTES_BY_TAG_TOTAL.desc(),
@@ -1910,6 +1994,21 @@ mod tests {
             .with_label_values(&["us-east-1"])
             .inc_by(0);
         SHELF_POOL_AMORTIZED_DOLLARS_PER_HOUR.set(0);
+        // A6 (rc.7) — touch every label the cooperative gate can ever
+        // bump so dashboards see the series on a freshly booted pod.
+        for pool in ["metadata", "rowgroup"] {
+            COOP_PEER_ADMITS_TOTAL.with_label_values(&[pool]).inc_by(0);
+            COOP_PEER_DROPS_TOTAL.with_label_values(&[pool]).inc_by(0);
+            COOP_PRIMARY_FORCE_ADMITS_TOTAL
+                .with_label_values(&[pool])
+                .inc_by(0);
+        }
+        // A6 (rc.7) — also pre-touch the new `reject_coop` decision
+        // label so the existing `shelf_admissions_total` series
+        // includes it on every freshly booted pod.
+        ADMISSIONS_TOTAL
+            .with_label_values(&["rowgroup", "reject_coop"])
+            .inc_by(0);
         HITS_BY_TAG_TOTAL
             .with_label_values(&["metadata", "none"])
             .inc_by(0);
