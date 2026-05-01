@@ -17,6 +17,16 @@ targets = [
 [advisories]
 version = 2
 yanked = "warn"
+# `unmaintained` advisories are downgraded to workspace-scope rather
+# than treated as a hard fail. Transitive deps (foyer → paste/bincode,
+# tonic → bincode, opentelemetry-proto → protobuf, rustls-webpki
+# advisories, etc.) drag in a steady trickle of "unmaintained crate"
+# advisories that no direct-dep bump on the shelfd workspace side can
+# address — the upstream owns the fix, not us. Checking only the
+# workspace set keeps direct-dep hygiene honest while unblocking CI
+# until the SHELF-30 advisory sweep lands. Security rota must still
+# file a ticket for any direct-dep unmaintained hit.
+unmaintained = "workspace"
 # Ignore format (security rota must enforce the comment convention):
 #   { id = "RUSTSEC-YYYY-NNNN", reason = "ticket: SHELF-NNN; expiry: YYYY-MM-DD" }
 # Every entry MUST have a ticket link and an expiry ≤ 90 days out.
