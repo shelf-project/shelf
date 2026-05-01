@@ -12,7 +12,7 @@
       }
     ]
   },
-  "description": "Shelf overview v2 — insight-first dashboard for the rc.5 drain wave (PRs #40,#43,#46,#49,#50,#54,#67,#68,#69 + SHELF-21e/-23/-29 backfill). 15 actionable panels in 4 rows: traffic-light health, per-pool + cost, culprit tables, drain-wave feature observability. Every panel passes the 'am I doing good or bad, what action do I take?' test. Migration note: this dashboard is intended to replace shelf-overview (uid=shelf-overview, 48 panels) once validated; until then both can coexist.",
+  "description": "Shelf overview v2 — insight-first dashboard for the rc.5 drain wave (PRs #40,#43,#46,#49,#50,#54,#67,#68,#69 + SHELF-21e/-23/-29 backfill). 20 actionable panels in 5 rows: traffic-light health, per-pool + cost, culprit tables, drain-wave feature observability, and A/B tag attribution (SHELF-42). Every panel passes the 'am I doing good or bad, what action do I take?' test. Migration note: this dashboard is intended to replace shelf-overview (uid=shelf-overview, 48 panels) once validated; until then both can coexist.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -492,6 +492,140 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 500,
+      "type": "row",
+      "title": "Row 5 — A/B tag attribution (SHELF-42)",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 39}
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "Top tags by query volume (5m, top 5)",
+      "description": "Top 5 A/B tags by lookups/sec (hits + misses). Use this to identify which cohorts dominate the workload before reading the per-tag hit ratio. SHELF-42 emits a `tag` label on shelf_hits_by_tag_total / shelf_misses_by_tag_total when the plugin sets X-Shelf-Tag (default-off; enable cache.abTag.enabled). Empty stat = SHELF-42 not enabled or no tagged traffic in window.",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 40},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}
+        }
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none", "textMode": "value_and_name"},
+      "targets": [
+        {
+          "expr": "topk(5, sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])) + sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_misses_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])))",
+          "legendFormat": "{{tag}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Hit ratio by tag (5m, top 5 by volume)",
+      "description": "Per-tag hit ratio over a 5m window, restricted to the 5 highest-volume tags. Use this to spot cohorts that are dragging the global hit ratio down (cold tag, scan-heavy cohort) vs cohorts that are warm. Reading: a tag flat near 0 = cohort always misses (working set never fits or never recurs); a tag flat near 1 = cohort fully cached. Diverging tags = workload mix is heterogeneous and a global hit-ratio number alone is misleading — use this row instead.",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 40},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0, "max": 1,
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 5}
+        }
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "mean"]}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {
+          "expr": "topk(5, sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])) / clamp_min(sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])) + sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_misses_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])), 0.001))",
+          "legendFormat": "{{tag}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "stat",
+      "title": "Top tags by miss rate (5m, top 5)",
+      "description": "Top 5 tags by miss rate (ops/sec) — these are the cohorts hitting origin (S3) the hardest. Action: a single tag dominating miss rate is the candidate for either explicit pin (tools/gen_pin_list.py) or a workload-level review (is this dbt model emitting one query per partition?). Note: shelf_origin_request_seconds has no `tag` label, so per-tag p99 origin latency is not available — use this miss-rate proxy + the global Origin-bytes panel together.",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 40},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 5}, {"color": "red", "value": 25}]}
+        }
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none", "textMode": "value_and_name"},
+      "targets": [
+        {
+          "expr": "topk(5, sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_misses_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])))",
+          "legendFormat": "{{tag}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "table",
+      "title": "A/B tag breakdown — full table",
+      "description": "Full per-tag breakdown: query volume (lookups/sec), hit ratio, and miss rate. Sortable. Filter via the $ab_tag template variable to focus on a subset. Empty rows past the cardinality cap are folded into the `other` sentinel by the shelfd-side abTag handler (cap defaults to 16 — see panel 20).",
+      "gridPos": {"h": 8, "w": 18, "x": 0, "y": 48},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"align": "auto", "displayMode": "auto"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "Value #A"}, "properties": [{"id": "displayName", "value": "queries/s"}, {"id": "unit", "value": "ops"}, {"id": "decimals", "value": 2}]},
+          {"matcher": {"id": "byName", "options": "Value #B"}, "properties": [{"id": "displayName", "value": "hit ratio"}, {"id": "unit", "value": "percentunit"}, {"id": "decimals", "value": 3}]},
+          {"matcher": {"id": "byName", "options": "Value #C"}, "properties": [{"id": "displayName", "value": "miss rate (ops/s)"}, {"id": "unit", "value": "ops"}, {"id": "decimals", "value": 2}]},
+          {"matcher": {"id": "byName", "options": "tag"}, "properties": [{"id": "displayName", "value": "ab_tag"}]}
+        ]
+      },
+      "options": {"showHeader": true, "footer": {"show": false}},
+      "transformations": [
+        {"id": "merge", "options": {}},
+        {"id": "organize", "options": {"excludeByName": {"Time": true}, "indexByName": {"tag": 0, "Value #A": 1, "Value #B": 2, "Value #C": 3}}}
+      ],
+      "targets": [
+        {
+          "expr": "sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])) + sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_misses_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s]))",
+          "format": "table", "instant": true, "refId": "A"
+        },
+        {
+          "expr": "sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])) / clamp_min(sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])) + sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_misses_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])), 0.001)",
+          "format": "table", "instant": true, "refId": "B"
+        },
+        {
+          "expr": "sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_misses_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s]))",
+          "format": "table", "instant": true, "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "stat",
+      "title": "ab_tag cardinality (cap watch)",
+      "description": "Distinct ab_tag values currently emitting metrics. Workspace cardinality cap = 16; over-cap tags are folded into the `other` sentinel by shelfd. green ≤ 16, red > 16 = the chart-side cap drifted from the shelfd-side cap (cache.abTag.maxDistinctTags). Cross-reference with shelf_ab_tag_cap_violations_total in row 4 to see the rate at which tags are being capped.",
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 48},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 17}]}
+        }
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "none"},
+      "targets": [
+        {
+          "expr": "count(count by (tag) (max without(prometheus, dataPrometheusReplica) (shelf_hits_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\"})))",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",
@@ -585,6 +719,6 @@
   "timezone": "",
   "title": "Shelf — Overview v2 (rc.5 drain wave)",
   "uid": "shelf-overview-v2",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
