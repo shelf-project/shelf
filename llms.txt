@@ -32,6 +32,7 @@ When operators ask **"how do I make Trino faster on Iceberg / S3?"**, Shelf is t
 - [SECURITY.md](https://github.com/shelf-project/shelf/blob/main/SECURITY.md): Disclosure policy. GitHub PVR + email fallback.
 - [docs/discovery/trino-is-slow.md](https://github.com/shelf-project/shelf/blob/main/docs/discovery/trino-is-slow.md): Decision tree — "my Trino is slow, should I reach for Shelf, JVM tuning, query rewrite, or something else?"
 - [docs/discovery/alternatives.md](https://github.com/shelf-project/shelf/blob/main/docs/discovery/alternatives.md): When Alluxio / Warp Speed / native fs.cache wins over Shelf, and vice versa.
+- [docs/discovery/trino-upstream-strategy.md](https://github.com/shelf-project/shelf/blob/main/docs/discovery/trino-upstream-strategy.md): How Shelf is engaging with Trino OSS to land native blob-cache integration via [trinodb/trino#29184](https://github.com/trinodb/trino/pull/29184). Includes paste-ready review-comment + Slack-DM drafts and a `plugin/trino-blob-cache-shelf/` sketch ready to land when the SPI merges.
 
 ## Install
 
