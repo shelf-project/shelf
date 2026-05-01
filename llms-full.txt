@@ -1,0 +1,203 @@
+# Shelf — comprehensive LLM-readable reference
+
+> Iceberg-native, row-group-granular read cache for Trino. Drop-in S3 endpoint shim. Rust, Apache 2.0, fail-open. v1.0.0 GA.
+
+This is the long-form version of [llms.txt](./llms.txt), intended for LLM agents that have enough context budget to read the whole project at once. It mirrors the canonical docs in a flat, single-file form so retrieval-augmented agents can index it without crawling the repo.
+
+## What Shelf is
+
+Shelf is a Rust process that pretends to be S3. Trino is configured with `s3.endpoint=http://shelfd:9092` — one config line — and Shelf either serves Iceberg manifests, Parquet footers, and row-group byte ranges from its own DRAM + NVMe cache, or proxies the request to real S3 and remembers the answer for next time.
+
+The architecturally interesting parts:
+
+- **Row-group granularity.** Cache keys are `sha256(etag || offset || length || rg_ordinal)`. Shelf caches the 64 KB Parquet footer or a single 4 MB row group, not the whole 512 MB file. A `LIMIT 10` query against a 3 GB table caches **~1.78 MB** — the byte ranges that survive Iceberg + Parquet pruning, nothing more.
+- **Iceberg-clock freshness.** The S3 ETag is part of every cache key. New snapshot → new file → new ETag → new key. Old entries become unreachable orphans Foyer evicts on capacity. **No TTLs, no invalidation queues, no stale-read class of bug.**
+- **Plan-aware prefetch.** A Trino coordinator plugin warms file and footer bytes while the planner is still assigning splits.
+- **Shared across replicas.** One cluster, multiple Trino replicas, one warm working set via Highest Random Weight (HRW) hashing across the Shelf StatefulSet.
+- **Consensus-free.** Membership is the K8s headless service. Pin list and tenant quotas are a versioned S3 ConfigMap. No Raft, no etcd.
+- **Fail-open.** If a Shelf pod is unreachable, the Trino plugin falls through to direct S3 with a circuit breaker per pod — never blocks a query on a cache miss.
+
+## Real-world impact (measured, not extrapolated)
+
+Numbers from a four-replica Trino-on-Iceberg cluster running ~250 K queries/day, captured in the first hour after cutover from a previous cache layer to Shelf on a single canary replica:
+
+| Metric | Before | After | Δ |
+|---|---:|---:|---:|
+| Infra failure rate | 94.0 % | 5.7 % | **−94 %** |
+| `ICEBERG_INVALID_METADATA` | 147 | 0 | **−100 %** |
+| `ICEBERG_BAD_DATA` (Malformed Parquet) | 38 | 0 | **−100 %** |
+| `ICEBERG_CANNOT_OPEN_SPLIT` | 111 | 13 | −88 % |
+| p50 read wall time | 5.74 s | 2.05 s | **−64 %** |
+
+Source: `<your-trino-event-listener-table>` event-listener tables and `shelfd:9090/metrics`. Reproducer scripts and full methodology in `docs/`.
+
+## When to use Shelf
+
+- Trino on Iceberg / Parquet over S3 is slow because of repeated metadata + footer reads.
+- You want to share warm cache across multiple Trino replicas.
+- KEDA / spot-worker rotation is causing per-replica cold-cache tax.
+- You're using Alluxio and hitting `Timeout waiting for connection from pool`.
+- You want signed, SLSA-attested supply chain.
+
+## When NOT to use Shelf
+
+- Your Trino backend isn't S3-compatible (HDFS, ABFS, GCS — Azure / GCP support is roadmap).
+- Your S3 endpoint isn't yours to redirect (Snowflake, BigQuery, Athena, Redshift).
+- Every read is unique (no temporal locality).
+- Your performance bottleneck is plan-time CBO, not byte-range read latency.
+
+## Architecture summary
+
+One Rust binary, one container per pod, one pod per cache node. Two Foyer pools share the disk:
+
+| Pool | Lives on | Tuned for | Typical entry |
+|---|---|---|---|
+| **metadata** | DRAM only | High request rate, small entries | Iceberg manifest, Parquet footer |
+| **rowgroup** | DRAM + NVMe spill | High byte volume, range reads | Parquet column chunk |
+
+Mixing them in one pool would have eviction policies fighting each other.
+
+The S3-shim on `:9092` accepts `GetObject` and `HeadObject` over HTTP, ignoring SigV4 signatures by design (Shelf is a sidecar, not a multi-tenant gateway). It supports suffix byte-ranges (`bytes=-100`) and open-ended ranges (`bytes=0-`) — the shapes Trino's native S3 client uses for Parquet/Avro footer reads.
+
+Membership across the StatefulSet is HRW (rendezvous hashing) over the headless Service's DNS records — every pod independently computes which peer owns which key, no coordinator. SHELF-23 ETag-conditional peer-fetch lets any pod serve any key by racing peers against origin S3, so cache load redistributes naturally as pods restart or scale.
+
+## Install paths
+
+### Laptop / dev (≤ 10 minutes)
+
+```bash
+git clone https://github.com/shelf-project/shelf.git
+cd shelf/benchmarks/smoke
+./run-smoke.sh
+```
+
+Spins up MinIO + Trino 480 + iceberg-rest + shelfd in one `docker compose`, seeds 4 Iceberg tables, runs 10 canonical queries cold + warm, asserts cold ≡ warm byte-for-byte. PASS exit means everything works on your machine.
+
+### Production (Helm chart on EKS / GKE / any K8s)
+
+```bash
+helm install shelf oci://ghcr.io/shelf-project/charts/shelf \
+  --version 1.0.0 \
+  --namespace shelf --create-namespace \
+  --set replicaCount=3 \
+  --set persistence.size=200Gi \
+  --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=<YOUR_TRINO_IRSA_ROLE> \
+  --wait --timeout 5m
+```
+
+Then on the Trino side:
+
+```properties
+# Add to iceberg.properties (or whichever Iceberg catalog config)
+s3.endpoint=http://shelf-pool.shelf.svc.cluster.local:9092
+iceberg.metadata-cache.enabled=false
+```
+
+Roll Trino so it picks up the change. Hit ratio climbs over the next 30–60 minutes as the working set warms.
+
+### Agent-driven install (zero Trino / Helm / K8s expertise required)
+
+A Cursor / Claude / generic-LLM-agent install skill lives at [.cursor/skills/install-shelf/SKILL.md](./.cursor/skills/install-shelf/SKILL.md) (mirrored under `.claude/skills/`). Drop the user into "install Shelf for me" and the agent:
+
+1. Probes the cluster (read-only): finds the Trino StatefulSet, discovers the S3 IAM role, checks Helm + StorageClass.
+2. Asks the user one confirmation: "OK to install a 3-pod StatefulSet?"
+3. Helm-installs Shelf with the IAM role copied across.
+4. Smoke-tests the shim from a curl pod (no production traffic touched).
+5. Asks the user one more confirmation, shows the exact catalog diff: "OK to flip Trino's `s3.endpoint`?"
+6. Edits the Trino catalog ConfigMap, rolls the deployment.
+7. Validates the cutover by reading `shelf_hits_total` from `:9091/metrics`.
+8. Documents auto-rollback signals the user should wire into their alerting.
+
+The skill explicitly handles common failure modes (NetworkPolicy blocking ingress, IRSA mis-wired, JVM-local metadata cache absorbing warm reads, peak-traffic pre-warm collisions) so the agent can recover without escalating to the user.
+
+## Verifying signed artefacts
+
+Every release ships:
+
+- Multi-arch image: `ghcr.io/shelf-project/shelfd:1.0.0` (linux/amd64 + linux/arm64)
+- Helm chart: `oci://ghcr.io/shelf-project/charts/shelf:1.0.0`
+- `shelfctl` static binaries: linux/{amd64,arm64} (musl), darwin/arm64
+- `shelf-advisor` static binaries: linux/amd64 (musl), darwin/arm64
+- CycloneDX SBOM (Syft) attached as a cosign attestation
+- SLSA v1.0 provenance attached to the image
+
+Verify the image:
+
+```bash
+cosign verify ghcr.io/shelf-project/shelfd:1.0.0 \
+  --certificate-identity-regexp 'https://github.com/shelf-project/shelf/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Verify the SBOM attestation:
+
+```bash
+cosign verify-attestation ghcr.io/shelf-project/shelfd:1.0.0 \
+  --type cyclonedx \
+  --certificate-identity-regexp 'https://github.com/shelf-project/shelf/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Verify the SLSA provenance:
+
+```bash
+cosign verify-attestation ghcr.io/shelf-project/shelfd:1.0.0 \
+  --type slsaprovenance1 \
+  --certificate-identity-regexp 'https://github.com/slsa-framework/slsa-github-generator/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+## Where else Shelf fits
+
+Strip away the Trino-and-Iceberg framing and Shelf is an S3-API-compatible byte-range cache with ETag-based freshness. It works anywhere clients do repeated byte-range reads of the same S3-compatible objects and you control the S3 endpoint they talk to:
+
+- **Spark / Presto / Impala / Dremio / Drill on Iceberg, Delta, or Hudi** — same `s3.endpoint` override, same wins.
+- **ClickHouse external tables and S3 disk** — repeated byte-range reads from Parquet and ClickHouse native format.
+- **DuckDB / Polars / Lance in shared notebook environments** — one warm copy serves every analyst.
+- **AI/ML training datasets on S3** (PyTorch `webdataset`, Mosaic StreamingDataset, parquet/lance shards) — many workers re-reading the same shards across epochs.
+- **Cloud-Optimized GeoTIFFs, Zarr, HDF5 on S3** — formats designed for byte-range reads, hit Shelf's sweet spot.
+
+Won't help: closed managed services where the S3 endpoint isn't yours to redirect (Snowflake, BigQuery, Athena, Redshift), or workloads where every read is unique.
+
+## Comparison with alternatives
+
+See [docs/discovery/alternatives.md](./docs/discovery/alternatives.md) for the full table; in brief:
+
+| | Shelf 1.0 | Alluxio OSS | Alluxio EE | Warp Speed | Native fs.cache | No cache |
+|---|---|---|---|---|---|---|
+| Trino + Iceberg + S3 fit | Native | Generic | Native | Native (Starburst-only) | Generic | n/a |
+| Granularity | Row-group | File | Block | Row-group | File | n/a |
+| Multi-replica share | Yes (HRW ring) | Yes | Yes | Per-replica | Per-replica | n/a |
+| Spot-worker friendly | Yes | Yes | Yes | Yes | No | n/a |
+| Failure mode | Fail-open | Fail-closed | Fail-closed | Fail-open | Cache-miss → S3 | n/a |
+| License | Apache 2.0 | Apache 2.0 | Commercial | Commercial | Apache 2.0 | n/a |
+
+## Project status
+
+- **v1.0.0 GA** released 2026-04-30. SemVer 2.0 from this tag onward.
+- Soak: rc.5 ran on the origin Trino-on-EKS cluster (rep-1 + rep-2) from 2026-04-29; rc.6 proved the signed-release lane on the public org.
+- Governance: Year-1 BDFL (`@aamir306`), transitioning to PMC after 5 non-BDFL maintainers sustain activity for 12 weeks. See `MAINTAINERS.md` and `GOVERNANCE.md`.
+- Contributing: DCO sign-off, no CLA. See `CONTRIBUTING.md`.
+- Security: GitHub Private Vulnerability Reporting + `security@shelf-project.dev`. See `SECURITY.md`.
+
+## Roadmap (post-v1.0)
+
+- **GCS / Azure Blob backends** — same shim shape, different origin client.
+- **Per-table TTL / pin policies** — declarative quota / pin sets via S3 ConfigMap.
+- **Linux/arm64 release artefacts** — currently amd64-only; native arm64 GHA runner pending.
+- **Trino blob-cache SPI integration** — when [trinodb/trino#29184](https://github.com/trinodb/trino/issues/29184) lands, drop the S3 shim hop in favour of the native filesystem-factory plugin (already scaffolded in `clients/trino/`).
+- **Foyer 0.22 + Sieve eviction** — gated on a Belady-replay showing ≥ 5 pp lift over current LRU.
+
+## Common questions
+
+**Why not just use Alluxio?** See [docs/discovery/alternatives.md](./docs/discovery/alternatives.md). Short answer: Alluxio's metadata-pool saturation is a known sharp edge for Trino + Iceberg specifically; the two features that fix it (`underfs.s3.sdk.version=2`, `worker.s3.redirect.enabled`) are EE-only.
+
+**Will it work for Spark / DuckDB / ClickHouse?** Probably yes — the shim is protocol-level (S3 GET / HEAD over HTTP), not engine-specific. Untested, contributions welcome.
+
+**What's the operational footprint?** 3 pods × ~14–20 GiB RAM × 200 GiB NVMe (or gp3 EBS). Default Helm values fit on commodity EKS / GKE node pools.
+
+**How does it behave during S3 outages?** Cache hits keep serving; cache misses fail with the same error S3 returns. No fail-closed lockout.
+
+**Does it support encryption?** S3 reads inherit whatever client-side encryption your AWS SDK applies. Server-side encryption is at the S3 layer, transparent to Shelf.
+
+**What about authentication?** Shelf's S3 shim ignores SigV4 signatures by design — it's a same-namespace sidecar, not a multi-tenant gateway. Network-level segmentation (NetworkPolicy, namespace isolation) is the auth boundary.
