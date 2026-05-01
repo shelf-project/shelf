@@ -150,6 +150,8 @@ If you're trying to figure out whether Shelf is the right answer for your specif
 
 → [docs/discovery/alternatives.md](./docs/discovery/alternatives.md) — Shelf vs Alluxio vs Warp Speed vs native, with the trade-offs spelled out.
 
+→ [docs/discovery/trino-upstream-strategy.md](./docs/discovery/trino-upstream-strategy.md) — how Shelf engages with Trino OSS to land native blob-cache integration ([trinodb/trino#29184](https://github.com/trinodb/trino/pull/29184)) over time.
+
 ## Where else does Shelf fit?
 
 Strip away the Trino-and-Iceberg framing and Shelf is an **S3-API-compatible byte-range cache** with ETag-based freshness. It works anywhere clients do repeated byte-range reads of the same S3-compatible objects and you control the S3 endpoint they talk to:

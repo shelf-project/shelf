@@ -185,8 +185,9 @@ See [docs/discovery/alternatives.md](./docs/discovery/alternatives.md) for the f
 - **GCS / Azure Blob backends** — same shim shape, different origin client.
 - **Per-table TTL / pin policies** — declarative quota / pin sets via S3 ConfigMap.
 - **Linux/arm64 release artefacts** — currently amd64-only; native arm64 GHA runner pending.
-- **Trino blob-cache SPI integration** — when [trinodb/trino#29184](https://github.com/trinodb/trino/issues/29184) lands, drop the S3 shim hop in favour of the native filesystem-factory plugin (already scaffolded in `clients/trino/`).
+- **Trino blob-cache SPI integration** — when [trinodb/trino#29184](https://github.com/trinodb/trino/pull/29184) merges, ship `plugin/trino-blob-cache-shelf/` upstream within a week (sketch already designed in [`clients/trino/docs/blob-cache-plugin-sketch.md`](./clients/trino/docs/blob-cache-plugin-sketch.md)). The native plugin saves an in-pod HTTP hop, skips wasted SigV4 CPU, restores Trino-worker affinity for cache hits, and unlocks per-query metric attribution. Expected ~5–15 % additional latency improvement on warm reads. See [`docs/discovery/trino-upstream-strategy.md`](./docs/discovery/trino-upstream-strategy.md) for the full engagement plan, including paste-ready PR-comment + Slack-DM drafts and a Shelf-perspective SPI design feedback document.
 - **Foyer 0.22 + Sieve eviction** — gated on a Belady-replay showing ≥ 5 pp lift over current LRU.
+- **`SplitCompletedEvent` upstream proposal** — stretch ask for the next Trino SPI cycle: row-group-level read observability so the Shelf prefetcher can warm the right byte ranges without guessing. 6–12 month champion-cycle.
 
 ## Common questions
 
