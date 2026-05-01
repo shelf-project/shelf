@@ -607,6 +607,42 @@ impl FoyerStore {
             crate::metrics::LODC_ADMIT_BURST_CAPACITY
                 .with_label_values(&[pool_label(Pool::RowGroup)])
                 .set(limiter.max_burst_bytes_for_init() as i64);
+            // **A1 (rc.7)** — spawn the RSS poller. Held by an
+            // `Arc<RssThrottle>` clone the limiter and the poller
+            // both share; the poller self-exits via `Weak::upgrade`
+            // failure when `FoyerStore` is dropped (process exit).
+            // Polling cadence comes from the operator config so
+            // tuning does not require a code change.
+            if let Some(throttle) = limiter.rss_throttle() {
+                let interval = std::time::Duration::from_secs(
+                    config
+                        .rowgroup
+                        .disk_cache
+                        .admission
+                        .rss_throttle
+                        .rss_poll_interval_secs
+                        .max(1),
+                );
+                tracing::info!(
+                    pool = pool_label(Pool::RowGroup),
+                    rss_target_bytes = config.rowgroup.disk_cache.admission.rss_throttle.rss_target_bytes,
+                    rss_poll_interval = ?interval,
+                    low_watermark = config.rowgroup.disk_cache.admission.rss_throttle.low_watermark,
+                    high_watermark = config.rowgroup.disk_cache.admission.rss_throttle.high_watermark,
+                    "A1 RSS-aware admission throttle enabled",
+                );
+                crate::admission_limiter::RssThrottle::spawn_poller(throttle, interval);
+            }
+        } else {
+            // Pre-touch the A1 gauges at FULL even when the byte-
+            // rate limiter is disabled so dashboards never show
+            // "no data" on a freshly deployed pod.
+            crate::metrics::LODC_RSS_THROTTLE_MULTIPLIER
+                .with_label_values(&[pool_label(Pool::RowGroup)])
+                .set(10_000);
+            crate::metrics::LODC_RSS_PRESSURE_SECONDS_TOTAL
+                .with_label_values(&[pool_label(Pool::RowGroup)])
+                .inc_by(0);
         }
 
         // Pre-touch every metric family that is otherwise only emitted

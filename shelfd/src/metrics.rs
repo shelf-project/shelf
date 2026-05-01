@@ -769,6 +769,56 @@ pub static LODC_ADMIT_BURST_CAPACITY: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("register lodc_admit_burst_capacity")
 });
 
+/// **A1 (rc.7)** — current RSS-aware admission multiplier for the
+/// SHELF-29 limiter, in basis points (`0..=10_000`). `10_000` means
+/// the multiplier is at full (no RSS throttle applied); `0` means the
+/// gate is fully paused. Sampled by the
+/// [`crate::admission_limiter::RssThrottle`] poller every
+/// `rss_poll_interval_secs`. Stored as an integer gauge to match
+/// the `shelf_rolling_hit_ratio_bps` precedent (and to dodge the
+/// YAML scientific-notation Helm landmine if any operator pulls
+/// the value into a chart values overlay).
+///
+/// Operators reading the value: divide by 10_000 to render as a
+/// fraction (`mult = bps / 10000.0`).
+pub static LODC_RSS_THROTTLE_MULTIPLIER: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec_with_registry!(
+        "shelf_lodc_rss_throttle_multiplier",
+        "A1 RSS-aware admission multiplier for the SHELF-29 limiter, \
+         in basis points (0..=10_000). 10_000 = no throttle, 0 = full \
+         pause. Updated every `rss_poll_interval_secs` (default 5s) by \
+         the RssThrottle poller. Divide by 10_000 to render as a \
+         fraction.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register lodc_rss_throttle_multiplier")
+});
+
+/// **A1 (rc.7)** — cumulative seconds the RSS-aware multiplier has
+/// been active (i.e. multiplier < `1.0`). Incremented by the poll
+/// interval every tick the multiplier is below the no-throttle
+/// ceiling, so `rate(...[1m])` gives the fraction of wall-clock
+/// time the pod spent under RSS pressure.
+///
+/// A non-zero rate sustained for more than 30 min on any pod is
+/// the operator signal that `rss_target_bytes` is sized too low
+/// for the steady-state working set OR that an unrelated leak is
+/// bloating RSS — both warrant investigation, neither is a
+/// "drop the throttle" signal.
+pub static LODC_RSS_PRESSURE_SECONDS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_lodc_rss_pressure_seconds_total",
+        "A1 cumulative seconds the RSS-aware admission multiplier was \
+         below 1.0 (i.e. some throttle was active). Incremented by the \
+         poll interval each tick the multiplier is sub-unity. \
+         `rate(...[1m])` ≈ fraction of time under RSS pressure.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register lodc_rss_pressure_seconds_total")
+});
+
 /// SHELF-21e — current in-flight bytes the back-pressure controller
 /// observes per pool. Computed as `admitted_bytes − cache_write_bytes`
 /// (both monotonic). Zero in steady state; climbs toward the
@@ -1331,6 +1381,9 @@ pub const EXPOSED_SERIES: &[&str] = &[
     // SHELF-29 — independent-queue admission rate-limiter.
     "shelf_lodc_admit_tokens_available",
     "shelf_lodc_admit_burst_capacity",
+    // A1 (rc.7) — RSS-aware admission multiplier on top of SHELF-29.
+    "shelf_lodc_rss_throttle_multiplier",
+    "shelf_lodc_rss_pressure_seconds_total",
     // SHELF-33 — W-TinyLFU admission gate observability.
     "shelf_wtinylfu_decisions_total",
     "shelf_wtinylfu_decays_total",
@@ -1449,6 +1502,8 @@ mod tests {
             LODC_QUEUE_DEPTH.desc(),
             LODC_ADMIT_TOKENS_AVAILABLE.desc(),
             LODC_ADMIT_BURST_CAPACITY.desc(),
+            LODC_RSS_THROTTLE_MULTIPLIER.desc(),
+            LODC_RSS_PRESSURE_SECONDS_TOTAL.desc(),
             WTINYLFU_DECISIONS_TOTAL.desc(),
             WTINYLFU_DECAYS_TOTAL.desc(),
             PEER_HIT_TOTAL.desc(),
@@ -1594,6 +1649,12 @@ mod tests {
         LODC_ADMIT_BURST_CAPACITY
             .with_label_values(&["rowgroup"])
             .set(0);
+        LODC_RSS_THROTTLE_MULTIPLIER
+            .with_label_values(&["rowgroup"])
+            .set(10_000);
+        LODC_RSS_PRESSURE_SECONDS_TOTAL
+            .with_label_values(&["rowgroup"])
+            .inc_by(0);
         WTINYLFU_DECISIONS_TOTAL
             .with_label_values(&["admit"])
             .inc_by(0);

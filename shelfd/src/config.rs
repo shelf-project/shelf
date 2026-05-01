@@ -460,6 +460,103 @@ pub struct LodcAdmissionConfig {
     /// in v1; this field rarely binds under defaults.
     #[serde(default = "default_max_inflight_admissions")]
     pub max_inflight_admissions: u64,
+    /// **A1 (rc.7)** — RSS-aware admission multiplier. Layered on
+    /// top of the byte-rate token bucket: at high process RSS the
+    /// multiplier drops the effective admit rate toward zero so a
+    /// pod nearing the kubelet allocatable ceiling stops adding
+    /// fresh bytes to its own DRAM/NVMe pipeline. See the rustdoc
+    /// on [`crate::admission_limiter::RssThrottle`] and ADR-0029.
+    ///
+    /// `#[serde(default)]` so existing values overlays without a
+    /// `rss_throttle:` block keep parsing; the embedded
+    /// [`RssThrottleConfig::default()`] turns the gate ON because
+    /// it is the operational fix for the c6a OOM cascade
+    /// (workspace memory: 2026-04-30 / 2026-05-01).
+    #[serde(default)]
+    pub rss_throttle: RssThrottleConfig,
+}
+
+/// **A1 (rc.7)** — process-RSS feedback loop on top of the SHELF-29
+/// byte-rate admission limiter.
+///
+/// Default-on. The 2026-05-01 incident showed the byte-rate gate
+/// alone cannot stop a pod whose RSS is climbing because of inflight
+/// S3 buffers / Foyer DRAM / LODC submit queue all expanding at
+/// once — kernel-level OOMKill happens long before the byte-rate
+/// budget would naturally throttle. This config + the matching
+/// poller in [`crate::admission_limiter::RssThrottle`] watch RSS
+/// every `rss_poll_interval_secs` and slide the admission multiplier
+/// linearly between [`low_watermark`] and [`high_watermark`].
+///
+/// Knobs are floats in `[0.0, 1.0]` because they are fractions of
+/// `rss_target_bytes`; the runtime converts to basis points
+/// internally to avoid `f64` arithmetic on the hot path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RssThrottleConfig {
+    /// Master switch. Default `true` — this is the operational fix
+    /// for the c6a / m5a OOM cascade. Set `false` in a values
+    /// overlay to disable the RSS feedback path while keeping the
+    /// rest of the SHELF-29 limiter intact.
+    #[serde(default = "default_rss_throttle_enabled")]
+    pub enabled: bool,
+    /// Reference RSS the multiplier is computed against. Default
+    /// 40 GiB matches the post-rc.7 pod memory limit on the
+    /// `alluxio` NodePool m5a.4xlarge baseline; operators sizing
+    /// for a different limit override this in the chart values
+    /// AND the kubelet `resources.limits.memory` together.
+    #[serde(default = "default_rss_target_bytes")]
+    pub rss_target_bytes: u64,
+    /// Polling cadence, in seconds. Default `5`. The poller is a
+    /// single tokio interval task per pool that reads
+    /// `/proc/self/status` once per tick; cost is < 1 µs / tick on
+    /// Linux, the bound is "fresh enough to react before OOM"
+    /// rather than "cheap enough to run continuously".
+    #[serde(default = "default_rss_poll_interval_secs")]
+    pub rss_poll_interval_secs: u64,
+    /// Pressure (`current_rss / rss_target_bytes`) at which the
+    /// multiplier starts dropping below `1.0`. Default `0.7`
+    /// (28 GiB on a 40 GiB target).
+    #[serde(default = "default_rss_throttle_low_watermark")]
+    pub low_watermark: f64,
+    /// Pressure at which the multiplier reaches `0.0` (full
+    /// admission pause). Default `0.9` (36 GiB on a 40 GiB
+    /// target). Anything above this still pauses; the value caps
+    /// the multiplier, it is not a "kill above this RSS" trigger.
+    #[serde(default = "default_rss_throttle_high_watermark")]
+    pub high_watermark: f64,
+}
+
+fn default_rss_throttle_enabled() -> bool {
+    true
+}
+
+fn default_rss_target_bytes() -> u64 {
+    40 * 1024 * 1024 * 1024
+}
+
+fn default_rss_poll_interval_secs() -> u64 {
+    5
+}
+
+fn default_rss_throttle_low_watermark() -> f64 {
+    0.7
+}
+
+fn default_rss_throttle_high_watermark() -> f64 {
+    0.9
+}
+
+impl Default for RssThrottleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_rss_throttle_enabled(),
+            rss_target_bytes: default_rss_target_bytes(),
+            rss_poll_interval_secs: default_rss_poll_interval_secs(),
+            low_watermark: default_rss_throttle_low_watermark(),
+            high_watermark: default_rss_throttle_high_watermark(),
+        }
+    }
 }
 
 fn default_admission_enabled() -> bool {
@@ -485,6 +582,7 @@ impl Default for LodcAdmissionConfig {
             target_bytes_per_sec: default_target_bytes_per_sec(),
             max_burst_bytes: default_max_burst_bytes(),
             max_inflight_admissions: default_max_inflight_admissions(),
+            rss_throttle: RssThrottleConfig::default(),
         }
     }
 }
