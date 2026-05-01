@@ -99,6 +99,14 @@ data:
       {{- with .natTraversalBasisPoints }}
       nat_traversal_basis_points: {{ . | int }}
       {{- end }}
+      {{- with .amortizedDollarsPerHour }}
+      # A4 (rc.7) — anti-overclaim guard requires explicit operator
+      # configuration of the amortized shelf-pool cost. Unset ⇒ the
+      # net counter `shelf_s3_dollars_saved_net_total` does not
+      # publish (gauge `shelf_pool_amortized_dollars_per_hour` reads
+      # `0` so dashboards can flag the misconfig).
+      amortized_dollars_per_hour: {{ . }}
+      {{- end }}
     {{- end }}
     {{- with .Values.cache.abTag }}
     # SHELF-42 — A/B tag receive path. Default off; flip

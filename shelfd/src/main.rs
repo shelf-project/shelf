@@ -238,6 +238,28 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // cost state is disabled. Cancelled on shutdown via the same
     // `shutdown` token the data plane already observes.
     cost_state.spawn_rate_updater(shutdown.clone());
+
+    // A4 (rc.7) — spawn the net dollars-saved accountant. The
+    // accountant always publishes the
+    // `shelf_pool_amortized_dollars_per_hour` gauge (so dashboards
+    // can spot the unset state) but only credits the net counter
+    // when `cache.cost.amortized_dollars_per_hour` is a positive,
+    // finite value (anti-overclaim guard). See ADR-0028 for the
+    // rollout rationale and `shelfd/src/cost.rs` for the model.
+    let net_accountant = Arc::new(shelfd::cost::NetCostAccountant::new(
+        config.cost.amortized_dollars_per_hour,
+    ));
+    tracing::info!(
+        amortized_micros_per_hour = net_accountant.amortized_micros_per_hour(),
+        publishable = net_accountant.is_publishable(),
+        "A4 (rc.7) net cost accountant initialised"
+    );
+    shelfd::cost::spawn_net_accountant(
+        net_accountant,
+        cost_state.region().to_owned(),
+        shutdown.clone(),
+    );
+
     if let Some(handle) = reload_handle {
         state = state.with_reload_handle(handle);
     }

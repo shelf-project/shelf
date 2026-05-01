@@ -123,6 +123,14 @@ cache:
     # override (e.g. EDP discount), set the matching field below
     # in your overlay and update the citation block above.
     # natTraversalBasisPoints: 0   # default; S3 VPC endpoint = no NAT charge
+    # A4 (rc.7) — net dollars-saved accountant. The pool currently
+    # runs 6 pods × m5a.4xlarge × $0.864/hr ≈ $5.18/hr in
+    # ap-south-1 (On-Demand list price; Spot / RI / EDP discount
+    # would lower this). Operator MUST verify against the actual
+    # EKS bill before merging — see the v2 dashboard's Per-pod
+    # cost panel and the Athena CUR `cur` table filter
+    # `resource_tags_aws_eks_deployment LIKE 'shelf%'`.
+    amortizedDollarsPerHour: 5.18
 
   # SHELF-42 — A/B query tagging. Penpencil opts in: Prometheus
   # retention is already sized for the per-tag series and the
