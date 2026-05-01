@@ -200,7 +200,9 @@ mod tests {
         // bypass this would be served but not cached.
         let big = Bytes::from(vec![0xAB; 32]);
         let outcome = store
-            .get_or_fetch(Pool::RowGroup, key.clone(), &policy, async move { Ok(big) })
+            .get_or_fetch(Pool::RowGroup, key.clone(), &policy, async move {
+                Ok((big, crate::coop_admission::FetchSource::Origin))
+            })
             .await
             .expect("fetch");
         assert!(matches!(outcome, ReadOutcome::Miss(_)));

@@ -215,7 +215,10 @@ fn singleflight_emits_leader_and_follower_events() {
                 store
                     .get_or_fetch(Pool::RowGroup, key, &admission, async move {
                         tokio::time::sleep(Duration::from_millis(50)).await;
-                        Ok::<_, shelfd::Error>(Bytes::from_static(payload))
+                        Ok::<_, shelfd::Error>((
+                            Bytes::from_static(payload),
+                            shelfd::coop_admission::FetchSource::Origin,
+                        ))
                     })
                     .await
             }

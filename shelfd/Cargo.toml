@@ -62,6 +62,13 @@ parquet = { workspace = true }
 # until an operator flips `cache.rewarm.enabled=true` AND populates
 # `cache.rewarm.tables`.
 apache-avro = { workspace = true }
+# A6 (rc.7) — cooperative peer admission probabilistic gate
+# (`shelfd::coop_admission`). One `SmallRng` per `CoopAdmissionGate`
+# instance behind a `parking_lot::Mutex` — never shared across tasks.
+# Default-off via `cache.coopAdmission.enabled=false`, so the gate is
+# a no-op (`return true`) on stock deployments and the dep adds
+# compile-time only.
+rand = { workspace = true }
 # SHELF E2 — Pool::Metadata compression (gated behind `zstd_metadata`
 # feature). The dep compiles fine off-feature; only the wrapper in
 # `compression.rs` is disabled.

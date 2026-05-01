@@ -156,10 +156,18 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // is the operator-facing rollback flag. Flipping it to `false`
     // is a config-only revert; no rolling restart is required for
     // the gate to disengage. See ADR-0027.
+    // **A6 (rc.7)** — wire the cooperative peer-admission gate from
+    // `cache.coopAdmission`. Default-off so a stock OSS deploy
+    // behaves identically to pre-A6; operators flip
+    // `coopAdmission.enabled = true` once the new counters are
+    // surfaced on the dashboard. See ADR-0037.
+    let coop_gate = shelfd::coop_admission::CoopAdmissionGate::new(config.coop_admission.clone());
+
     let store = Arc::new(
         FoyerStore::open(&config.pools)
             .await?
-            .with_drain(drain_signal.clone(), config.drain.refuse_admits),
+            .with_drain(drain_signal.clone(), config.drain.refuse_admits)
+            .with_coop_admission(coop_gate),
     );
     if config.drain.refuse_admits {
         tracing::info!(
@@ -170,6 +178,18 @@ async fn run(args: Args) -> anyhow::Result<()> {
         tracing::warn!(
             "A2 drain-aware admission disengaged via cache.drain.refuse_admits=false; \
              rolling-restart admits will continue feeding the cache while the pod terminates"
+        );
+    }
+    if config.coop_admission.enabled {
+        tracing::info!(
+            replication_factor = config.coop_admission.replication_factor,
+            "A6 cooperative peer-admission gate engaged (enabled=true)"
+        );
+    } else {
+        tracing::debug!(
+            replication_factor = config.coop_admission.replication_factor,
+            "A6 cooperative peer-admission gate disabled (cache.coopAdmission.enabled=false); \
+             every peer-fetched byte will admit unchanged"
         );
     }
     let router = Arc::new(Router::new());

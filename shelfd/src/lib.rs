@@ -76,7 +76,13 @@ pub mod rewarm_poller;
 // only gates the metadata-pool consumer, not the module definition.
 pub mod compression;
 pub mod config;
+// **A6 (rc.7)** — cooperative peer admission probabilistic gate.
+// Default-OFF via `cache.coopAdmission.enabled=false`, so the module is
+// always compiled (the EXPOSED_SERIES list and registry-regression test
+// need the metric statics resolved at build time) but the gate is a
+// no-op until an operator opts in. See ADR-0037.
 pub mod control;
+pub mod coop_admission;
 // SHELF-40 — runtime glue for the `shelf-cost` audit-able cost
 // model. Lives here (not under `metrics`) because it owns its own
 // rolling-rate background task in addition to the metric handles.

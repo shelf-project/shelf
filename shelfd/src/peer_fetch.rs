@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
+use crate::coop_admission::FetchSource;
 use crate::http::ServerState;
 use crate::peer::{race_peer_or_origin, RaceOutcome};
 use crate::router;
@@ -83,12 +84,15 @@ pub fn pool_str(pool: Pool) -> &'static str {
 /// peer against origin S3 on a local cache miss.
 ///
 /// Wraps [`crate::peer::race_peer_or_origin`] with the metric bumps
-/// and the local-vs-self short-circuit, returning the same `Bytes`
-/// shape `Origin::get_range` would have. On any non-`PeerHit`
-/// outcome the origin future's resolved value is the source of
-/// truth; this function preserves the existing read-path contract
-/// (a cache miss without peer help still returns origin bytes
-/// unchanged).
+/// and the local-vs-self short-circuit. Returns the resolved bytes
+/// alongside their [`FetchSource`] tag so the downstream admit site
+/// (A6 — `crate::store::FoyerStore::get_or_fetch`) can apply the
+/// cooperative-admission gate to peer-sourced bytes only. On any
+/// non-`PeerHit` outcome the origin future's resolved value is the
+/// source of truth; the source tag is then `Origin`. This function
+/// preserves the existing read-path contract (a cache miss without
+/// peer help still returns origin bytes unchanged) — A6 only adds the
+/// orthogonal source axis on the return type, never alters the bytes.
 ///
 /// See the module docs for the fail-open conditions.
 pub async fn peer_or_origin_fetch<F>(
@@ -98,12 +102,12 @@ pub async fn peer_or_origin_fetch<F>(
     offset: u64,
     length: u64,
     origin_fut: F,
-) -> crate::Result<Bytes>
+) -> crate::Result<(Bytes, FetchSource)>
 where
     F: std::future::Future<Output = crate::Result<Bytes>> + Send,
 {
     if !state.is_peer_fetch_enabled() {
-        return origin_fut.await;
+        return origin_fut.await.map(|b| (b, FetchSource::Origin));
     }
 
     // `Router::owner` panics on an empty ring (membership has not
@@ -118,17 +122,17 @@ where
     // already uses for empty rings.
     let view = state.router.view();
     let Some(owner) = router::owner_in(view.members(), key.as_bytes()).cloned() else {
-        return origin_fut.await;
+        return origin_fut.await.map(|b| (b, FetchSource::Origin));
     };
     if owner.id.as_str() == &*state.pod_id {
         // We are the HRW primary — no peer benefit.
-        return origin_fut.await;
+        return origin_fut.await.map(|b| (b, FetchSource::Origin));
     }
 
     let Some(peer_url) = peer_base_url(&owner.endpoint, state.peer_stats_port) else {
         // Endpoint shape we don't recognise; bail rather than
         // construct a malformed URL.
-        return origin_fut.await;
+        return origin_fut.await.map(|b| (b, FetchSource::Origin));
     };
 
     let pool_label = pool_str(pool);
@@ -168,14 +172,14 @@ where
                 peer_az: crate::cost::DEFAULT_PEER_AZ,
             };
             let _ = state.cost.observe(event);
-            Ok(b)
+            Ok((b, FetchSource::Peer))
         }
         // Peer was reachable but said "Miss" → origin is the answer.
         RaceOutcome::PeerMiss(o) => {
             crate::metrics::PEER_MISS_TOTAL
                 .with_label_values(&[pool_label])
                 .inc();
-            o
+            o.map(|b| (b, FetchSource::Origin))
         }
         // Origin completed before the probe could return — peer was
         // strictly slower than a full S3 GET on this request. From
@@ -186,19 +190,19 @@ where
             crate::metrics::PEER_MISS_TOTAL
                 .with_label_values(&[pool_label])
                 .inc();
-            o
+            o.map(|b| (b, FetchSource::Origin))
         }
         RaceOutcome::PeerTimeout(o) => {
             crate::metrics::PEER_TIMEOUT_TOTAL
                 .with_label_values(&[pool_label])
                 .inc();
-            o
+            o.map(|b| (b, FetchSource::Origin))
         }
         RaceOutcome::PeerError(kind, o) => {
             crate::metrics::PEER_ERROR_TOTAL
                 .with_label_values(&[pool_label, kind.metric_label()])
                 .inc();
-            o
+            o.map(|b| (b, FetchSource::Origin))
         }
     }
 }

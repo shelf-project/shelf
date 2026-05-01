@@ -168,7 +168,12 @@ pub trait Store: Send + Sync + Debug + 'static {
 /// the `OnceCell` and drives `fetch`, everyone else awaits the same
 /// cell. Map entries hold only a `Weak`, so the last `Arc` drop cleans
 /// up without a separate reaper task.
-type InflightMap = Mutex<HashMap<(Pool, Key), Weak<OnceCell<Result<Bytes, String>>>>>;
+type InflightMap = Mutex<
+    HashMap<
+        (Pool, Key),
+        Weak<OnceCell<Result<(Bytes, crate::coop_admission::FetchSource), String>>>,
+    >,
+>;
 
 /// Internal: one pool worth of Foyer state.
 ///
@@ -498,6 +503,15 @@ pub struct FoyerStore {
     /// gate writes. Default `false` so a bare `FoyerStore::open`
     /// from tests does not accidentally engage A2.
     drain_refuse_admits: bool,
+    /// **A6 (rc.7)** — cooperative peer-admission probabilistic gate.
+    /// Consulted **only** when `get_or_fetch`'s fetcher returns
+    /// [`crate::coop_admission::FetchSource::Peer`]; origin fetches
+    /// admit unconditionally. Held inline (not behind `Option<_>`) so
+    /// the admit hot path reads a single field — the default-
+    /// constructed gate (built when no config is wired) has
+    /// `enabled = false` and short-circuits inside
+    /// `should_admit_peer_bytes` for ~zero overhead. See ADR-0037.
+    coop_gate: crate::coop_admission::CoopAdmissionGate,
 }
 
 impl FoyerStore {
@@ -697,6 +711,13 @@ impl FoyerStore {
             crate::metrics::ADMISSIONS_TOTAL
                 .with_label_values(&[label, "reject_drain"])
                 .inc_by(0);
+            // **A6 (rc.7)** — pre-touch the cooperative-rejection
+            // child for the same reason. Stays flat on a stock OSS
+            // deploy (gate is default-off) but the series has to
+            // exist for the dashboard to render.
+            crate::metrics::ADMISSIONS_TOTAL
+                .with_label_values(&[label, "reject_coop"])
+                .inc_by(0);
             crate::metrics::EVICTIONS_TOTAL
                 .with_label_values(&[label, "capacity"])
                 .inc_by(0);
@@ -719,6 +740,22 @@ impl FoyerStore {
             .inc_by(0);
         crate::metrics::DRAIN_ACTIVE.set(0);
 
+        // **A6 (rc.7)** — pre-touch the cooperative-admission counters
+        // so a freshly booted, idle pod publishes the documented label
+        // set as zeros. Same pre-touch discipline the rest of `open()`
+        // uses for the A1/A2/SHELF-21e/SHELF-29 series.
+        for label in [pool_label(Pool::Metadata), pool_label(Pool::RowGroup)] {
+            crate::metrics::COOP_PEER_ADMITS_TOTAL
+                .with_label_values(&[label])
+                .inc_by(0);
+            crate::metrics::COOP_PEER_DROPS_TOTAL
+                .with_label_values(&[label])
+                .inc_by(0);
+            crate::metrics::COOP_PRIMARY_FORCE_ADMITS_TOTAL
+                .with_label_values(&[label])
+                .inc_by(0);
+        }
+
         Ok(Self {
             metadata,
             rowgroup,
@@ -729,6 +766,9 @@ impl FoyerStore {
             pin_set: RwLock::new(HashMap::new()),
             drain_signal: crate::membership::DrainSignal::new(),
             drain_refuse_admits: false,
+            coop_gate: crate::coop_admission::CoopAdmissionGate::new(
+                crate::coop_admission::CoopAdmissionConfig::default(),
+            ),
         })
     }
 
@@ -767,6 +807,30 @@ impl FoyerStore {
     /// surface the *effective* gate state (vs the raw signal).
     pub fn drain_refuses_admits(&self) -> bool {
         self.drain_refuse_admits && self.drain_signal.is_active()
+    }
+
+    /// **A6 (rc.7)** — wire the operator-configured cooperative
+    /// peer-admission gate into the rowgroup admit site. Builder
+    /// shape mirrors [`FoyerStore::with_drain`] so `main.rs` reads
+    /// as a one-liner. Called ONCE during boot; replacing the gate
+    /// at runtime is not supported (the RNG state would reset on
+    /// every call).
+    ///
+    /// The default-constructed gate (built in `open`) has
+    /// `enabled = false` and is a strict no-op at the admit site,
+    /// so this builder is only required when the operator opts in
+    /// via `cache.coopAdmission.enabled = true`. See ADR-0037.
+    pub fn with_coop_admission(mut self, gate: crate::coop_admission::CoopAdmissionGate) -> Self {
+        self.coop_gate = gate;
+        self
+    }
+
+    /// **A6 (rc.7)** — `true` when the cooperative peer-admission
+    /// gate's master switch is flipped on. Exposed for `/stats` and
+    /// test introspection; the admit hot path consults the gate
+    /// directly via `should_admit_peer_bytes`.
+    pub fn coop_admission_enabled(&self) -> bool {
+        self.coop_gate.is_enabled()
     }
 
     /// **B1** — reconcile the configured compression mode with the
@@ -1037,7 +1101,7 @@ impl FoyerStore {
     ) -> crate::Result<ReadOutcome>
     where
         A: crate::admission::AdmissionPolicy + ?Sized,
-        F: Future<Output = crate::Result<Bytes>> + Send,
+        F: Future<Output = crate::Result<(Bytes, crate::coop_admission::FetchSource)>> + Send,
     {
         // SHELF-G1 / Track A1: capture the tier (DRAM vs NVMe) so the
         // returned `ReadOutcome::Hit` keeps `hit_memory` / `hit_disk`
@@ -1115,15 +1179,15 @@ impl FoyerStore {
             );
         }
 
-        let bytes = match slot.clone() {
-            Ok(b) => b,
+        let (bytes, source) = match slot.clone() {
+            Ok((b, src)) => (b, src),
             // S2: the leader's original `crate::Error` variant was
-            // stringified at the `OnceCell<Result<Bytes, String>>`
-            // boundary, so we can no longer recover it. Surface as
-            // `Error::Singleflight` rather than `Error::Origin` so
-            // the `shelfd_error_total{component}` series doesn't
-            // mis-attribute Foyer / membership / admission failures
-            // to the S3 origin.
+            // stringified at the `OnceCell<Result<(Bytes, FetchSource),
+            // String>>` boundary, so we can no longer recover it.
+            // Surface as `Error::Singleflight` rather than
+            // `Error::Origin` so the `shelfd_error_total{component}`
+            // series doesn't mis-attribute Foyer / membership /
+            // admission failures to the S3 origin.
             Err(e) => return Err(crate::Error::Singleflight(e)),
         };
 
@@ -1202,7 +1266,45 @@ impl FoyerStore {
             true
         };
 
-        let admit = policy_admit && lodc_admit && rate_admit;
+        // **A6 (rc.7)** — cooperative peer-admission gate. Consulted
+        // ONLY for `FetchSource::Peer`; origin admits unchanged. The
+        // gate sits **after** the pressure-aware chain (drain / policy
+        // / LODC / rate-limiter) so back-pressure rejections still
+        // dominate the `shelf_admissions_total{decision=...}` rollup.
+        // Pinned keys bypass the cooperative gate as well — operator-
+        // blessed entries always admit regardless of source.
+        //
+        // By construction the only path that produces `Peer` here is
+        // `peer_or_origin_fetch` (SHELF-23), which already short-
+        // circuits to `Origin` when this pod is the HRW primary. So
+        // when `source == Peer` we know `key_primary_is_self == false`
+        // and pass that directly. The gate's
+        // `should_admit_peer_bytes` keeps the `key_primary_is_self`
+        // parameter as a documented invariant — see `coop_admission.rs`.
+        let coop_admit = match source {
+            crate::coop_admission::FetchSource::Origin => true,
+            crate::coop_admission::FetchSource::Peer => {
+                if ctx.pinned {
+                    // Operator-blessed; pinned keys are exempt from
+                    // every probabilistic gate, A6 included.
+                    true
+                } else {
+                    let admitted = self.coop_gate.should_admit_peer_bytes(false);
+                    if admitted {
+                        crate::metrics::COOP_PEER_ADMITS_TOTAL
+                            .with_label_values(&[pool_label])
+                            .inc();
+                    } else {
+                        crate::metrics::COOP_PEER_DROPS_TOTAL
+                            .with_label_values(&[pool_label])
+                            .inc();
+                    }
+                    admitted
+                }
+            }
+        };
+
+        let admit = policy_admit && lodc_admit && rate_admit && coop_admit;
         let decision_label = if admit {
             "admit"
         } else if !lodc_admit {
@@ -1220,6 +1322,16 @@ impl FoyerStore {
             // `shelf_admissions_total` panel can show the *new*
             // gate's blast radius vs the level gate's.
             "reject_rate"
+        } else if !coop_admit {
+            // **A6 (rc.7)** — the upstream chain (policy / LODC /
+            // rate) all said admit, but the cooperative gate dropped
+            // the secondary copy because the local pod is not the
+            // HRW primary and the operator-configured replication
+            // factor said "trust the primary". Distinct from the
+            // pressure-aware reject labels so dashboards can graph
+            // "saved by cooperative gate" independently from "saved
+            // by NVMe pressure".
+            "reject_coop"
         } else if ctx.pinned {
             "reject_other"
         } else {
@@ -1237,14 +1349,19 @@ impl FoyerStore {
         Ok(ReadOutcome::Miss(bytes))
     }
 
-    fn acquire_inflight_cell(&self, pool: Pool, key: &Key) -> Arc<OnceCell<Result<Bytes, String>>> {
+    fn acquire_inflight_cell(
+        &self,
+        pool: Pool,
+        key: &Key,
+    ) -> Arc<OnceCell<Result<(Bytes, crate::coop_admission::FetchSource), String>>> {
         let mut guard = self.inflight.lock();
         if let Some(weak) = guard.get(&(pool, key.clone())) {
             if let Some(a) = weak.upgrade() {
                 return a;
             }
         }
-        let a: Arc<OnceCell<Result<Bytes, String>>> = Arc::new(OnceCell::new());
+        let a: Arc<OnceCell<Result<(Bytes, crate::coop_admission::FetchSource), String>>> =
+            Arc::new(OnceCell::new());
         guard.insert((pool, key.clone()), Arc::downgrade(&a));
         a
     }
@@ -1766,6 +1883,18 @@ mod key_tests {
 
 #[cfg(test)]
 mod store_tests {
+    // **A6 (rc.7) test stability** — drain (A2) and cooperative-admission
+    // tests in this module use a `parking_lot::Mutex<()>` (see
+    // `COUNTER_TEST_LOCK`) to serialise reads of shared global metric
+    // counters. The guard is held across `await` deliberately: the
+    // test body runs entirely on the current tokio runtime, the
+    // awaited `get_or_fetch` calls do not yield to other tests in
+    // this module because each `#[tokio::test]` brings its own
+    // runtime, and the counters' "must be 0 between baseline and
+    // final read" invariant would otherwise be racy. Clippy lints
+    // `await_holding_lock` unconditionally for `parking_lot::Mutex`,
+    // hence the module-level allow.
+    #![allow(clippy::await_holding_lock)]
     use super::*;
     use crate::admission::{AdmissionContext, AdmissionDecision, AdmissionPolicy};
     use crate::config::{MetadataPoolConfig, PoolsConfig, RowGroupPoolConfig};
@@ -1859,7 +1988,10 @@ mod store_tests {
         let key = k(4);
         let outcome = store
             .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
-                Ok(Bytes::from_static(b"abc"))
+                Ok((
+                    Bytes::from_static(b"abc"),
+                    crate::coop_admission::FetchSource::Origin,
+                ))
             })
             .await
             .unwrap();
@@ -1875,7 +2007,10 @@ mod store_tests {
         let key = k(5);
         let outcome = store
             .get_or_fetch(Pool::RowGroup, key.clone(), &NeverAdmit, async {
-                Ok(Bytes::from_static(b"xyz"))
+                Ok((
+                    Bytes::from_static(b"xyz"),
+                    crate::coop_admission::FetchSource::Origin,
+                ))
             })
             .await
             .unwrap();
@@ -1905,7 +2040,10 @@ mod store_tests {
                         fetch_count.fetch_add(1, Ordering::SeqCst);
                         // Give siblings time to queue on the OnceCell.
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                        Ok(Bytes::from_static(b"coalesced"))
+                        Ok((
+                            Bytes::from_static(b"coalesced"),
+                            crate::coop_admission::FetchSource::Origin,
+                        ))
                     })
                     .await
             }));
@@ -2718,6 +2856,20 @@ mod store_tests {
     // and does not race other tests in the binary.
     // ---------------------------------------------------------------
 
+    /// **A6 (rc.7)** test-stability mutex — drain (A2) and cooperative
+    /// admission (A6) tests both read shared module-level
+    /// `IntCounterVec` counters and assert exact deltas. With the
+    /// number of `#[tokio::test]` cases in this module growing
+    /// (12 drain/coop tests as of A6) cargo's parallel runner can
+    /// race two same-counter tests against each other and produce
+    /// a transient delta of 0 → ≥1 in the "must not move" arm.
+    /// Serialising the counter-delta tests through a single
+    /// `parking_lot::Mutex` resolves it without changing
+    /// production code. Acquired at the *top* of each affected
+    /// test; the counters' baselines are taken inside the
+    /// critical section.
+    static COUNTER_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
     fn drained_admit_refused_count() -> u64 {
         crate::metrics::ADMIT_REFUSED_TOTAL
             .with_label_values(&["draining"])
@@ -2739,7 +2891,10 @@ mod store_tests {
         let key = k(120);
         let outcome = store
             .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
-                Ok(Bytes::from_static(b"healthy"))
+                Ok((
+                    Bytes::from_static(b"healthy"),
+                    crate::coop_admission::FetchSource::Origin,
+                ))
             })
             .await
             .expect("get_or_fetch");
@@ -2759,6 +2914,7 @@ mod store_tests {
     /// bytes for any subsequent read.
     #[tokio::test]
     async fn drain_active_refuses_all_admits() {
+        let _guard = COUNTER_TEST_LOCK.lock();
         let signal = crate::membership::DrainSignal::new();
         signal.begin();
         let store = FoyerStore::open(&test_pools())
@@ -2771,7 +2927,10 @@ mod store_tests {
         let key = k(121);
         let outcome = store
             .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
-                Ok(Bytes::from_static(b"refused"))
+                Ok((
+                    Bytes::from_static(b"refused"),
+                    crate::coop_admission::FetchSource::Origin,
+                ))
             })
             .await
             .expect("get_or_fetch");
@@ -2835,6 +2994,7 @@ mod store_tests {
     /// pre-flip admits inserted while the post-flip ones did not.
     #[tokio::test]
     async fn drain_signal_flips_during_admit_loop() {
+        let _guard = COUNTER_TEST_LOCK.lock();
         let signal = crate::membership::DrainSignal::new();
         let store = FoyerStore::open(&test_pools())
             .await
@@ -2846,7 +3006,10 @@ mod store_tests {
             let key = k(140 + ord);
             store
                 .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
-                    Ok(Bytes::from_static(b"pre-drain"))
+                    Ok((
+                        Bytes::from_static(b"pre-drain"),
+                        crate::coop_admission::FetchSource::Origin,
+                    ))
                 })
                 .await
                 .expect("pre-drain admit");
@@ -2872,7 +3035,10 @@ mod store_tests {
             let key = k(150 + ord);
             store
                 .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
-                    Ok(Bytes::from_static(b"post-drain"))
+                    Ok((
+                        Bytes::from_static(b"post-drain"),
+                        crate::coop_admission::FetchSource::Origin,
+                    ))
                 })
                 .await
                 .expect("post-drain admit");
@@ -2902,6 +3068,7 @@ mod store_tests {
     /// behaviour.
     #[tokio::test]
     async fn drain_disabled_via_config_no_refuse() {
+        let _guard = COUNTER_TEST_LOCK.lock();
         let signal = crate::membership::DrainSignal::new();
         signal.begin();
         let store = FoyerStore::open(&test_pools())
@@ -2921,7 +3088,10 @@ mod store_tests {
         let key = k(170);
         store
             .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
-                Ok(Bytes::from_static(b"escape-hatch"))
+                Ok((
+                    Bytes::from_static(b"escape-hatch"),
+                    crate::coop_admission::FetchSource::Origin,
+                ))
             })
             .await
             .expect("get_or_fetch");
@@ -2938,5 +3108,226 @@ mod store_tests {
             baseline,
             "refused counter must not move while refuse_admits=false"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // **A6 (rc.7)** — cooperative peer admission integration tests.
+    //
+    // These exercise the gate at the `get_or_fetch` admit seam — the
+    // unit-level probability assertions live in
+    // `crate::coop_admission::tests`. Together they pin the two
+    // invariants that matter for the operator-facing dashboards:
+    //   * `FetchSource::Origin` admits unconditionally regardless of
+    //     gate state — the counter `shelf_coop_peer_drops_total` must
+    //     never tick on origin bytes.
+    //   * `FetchSource::Peer` is the only path that can charge the new
+    //     counters; with `replication_factor = 1` (default-ish) every
+    //     peer byte still admits and the existing pre-A6 behaviour is
+    //     preserved bit-for-bit.
+    // ---------------------------------------------------------------
+
+    fn coop_peer_admits_count() -> u64 {
+        crate::metrics::COOP_PEER_ADMITS_TOTAL
+            .with_label_values(&["rowgroup"])
+            .get()
+    }
+
+    fn coop_peer_drops_count() -> u64 {
+        crate::metrics::COOP_PEER_DROPS_TOTAL
+            .with_label_values(&["rowgroup"])
+            .get()
+    }
+
+    fn coop_reject_label_count() -> u64 {
+        crate::metrics::ADMISSIONS_TOTAL
+            .with_label_values(&["rowgroup", "reject_coop"])
+            .get()
+    }
+
+    /// Origin-sourced bytes always admit, regardless of gate state.
+    /// Even with `enabled = true` and `replication_factor = u32::MAX`
+    /// (every peer admit dropped), origin admits flow through. This
+    /// is the primary correctness invariant: A6 must be invisible to
+    /// the read path on origin fetches.
+    #[tokio::test]
+    async fn coop_admission_origin_always_admits() {
+        let store = FoyerStore::open(&test_pools())
+            .await
+            .expect("open")
+            .with_coop_admission(crate::coop_admission::CoopAdmissionGate::with_seed(
+                crate::coop_admission::CoopAdmissionConfig {
+                    enabled: true,
+                    replication_factor: u32::MAX,
+                },
+                0xC0_DE_C0_DE,
+            ));
+        let key = k(200);
+        let outcome = store
+            .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
+                Ok((
+                    Bytes::from_static(b"origin-bytes"),
+                    crate::coop_admission::FetchSource::Origin,
+                ))
+            })
+            .await
+            .expect("get_or_fetch");
+        assert!(matches!(outcome, ReadOutcome::Miss(_)));
+        assert!(
+            store
+                .get(Pool::RowGroup, &key)
+                .await
+                .expect("get")
+                .is_some(),
+            "origin admit must cache regardless of gate state"
+        );
+    }
+
+    /// `replication_factor = 1` ⇒ probability 1.0 ⇒ every peer-sourced
+    /// admit flows. The dropped-counter must stay flat; the
+    /// admit-counter must tick once per peer admit.
+    #[tokio::test]
+    async fn coop_admission_peer_factor_1_admits_every_byte() {
+        let _guard = COUNTER_TEST_LOCK.lock();
+        let admits_baseline = coop_peer_admits_count();
+        let drops_baseline = coop_peer_drops_count();
+        let store = FoyerStore::open(&test_pools())
+            .await
+            .expect("open")
+            .with_coop_admission(crate::coop_admission::CoopAdmissionGate::with_seed(
+                crate::coop_admission::CoopAdmissionConfig {
+                    enabled: true,
+                    replication_factor: 1,
+                },
+                0xAA_BB_CC_DD,
+            ));
+        let key = k(201);
+        store
+            .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
+                Ok((
+                    Bytes::from_static(b"peer-bytes"),
+                    crate::coop_admission::FetchSource::Peer,
+                ))
+            })
+            .await
+            .expect("get_or_fetch");
+        assert!(
+            store
+                .get(Pool::RowGroup, &key)
+                .await
+                .expect("get")
+                .is_some(),
+            "factor=1 must admit every peer byte"
+        );
+        assert_eq!(coop_peer_admits_count() - admits_baseline, 1);
+        assert_eq!(coop_peer_drops_count() - drops_baseline, 0);
+    }
+
+    /// `replication_factor` large enough to drop every peer admit.
+    /// We pin the seed and `u32::MAX` so the modulo always lands
+    /// off-zero on the first draw; the drop counter must tick and
+    /// the bytes must NOT cache. The bytes themselves still flow
+    /// back to the caller (the read path is untouched).
+    #[tokio::test]
+    async fn coop_admission_peer_dropped_does_not_cache() {
+        let _guard = COUNTER_TEST_LOCK.lock();
+        let admits_baseline = coop_peer_admits_count();
+        let drops_baseline = coop_peer_drops_count();
+        let reject_baseline = coop_reject_label_count();
+        let store = FoyerStore::open(&test_pools())
+            .await
+            .expect("open")
+            .with_coop_admission(crate::coop_admission::CoopAdmissionGate::with_seed(
+                crate::coop_admission::CoopAdmissionConfig {
+                    enabled: true,
+                    replication_factor: u32::MAX,
+                },
+                // Seed chosen so the first draw % u32::MAX != 0 with
+                // overwhelming probability — the gate drops the admit.
+                0xDEAD_F00D,
+            ));
+        let key = k(202);
+        let outcome = store
+            .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
+                Ok((
+                    Bytes::from_static(b"peer-dropped"),
+                    crate::coop_admission::FetchSource::Peer,
+                ))
+            })
+            .await
+            .expect("get_or_fetch");
+        // Caller still receives the bytes — A6 only gates the admit.
+        assert_eq!(outcome.into_bytes(), Bytes::from_static(b"peer-dropped"));
+        // Foyer must NOT have absorbed the insert.
+        assert!(
+            store
+                .get(Pool::RowGroup, &key)
+                .await
+                .expect("get")
+                .is_none(),
+            "dropped peer admit must not be cached"
+        );
+        // Counter parity: drop ticked once, admit-counter flat,
+        // `reject_coop` decision label ticked once.
+        assert_eq!(
+            coop_peer_drops_count() - drops_baseline,
+            1,
+            "shelf_coop_peer_drops_total must tick on dropped peer admit"
+        );
+        assert_eq!(
+            coop_peer_admits_count() - admits_baseline,
+            0,
+            "shelf_coop_peer_admits_total must NOT tick on dropped peer admit"
+        );
+        assert_eq!(
+            coop_reject_label_count() - reject_baseline,
+            1,
+            "shelf_admissions_total{{decision=reject_coop}} must tick"
+        );
+    }
+
+    /// Disabled gate: `enabled = false` ⇒ peer bytes admit
+    /// unconditionally and neither A6 counter ticks. This covers the
+    /// OSS default — a freshly deployed pod with the chart's
+    /// `cache.coopAdmission.enabled = false` must look identical to
+    /// pre-A6 from the Foyer admit perspective.
+    #[tokio::test]
+    async fn coop_admission_disabled_admits_peer_bytes() {
+        let _guard = COUNTER_TEST_LOCK.lock();
+        let admits_baseline = coop_peer_admits_count();
+        let drops_baseline = coop_peer_drops_count();
+        let store = FoyerStore::open(&test_pools())
+            .await
+            .expect("open")
+            .with_coop_admission(crate::coop_admission::CoopAdmissionGate::with_seed(
+                crate::coop_admission::CoopAdmissionConfig {
+                    enabled: false,
+                    replication_factor: u32::MAX,
+                },
+                0x42,
+            ));
+        let key = k(203);
+        store
+            .get_or_fetch(Pool::RowGroup, key.clone(), &AlwaysAdmit, async {
+                Ok((
+                    Bytes::from_static(b"oss-default"),
+                    crate::coop_admission::FetchSource::Peer,
+                ))
+            })
+            .await
+            .expect("get_or_fetch");
+        assert!(
+            store
+                .get(Pool::RowGroup, &key)
+                .await
+                .expect("get")
+                .is_some(),
+            "disabled gate must admit peer bytes"
+        );
+        // Disabled gate short-circuits BEFORE the counter bumps in
+        // `get_or_fetch` (the gate returns `true` from
+        // `should_admit_peer_bytes`); but the admit-counter still
+        // ticks (the gate said admit, so `coop_admit = true`).
+        assert_eq!(coop_peer_admits_count() - admits_baseline, 1);
+        assert_eq!(coop_peer_drops_count() - drops_baseline, 0);
     }
 }

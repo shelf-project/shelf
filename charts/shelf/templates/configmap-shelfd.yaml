@@ -123,6 +123,16 @@ data:
       max_manifest_entries: {{ .maxManifestEntries | default 10000 | int64 }}
       max_footer_entries: {{ .maxFooterEntries | default 10000 | int64 }}
     {{- end }}
+    {{- with .Values.cache.coopAdmission }}
+    # A6 (rc.7) — cooperative peer-admission probabilistic gate.
+    # Default-off; flip `cache.coopAdmission.enabled=true` per-cluster
+    # once the operator dashboards have been sized for the new
+    # `shelf_coop_peer_admits_total` / `shelf_coop_peer_drops_total`
+    # counters. See ADR-0037.
+    coop_admission:
+      enabled: {{ .enabled | default false }}
+      replication_factor: {{ .replicationFactor | default 2 | int }}
+    {{- end }}
     {{- with .Values.cache.rewarm }}
     rewarm:
       enabled: {{ .enabled }}
