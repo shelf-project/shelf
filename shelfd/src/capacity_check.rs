@@ -342,6 +342,8 @@ mod tests {
             pinned_count: 0,
             draining: false,
             rss_bytes: rss,
+            // K2 (rc.8) — `cap-ready` does not consult pod-load.
+            pod_load: None,
         }
     }
 

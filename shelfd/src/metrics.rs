@@ -14,8 +14,9 @@
 use once_cell::sync::Lazy;
 use prometheus::{
     register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
-    register_int_gauge_vec_with_registry, register_int_gauge_with_registry, HistogramVec,
-    IntCounterVec, IntGauge, IntGaugeVec,
+    register_int_counter_with_registry, register_int_gauge_vec_with_registry,
+    register_int_gauge_with_registry, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec,
 };
 
 /// Global Prometheus registry.
@@ -1662,6 +1663,69 @@ pub static PAGE_INDEX_PARSE_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("register page_index_parse_seconds")
 });
 
+/// **K2 (rc.8)** — per-pod request rate over the trailing 60 s
+/// window (configurable via `cache.podLoad.window`). Per-pod gauge:
+/// the cluster-wide skew is computed externally via Prometheus
+/// aggregation: `max(shelf_pod_load_qps) / quantile(0.5,
+/// shelf_pod_load_qps)`. Updated every
+/// `cache.podLoad.aggregationInterval` (default 30 s) by
+/// [`crate::pod_load::PodLoadAggregator::run`]. Bench evidence in
+/// `benchmarks/results/2026-05-01/4hr/COMPREHENSIVE-RESULTS.md`
+/// motivated this metric: shelf-bench-{0,1,2} took ~14× more
+/// queries than {3,4,5} and the existing aggregate-pool QPS gauge
+/// could not surface the imbalance. See
+/// `agents/out/adr/0042-rc8-shelf-pool-rightsizing.md`.
+pub static POD_LOAD_QPS: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge_with_registry!(
+        "shelf_pod_load_qps",
+        "K2 (rc.8): per-pod request rate over the trailing 60s window. \
+         Per-pod gauge; cluster-wide skew computed externally via Prometheus \
+         aggregation: max(shelf_pod_load_qps) / quantile(0.5, shelf_pod_load_qps).",
+        REGISTRY
+    )
+    .expect("register pod_load_qps")
+});
+
+/// **K2 (rc.8)** — HRW skew ratio = `max(per-pod qps) / median(per-pod
+/// qps)`, expressed in **basis points** (× 100 to dodge YAML
+/// scientific-notation Helm landmine, per workspace memory rule).
+///
+/// `100 bps = 1.0` (perfect balance); `>= 150 bps` (1.5×) is the
+/// scale-up threshold the example KEDA `ScaledObject` at
+/// `charts/shelf/examples/keda-scaledobject-skew-aware.yaml` uses.
+/// Updated every `cache.podLoad.aggregationInterval` (default 30 s)
+/// by an in-cluster aggregator that probes peer `/stats` endpoints.
+/// See [`crate::pod_load::compute_skew_bps`] for the lower-median
+/// rationale.
+pub static POD_LOAD_SKEW_RATIO_BPS: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge_with_registry!(
+        "shelf_pod_load_skew_ratio_bps",
+        "K2 (rc.8): HRW skew ratio = max(per-pod qps) / median(per-pod qps), \
+         expressed in basis-points (× 100 to dodge YAML scientific-notation \
+         Helm landmine, per workspace memory rule). 100 bps = 1.0 (perfect \
+         balance); > 150 bps = skew warning. Updated every 30s by an \
+         in-cluster aggregator that probes peer /stats endpoints.",
+        REGISTRY
+    )
+    .expect("register pod_load_skew_ratio_bps")
+});
+
+/// **K2 (rc.8)** — peer `/stats?include=pod_load` probe failures
+/// during pod-load aggregation. Bumped once per failed peer probe
+/// (timeout, non-2xx, JSON decode error, missing `pod_load` block).
+/// On a non-zero rate, the skew gauge falls back to a local-only
+/// computation (which always reads as `100 bps`); operators
+/// investigate via peer pod logs / network policies.
+pub static POD_LOAD_PROBE_ERRORS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter_with_registry!(
+        "shelf_pod_load_probe_errors_total",
+        "K2 (rc.8): errors during peer /stats probe for pod_load \
+         aggregation. Falls back to local-only ratio.",
+        REGISTRY
+    )
+    .expect("register pod_load_probe_errors_total")
+});
+
 /// Stable list of metric series `shelfd` exposes on `/metrics` in the
 /// Phase-0 gate build. Kept as module-level data so `docs/metrics.md`
 /// and the tests can both reference a single source of truth; the
@@ -1782,6 +1846,10 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_rewarm_files_enqueued_total",
     "shelf_rewarm_bytes_enqueued_total",
     "shelf_rewarm_bytes_capped_total",
+    // K2 (rc.8) — HRW-skew-aware autoscaler integration.
+    "shelf_pod_load_qps",
+    "shelf_pod_load_skew_ratio_bps",
+    "shelf_pod_load_probe_errors_total",
 ];
 
 #[cfg(test)]
@@ -1904,6 +1972,9 @@ mod tests {
             REWARM_FILES_ENQUEUED_TOTAL.desc(),
             REWARM_BYTES_ENQUEUED_TOTAL.desc(),
             REWARM_BYTES_CAPPED_TOTAL.desc(),
+            POD_LOAD_QPS.desc(),
+            POD_LOAD_SKEW_RATIO_BPS.desc(),
+            POD_LOAD_PROBE_ERRORS_TOTAL.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -2203,6 +2274,11 @@ mod tests {
         REWARM_BYTES_CAPPED_TOTAL
             .with_label_values(&["__none__"])
             .inc_by(0);
+        // K2 (rc.8) — touch the pod-load gauges so a freshly booted
+        // pod publishes them as zeros.
+        POD_LOAD_QPS.set(0);
+        POD_LOAD_SKEW_RATIO_BPS.set(100);
+        POD_LOAD_PROBE_ERRORS_TOTAL.inc_by(0);
 
         let families = REGISTRY.gather();
         let names: HashSet<String> = families.iter().map(|f| f.name().to_owned()).collect();

@@ -588,6 +588,49 @@ cache:
     overrides: {}
 
   # ---------------------------------------------------------------------------
+  # K2 (rc.8) — HRW-skew-aware autoscaler integration.
+  #
+  # HRW pins each (bucket, key, etag) to a single shelf pod. When a
+  # hot key family (e.g. all Metabase queries hashing to the same
+  # ETag prefix) lands on one primary, that pod absorbs the fan-out
+  # while peers stay near-idle. Autoscaling on aggregate pool QPS
+  # hides this — the cluster average looks healthy even when one pod
+  # is pegged. K2 publishes per-pod load + cluster-wide skew so HPA
+  # / KEDA can react to the imbalance, not just the average.
+  #
+  # Default ON. Hot-path cost is one atomic `fetch_add(Relaxed)` per
+  # accepted s3-shim request; the background loop runs at 30 s
+  # cadence. The `?include=pod_load` opt-in on `/stats` keeps Agent
+  # 5's HRW-weighting wire payload byte-identical with pre-K2.
+  #
+  # Drop-in `KEDA ScaledObject` example (targeting >150 bps = 1.5×
+  # skew for scale-up) at `examples/keda-scaledobject-skew-aware.yaml`.
+  # See ADR-0042.
+  # ---------------------------------------------------------------------------
+  podLoad:
+    # -- Master switch. Default `true`. Flip to `false` to disable
+    # the metric publication AND the hot-path bookkeeping (the
+    # `record_request` call short-circuits on the `enabled` check).
+    # The aggregator's background loop also exits cleanly when
+    # disabled, so a config flip + rolling restart is a clean revert.
+    enabled: true
+    # -- Trailing window over which `shelf_pod_load_qps` is computed.
+    # 60 s matches the `shelf_rolling_hit_ratio_bps` precedent —
+    # smooth enough to absorb per-query spikes, fast enough to
+    # surface a real shift in ~ 2 minutes.
+    window: 60s
+    # -- How often the aggregator wakes, snapshots its cumulative
+    # request counter into the rolling window, probes peers'
+    # `/stats?include=pod_load`, and republishes the gauges. 30 s
+    # gives the autoscaler two ticks per typical HPA cycle.
+    aggregationInterval: 30s
+    # -- Hard wall-clock deadline for one peer's `/stats?include=pod_load`
+    # probe (HTTP request + JSON decode). A peer that misses the
+    # deadline drops out of this round AND increments
+    # `shelf_pod_load_probe_errors_total`. Default 2 s.
+    probeTimeout: 2s
+
+  # ---------------------------------------------------------------------------
   # SHELF-45 — compaction-aware re-warm reactor.
   #
   # When an Iceberg table is compacted (`ALTER TABLE … EXECUTE optimize`,

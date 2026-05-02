@@ -110,6 +110,12 @@ pub mod parquet_meta;
 pub mod peer;
 pub mod peer_fetch;
 pub mod pinlist;
+// **K2 (rc.8)** — HRW-skew-aware autoscaler integration. Default-on
+// (`cache.podLoad.enabled=true`) with hot-path cost = single
+// `AtomicU64::fetch_add` per accepted s3-shim request; the rolling
+// window + peer probes run on a 30 s background tick. See
+// `agents/out/adr/0042-rc8-shelf-pool-rightsizing.md`.
+pub mod pod_load;
 pub mod router;
 pub mod s3_shim;
 // Distinct feature name `side_bloom_module` to keep this gate from

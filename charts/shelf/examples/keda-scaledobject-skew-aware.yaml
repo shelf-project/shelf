@@ -1,0 +1,88 @@
+# K2 (rc.8) — KEDA ScaledObject example for HRW-skew-aware scaling.
+#
+# Why this exists
+# ---------------
+# HRW hashing pins each (bucket, key, etag) tuple to a single shelf
+# pod. When a hot key family (e.g. all Metabase queries hashing to a
+# single ETag prefix) lands on the same primary, that pod absorbs the
+# fan-out while peers stay idle. Autoscaling on aggregate pool QPS
+# hides this — the cluster average looks healthy even when one pod is
+# pegged. The 4-hour bench in
+# `benchmarks/results/2026-05-01/4hr/COMPREHENSIVE-RESULTS.md`
+# captured the regime directly: shelf-bench-{0,1,2} took ~14× more
+# queries than {3,4,5}, which joined the pool late.
+#
+# `shelf_pod_load_skew_ratio_bps` (basis points = ratio × 100) is the
+# K2 metric that surfaces this asymmetry. A KEDA `ScaledObject`
+# targeting `> 150 bps` (1.5×) scales **up** when one pod is doing
+# significantly more work than the cluster median; KEDA's built-in
+# scale-down logic kicks in when the metric returns to ~100 bps
+# (perfect balance) for the configured cooldown window.
+#
+# This file is a drop-in template — adjust the namespace,
+# Prometheus serverAddress, and replica bounds for your cluster. It
+# is NOT wired into the chart by default.
+
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: shelf-pool-skew-aware
+  # Operator-supplied namespace where the shelf-pool StatefulSet runs.
+  namespace: alluxio
+  labels:
+    app.kubernetes.io/name: shelf
+    app.kubernetes.io/component: autoscaler
+    shelf.io/scaler: skew-aware
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: shelf-pool
+  # Lower bound stays high enough that the HRW ring keeps a useful
+  # spread of primaries even at minimum scale; upper bound caps pool
+  # spend at the operator-budget for the alluxio NodePool. Adjust
+  # for your cluster — the rep-N traffic baselines in workspace
+  # memory put rep-0 at ~5.7M queries/7d (8.7× rep-1), so an 8-pod
+  # cap is conservative for a 4-replica deployment.
+  minReplicaCount: 3
+  maxReplicaCount: 8
+  # Hold a new pod for ~5 min before letting KEDA reclaim it; the
+  # Foyer NVMe cache needs time to warm before its hit-ratio
+  # contribution shows up in the metrics. Without a cooldown, KEDA
+  # could oscillate during a hot-key burst.
+  cooldownPeriod: 300
+  pollingInterval: 30
+  triggers:
+    - type: prometheus
+      metadata:
+        # Adjust to your in-cluster Prometheus / Mimir endpoint.
+        # On data-platform-cluster the equivalent is
+        # `http://mimir-data.monitoring.svc.cluster.local:9090`.
+        serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+        # Scale up when the cluster-wide max(skew) crosses 150 bps
+        # (= ratio 1.5 = one pod doing 1.5× the median pod's load).
+        # The 100..=149 bps band is "healthy"; > 200 is "page".
+        threshold: "150"
+        # K2's metric is per-pod (`shelf_pod_load_skew_ratio_bps`
+        # is computed locally on each pod by the in-cluster
+        # aggregator and republished as a labelless gauge that
+        # Prometheus tags with the standard `pod` external label).
+        # `max(...)` picks the worst-case pod across the pool —
+        # that's the one we need to scale to relieve.
+        query: |
+          max(shelf_pod_load_skew_ratio_bps)
+        metricName: shelf_pod_load_skew_ratio_bps
+    # Optional second trigger — fall back to aggregate QPS for
+    # baseline scaling when skew alone is not the bottleneck.
+    # Comment out if your cluster runs cold-cache reads
+    # (e.g. dbt batch jobs) where high QPS is normal and skew is
+    # the only signal that warrants extra capacity.
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+        # 800 qps × pod ≈ ~80% of the per-pod throughput envelope
+        # observed during the rep-1 cutover (workspace memory).
+        threshold: "800"
+        query: |
+          avg(shelf_pod_load_qps)
+        metricName: shelf_pod_load_qps_avg

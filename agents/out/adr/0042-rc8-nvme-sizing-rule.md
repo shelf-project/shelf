@@ -62,14 +62,20 @@ pod — high-traffic BI dashboards, multi-TB Iceberg scans) must
 opt in to higher NVMe via overlay values.
 
 **K2** (paired under the same ADR — both target shelf-pool
-right-sizing): ship `shelf_pod_load_skew_ratio` and a sample
-KEDA `ScaledObject` that scales shelf replicas on the skew
+right-sizing): ship `shelf_pod_load_qps`, `shelf_pod_load_skew_ratio_bps`,
+and `shelf_pod_load_probe_errors_total` from every pod, plus a
+sample KEDA `ScaledObject` that scales shelf replicas on the skew
 metric rather than on raw CPU / memory. HRW imbalance means a
 single high-traffic key family can concentrate on one pod
 (observed 2026-04-27: shelf-2 saturated while peers idled);
 scaling on skew adds pods where they actually reduce
 tail-latency, and avoids the cost of over-provisioning every
-pod to accommodate the worst-case skew.
+pod to accommodate the worst-case skew. The skew gauge is
+expressed in **basis points** (× 100) so chart values overlays
+do not trip the YAML scientific-notation Helm landmine that
+already bit `shelf_rolling_hit_ratio_bps`. See the
+"K2 — implementation details" section below for the wire shape,
+hot-path discipline, and rollback levers.
 
 K1 and K2 are sibling levers because both address "is the
 default shelf-pool footprint right-sized for the median OSS
@@ -162,6 +168,139 @@ cache:
 This is already documented in the operator-private overlay path
 maintained outside the OSS repo.
 
+## K2 — implementation details
+
+### Metric shape
+
+Three series exposed on every shelf pod's `/metrics`:
+
+| Metric                                  | Type        | Unit               | Cardinality |
+|-----------------------------------------|-------------|--------------------|-------------|
+| `shelf_pod_load_qps`                    | `IntGauge`  | requests / second  | per-pod (Prometheus stamps `pod` external label) |
+| `shelf_pod_load_skew_ratio_bps`         | `IntGauge`  | basis points (× 100) | per-pod   |
+| `shelf_pod_load_probe_errors_total`     | `IntCounter`| count              | per-pod   |
+
+`100 bps = 1.0` (perfect balance) is the lower bound;
+`>= 150 bps` (1.5×) is the K2 scale-up threshold the example
+KEDA `ScaledObject` targets; `>= 200 bps` (2×) is the page-class
+imbalance.
+
+### Hot-path discipline
+
+The s3-shim accept handlers (`handle_get_object`,
+`handle_head_object`) call `state.pod_load.record_request()` at
+the very top of the function — after route dispatch but before
+range parsing, cache lookup, or origin GET. The call is a single
+`AtomicU64::fetch_add(Relaxed)` when the gate is enabled, and a
+check-then-return when disabled (`cache.podLoad.enabled=false`).
+There is **no lock** on the hot path; the rolling-window
+`VecDeque` and the peer probes live entirely in the background
+loop, which runs at `cache.podLoad.aggregationInterval` (default
+30 s). The `concurrent_record_request_safe` test pins the
+lock-free invariant by spawning 1 000 threads × 100 calls and
+asserting all 100 000 increments land.
+
+### Wire shape: opt-in `pod_load` block on `/stats`
+
+The in-cluster aggregator probes peers with
+`GET /stats?include=pod_load`, which adds an opt-in
+`pod_load: { qps, window_secs }` block to the JSON payload. The
+default `/stats` shape (no `?include=`) stays byte-identical with
+pre-K2 — Agent 5's HRW weighting, `shelfctl stats`, the
+`cap-ready` gate, and the membership resolver all use the
+no-include path. Wire compatibility is enforced by the
+`stats_payload_has_contract_keys` test (asserts `pod_load` is
+absent from the default payload) and the new
+`stats_payload_includes_pod_load_when_requested` test (asserts
+the `qps` + `window_secs` fields round-trip cleanly).
+
+### Skew formula
+
+`compute_skew_bps(qps_values)` =
+`max(qps_values) * 100 / median(qps_values)`, with the
+**lower-median** convention `qps_values[(len-1)/2]` after
+ascending sort. Edge cases:
+
+- Empty input ⇒ `100 bps` (cannot compute; report balanced so
+  the autoscaler does not react to noise on a fresh cluster).
+- Median == 0 ⇒ `100 bps` (avoid divide-by-zero; same "no
+  signal" semantics).
+- Two pods `[80, 40]` ⇒ `200 bps` (1 pod doing 2× the other's
+  work). Linear-interpolation median would report `133 bps`
+  and under-state the imbalance — the lower-median is the
+  simplest convention that makes the binary case correct
+  without the n-pod case becoming pathological.
+
+### KEDA wiring
+
+`charts/shelf/examples/keda-scaledobject-skew-aware.yaml` is a
+drop-in template (NOT chart-default; the chart does not depend
+on KEDA). Two triggers:
+
+| Trigger                                    | Threshold | Why |
+|--------------------------------------------|-----------|-----|
+| `max(shelf_pod_load_skew_ratio_bps)`       | `150`     | Catches HRW hot-key fan-out (workspace memory: `mbuser_admin` regime) |
+| `avg(shelf_pod_load_qps)`                  | `800`     | Optional baseline; matches per-pod throughput envelope from rep-1 cutover |
+
+Operators substitute `serverAddress`, `namespace`, and replica
+bounds for their cluster.
+
+### Composition with the rc.7 admit chain
+
+K2 is **additive**. It does NOT modify A1
+(`admission_limiter`), A2 (drain), A3 (`rewarm_poller`), A4
+(`cost`), A6 (`coop_admission`), or B3 (`transient_admission`).
+The only hot-path touch is the single `record_request()` call
+at the top of the two s3-shim accept handlers; everything else
+lives in the background `PodLoadAggregator::run` loop and the
+additive `?include=pod_load` JSON block. Each gate's blast
+radius stays observable independently via the existing
+counters.
+
+### Rollback
+
+Three escape hatches in increasing severity:
+
+1. **Disable autoscaler only** — delete or scale-out-pin the
+   `ScaledObject` resource. Shelf keeps publishing K2 metrics
+   for observability.
+2. **Disable metric publication** — flip
+   `cache.podLoad.enabled=false` and `kubectl rollout restart
+   sts/shelf-pool`. The aggregator stops, gauges stop
+   publishing, the autoscaler falls back to its second trigger
+   (the example uses aggregate `shelf_pod_load_qps` as a
+   baseline fallback).
+3. **Pin replica count** — `kubectl scale sts shelf-pool
+   --replicas=N`. Independent of K2; reverts the cluster to a
+   pre-K2 fixed-size pool.
+
+### Validation evidence (in-tree)
+
+- 12 unit tests in `shelfd/src/pod_load.rs`
+  (`disabled_records_no_op`,
+  `rolling_window_evicts_old_samples`,
+  `rolling_window_count_undefined_with_one_sample`,
+  `single_pod_skew_is_one_bps_100`,
+  `two_pods_balanced_skew_is_100`,
+  `two_pods_skewed_2_to_1_skew_is_200`,
+  `three_pods_two_hot_one_cold_uses_lower_median`,
+  `empty_input_reports_balanced`,
+  `zero_median_reports_balanced`,
+  `peer_probe_timeout_falls_back_to_local`,
+  `concurrent_record_request_safe`,
+  `aggregation_interval_respected`).
+- `shelfd::http::tests::stats_payload_includes_pod_load_when_requested`
+  pins the wire shape of the `?include=pod_load` JSON block.
+- `shelfd::metrics::tests::registry_exposes_documented_series`
+  proves the three K2 series register with the global registry
+  on every pod (whether the gate is enabled or not).
+- KEDA example offline-validates with
+  `python3 -c 'import yaml; d = yaml.safe_load(open(...))'`
+  asserting `apiVersion`, `kind`, `scaleTargetRef`, and
+  trigger structure. `kubectl apply --dry-run=client` requires
+  cluster API discovery for the CRD (not available in this
+  agent's network namespace); operators run it post-install.
+
 ## Alternatives considered
 
 1. **Keep 240 GiB default + emit a runtime warning if utilisation
@@ -195,4 +334,9 @@ maintained outside the OSS repo.
 - Chart values: `charts/shelf/values.yaml` (storage.size, cache.pools.rowgroup.nvmeSizeBytes)
 - Chart StatefulSet template: `charts/shelf/templates/statefulset.yaml` (volumeClaimTemplates)
 - Prior sizing ADR: `agents/out/adr/0008-*-two-pool-sizing.md`
-- K2 skew-autoscaler metric + ScaledObject example (ships in K2 PR)
+- K2 module: `shelfd/src/pod_load.rs` (aggregator + trait-injected peer prober)
+- K2 metrics: `shelfd/src/metrics.rs` (`POD_LOAD_QPS`, `POD_LOAD_SKEW_RATIO_BPS`, `POD_LOAD_PROBE_ERRORS_TOTAL`)
+- K2 wire shape: `shelfd/src/control.rs::PodLoadStats`, `shelfd/src/http.rs::handlers::stats` (`?include=pod_load`)
+- K2 hot-path call site: `shelfd/src/s3_shim.rs::handle_get_object` + `handle_head_object`
+- K2 KEDA example: `charts/shelf/examples/keda-scaledobject-skew-aware.yaml`
+- K2 Helm wiring: `charts/shelf/values.yaml` (`cache.podLoad`) + `charts/shelf/templates/configmap-shelfd.yaml` (`pod_load:` block)

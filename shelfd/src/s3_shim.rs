@@ -619,6 +619,11 @@ pub async fn handle_head_object(
     headers: HeaderMap,
 ) -> Response {
     let start = std::time::Instant::now();
+    // **K2 (rc.8)** — count HEAD requests on the same per-pod
+    // load counter as GET (Iceberg planning is HEAD-heavy on cold
+    // tables; excluding HEADs would under-count the planner-driven
+    // skew that K2 was built to surface).
+    state.pod_load.record_request();
     // SHELF-42 — resolve the A/B tag once per HEAD as well so
     // dashboards see HEAD-side cohort behaviour (Iceberg planning is
     // HEAD-heavy on cold tables; tagging it lets us tell which cohort
@@ -884,6 +889,15 @@ pub async fn handle_get_object(
     // observation in `record_get_latency` covers HEAD-LRU lookup,
     // origin HEAD (if needed), single-flight wait, and Foyer get.
     let start = std::time::Instant::now();
+    // **K2 (rc.8)** — single atomic increment per accepted request,
+    // feeding the per-pod load gauge + cluster-wide skew computation.
+    // Lock-free `Relaxed` fetch_add when enabled; check-then-return
+    // when disabled (`cache.podLoad.enabled=false`). Placed at the
+    // top of the handler so retries / range parsing failures still
+    // count toward "the work this pod is being asked to do" — that
+    // matches the autoscaler's intent (skew = the request *load*
+    // imbalance, not just the served-byte imbalance).
+    state.pod_load.record_request();
     // SHELF-42 — resolve the A/B tag label once per request. Empty
     // when the header is absent / disabled; cap-violations are
     // counted inside `tag_label_for`.

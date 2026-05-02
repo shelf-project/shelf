@@ -107,6 +107,32 @@ pub struct Stats {
     /// the gate, not as "healthy").
     #[serde(default)]
     pub rss_bytes: u64,
+    /// **K2 (rc.8)** — opt-in pod-load block. Present **only** when
+    /// the request carried `?include=pod_load`; absent (and
+    /// `serde-skipped`) on the default `/stats` shape so existing
+    /// consumers (Agent 5 HRW weighting, `shelfctl stats`,
+    /// `cap-ready` gate) see a byte-identical wire payload.
+    /// See [`PodLoadStats`] for the field set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_load: Option<PodLoadStats>,
+}
+
+/// **K2 (rc.8)** — per-pod load snapshot returned on `/stats?include=pod_load`.
+///
+/// Consumed by [`crate::pod_load::HttpPeerLoadProber`] when the
+/// in-cluster aggregator probes a peer pod. The fields are
+/// intentionally minimal — anything richer belongs on the
+/// metrics endpoint, not the JSON surface.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PodLoadStats {
+    /// Trailing-window request rate in queries-per-second. Derived
+    /// from the per-pod cumulative counter divided by the
+    /// configured `cache.podLoad.window` (default 60 s).
+    pub qps: u64,
+    /// Window length the QPS was averaged over, in seconds. Carried
+    /// alongside `qps` so an aggregator running on a different
+    /// cadence still compares apples to apples.
+    pub window_secs: u64,
 }
 
 /// Per-pool capacity / usage section of [`Stats`].
