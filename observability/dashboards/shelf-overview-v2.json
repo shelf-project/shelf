@@ -1628,6 +1628,366 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 600,
+      "type": "row",
+      "title": "Row 7 — rc.8 latency + skew telemetry",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 61
+      },
+      "panels": []
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "HRW skew ratio (cluster)",
+      "description": "K2 (rc.8) — `max(per-pod qps) / median(per-pod qps)`, rendered as a ratio (basis-points / 100). 1.0 = perfect balance, 1.5 = the KEDA scale-up threshold in `charts/shelf/examples/keda-scaledobject-skew-aware.yaml`, > 2.0 = action: investigate hot-key family or scale shelf-pool. The 4-hour bench at 2026-05-01 captured ~14× imbalance (= ratio 14.0) on shelf-bench-{0,1,2}. NaN when no per-pod QPS samples in the window.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1.5
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            },
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "max by (pod) (max without(prometheus, dataPrometheusReplica) (shelf_pod_load_skew_ratio_bps{namespace=\"alluxio\", pod=~\"$pod\"})) / 100",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "Per-pod QPS",
+      "description": "K2 (rc.8) — per-pod request rate (`shelf_pod_load_qps`) over the trailing 60s window, one series per shelf pod. Use this to verify the skew-ratio panel — if `shelf-N` is consistently 5-10× the others, that pod is absorbing a hot key family and Row 7 panel 1 should report > 2.0. Empty = pod-load aggregator (`crate::pod_load::PodLoadAggregator`) hasn't started yet (boot grace) or is failing peer probes (see Probe errors panel).",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "max by (pod) (max without(prometheus, dataPrometheusReplica) (shelf_pod_load_qps{namespace=\"alluxio\", pod=~\"$pod\"}))",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "stat",
+      "title": "Pod-load probe errors (5m)",
+      "description": "K2 (rc.8) — peer `/stats?include=pod_load` probe failures during pod-load aggregation. Bumped per failed peer probe (timeout, non-2xx, JSON decode error, missing pod_load block). Non-zero rate ⇒ the cluster-wide skew gauge falls back to local-only (always reports 100 bps); investigate via peer pod logs / NetworkPolicies. Action: red > 0.01 req/s sustained means the K2 scaler is flying blind.",
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 16,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.01
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_pod_load_probe_errors_total{namespace=\"alluxio\", pod=~\"$pod\"})[5m:30s]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "type": "stat",
+      "title": "Shim SigV4 skipped (5m)",
+      "description": "S3 (rc.8 / ADR-0043) — rate of inbound shim requests carrying `Authorization: AWS4-HMAC-SHA256 …` headers that the shim deliberately ignored. The shim is the trust boundary per ADR-0040 §security-model — SigV4 from in-cluster Trino S3 client is envelope ceremony only. This is a visibility metric: a non-zero rate proves the AWS-SDK-backed Trino S3 client reached the shim and the signing-skip optimization is firing as designed. Zero ⇒ either no Trino-shim traffic in the window or upstream code is bypassing the optimization.",
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 20,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_shim_sigv4_skipped_total{namespace=\"alluxio\", pod=~\"$pod\"})[5m:30s]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Origin signing context — reused vs recomputed",
+      "description": "S3 (rc.8 / ADR-0043) — split of origin GET/HEAD/PUT/DELETE ops between SDK lazy-IdentityCache reuse (cheap, ~µs/op) and full credentials-chain refresh (expensive, ~ms/op). Reused dominates ⇒ optimization is paying off. Recomputed spikes are normal at boot, on credentials expiry, or during IRSA token refresh (every ~15 min). A sustained high recomputed rate ⇒ check `shelf-cost` budget, look for credentials provider failures.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 69
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 25,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_origin_signing_context_reused_total{namespace=\"alluxio\", pod=~\"$pod\"})[1m]))",
+          "legendFormat": "reused",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_origin_signing_context_recomputed_total{namespace=\"alluxio\", pod=~\"$pod\"})[1m]))",
+          "legendFormat": "recomputed",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "gauge",
+      "title": "Signing context cache effectiveness",
+      "description": "S3 (rc.8 / ADR-0043) — ratio of reused : recomputed signing contexts (cumulative). Higher = better. Green ≥ 100 (1 refresh per 100 ops; expected steady state for IRSA-backed origins where credentials live ~15 min). Amber 10-100 (boot-warmup or credentials thrash). Red < 10 (the optimization is not landing — investigate `CountingCredentialsProvider` wiring). `clamp_min(..., 1)` on the denominator prevents divide-by-zero at startup.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 69
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 1,
+          "min": 0,
+          "max": 1000,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "green",
+                "value": 100
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(max without(prometheus, dataPrometheusReplica) (shelf_origin_signing_context_reused_total{namespace=\"alluxio\", pod=~\"$pod\"})) / clamp_min(sum(max without(prometheus, dataPrometheusReplica) (shelf_origin_signing_context_recomputed_total{namespace=\"alluxio\", pod=~\"$pod\"})), 1)",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",
