@@ -102,6 +102,18 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
+    // SHELF-S1 — when built with `--features console`, install the
+    // `tokio-console` subscriber before the tokio runtime boots so the
+    // `console-subscriber` crate captures every task spawn from the
+    // very first poll. This is intentionally separate from the
+    // `tracing` subscriber `telemetry::init` installs later — the two
+    // can coexist, but `console_subscriber::init()` must run first.
+    // No-op on the default build; the feature exists so an operator
+    // can rebuild a debug image and attach `tokio-console` to a single
+    // shelf pod once the shelf-bench cluster is restored.
+    #[cfg(feature = "console")]
+    console_subscriber::init();
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
