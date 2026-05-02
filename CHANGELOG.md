@@ -7,6 +7,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] — rc.8 batch — 2026-05-02
+
+Cost (K-tier) + Speed (S-tier) + Validation (V-tier) deltas closing
+the rc.8 dispatch. Inherits 1.0.1's soak evidence per `RELEASING.md`
+BDFL-override clause; the per-PR test gates of #106-#115 plus the
+benchmarks in #108 / #115 are the rc.8 soak signal. Operator-blocked
+items are listed at the bottom of this entry — they will land in
+1.0.3 or later when their gating dependency clears.
+
+### Added — Speed (S-tier)
+
+- **S1** Criterion in-process shim profile bench
+  (`shelfd/benches/shim_profile.rs`) + hot-spot report at
+  `agents/out/SHELF-S1/profile-report.md`
+  ([#111](https://github.com/shelf-project/shelf/pull/111)).
+- **S2** HTTP/2 (h2c) confirmed on the axum router; client-side
+  `reqwest::Client` standardisation across all 3 production sites
+  with explicit pool + HTTP/2 keepalive
+  ([#109](https://github.com/shelf-project/shelf/pull/109),
+  ADR-0040).
+- **S3** Origin SDK `IdentityCache::lazy()` pinned + counting wrapper
+  around the credentials chain. Three new visibility metrics on
+  `/metrics`: `shelf_shim_sigv4_skipped_total`,
+  `shelf_origin_signing_context_reused_total`,
+  `shelf_origin_signing_context_recomputed_total`
+  ([#113](https://github.com/shelf-project/shelf/pull/113),
+  ADR-0043).
+- **S4** Trino blob-cache SPI hook staged at
+  `aamir306/trino:shelf/fs-spi-hook` (commit `9d68b98`); upstream
+  submission pending JDK 25 host
+  ([#110](https://github.com/shelf-project/shelf/pull/110)).
+
+### Added — Cost (K-tier)
+
+- **K1** OSS chart default NVMe sizing 240 GiB → 60 GiB. Workload
+  evidence: shelfd held the working set inside ~8 % of 240 GiB on
+  the bench run, so the smaller default is the right OSS fit
+  ([#106](https://github.com/shelf-project/shelf/pull/106),
+  ADR-0042).
+- **K2** New per-pod load metrics — `shelf_pod_load_qps` (per-pod
+  request rate over the trailing 60 s window) and
+  `shelf_pod_load_skew_ratio_bps` (HRW skew ratio = `max(per-pod qps)
+  / median(per-pod qps)`, expressed in basis-points to dodge the YAML
+  scientific-notation Helm landmine) plus the
+  `shelf_pod_load_probe_errors_total` aggregator-health counter.
+  Drop-in KEDA `ScaledObject` example for HRW-skew-aware autoscaling
+  at `charts/shelf/examples/keda-scaledobject-skew-aware.yaml`
+  ([#112](https://github.com/shelf-project/shelf/pull/112),
+  ADR-0042).
+- **K3** A4 net-dollars-saved counter promoted to row 1 of the
+  reference dashboard `observability/dashboards/shelf-overview-v2.json`
+  ([#107](https://github.com/shelf-project/shelf/pull/107),
+  ADR-0041).
+
+### Added — Validation (V-tier, harness only)
+
+- **V1** Production-trace replay harness:
+  `benchmarks/scripts/run_prod_replay.sh`,
+  `benchmarks/scripts/prod_replay.py`,
+  `benchmarks/scripts/scrape_shelf_metrics.sh`
+  ([#108](https://github.com/shelf-project/shelf/pull/108)).
+- **V2 prep** Pre-staged pin-list, 7 cluster manifests, and a
+  one-command `run.sh` at `benchmarks/in-cluster/v2/`
+  ([#115](https://github.com/shelf-project/shelf/pull/115)).
+
+### Added — Operator docs
+
+- **K4** Shelf-pool 6 → 4 controlled rollout runbook gated on K2's
+  skew metric (`docs/operator/k4-shelf-pool-shrink-runbook.md`)
+  ([#114](https://github.com/shelf-project/shelf/pull/114)).
+- **S5 prep** ShelfFileSystem in-process activation patch staged for
+  upstream-Trino-SPI day (`agents/out/SHELF-S5/activation-prep.md`)
+  ([#114](https://github.com/shelf-project/shelf/pull/114)).
+
+### Added — Polish (this release)
+
+- 6 new dashboard panels covering the K2 / S2 / S3 metrics on
+  `observability/dashboards/shelf-overview-v2.json` row 7 (HRW skew
+  ratio, per-pod QPS, probe errors, shim SigV4 skipped, signing
+  context reused vs recomputed, signing-context cache effectiveness).
+- `.github/workflows/keda-example-validate.yml` — yaml syntax +
+  structural validation + best-effort `kubeconform` schema lint on
+  every PR touching `charts/shelf/examples/keda-*.yaml`.
+
+### Operator-blocked items (not in 1.0.2; will land in 1.0.3 or later)
+
+- V2 12-hour bench execution + V3 verdict ADR-0039 (operator must
+  trigger from `benchmarks/in-cluster/v2/RUN.md`).
+- S5 ShelfFileSystem activation (depends on upstream Trino SPI merge
+  of #29184).
+- K4 actual rollout (operator-gated on a 7-day K2 skew_ratio soak).
+
 ## [1.0.1] — 2026-05-01
 
 Hygiene patch — **no functional / runtime / API changes**. Operators
@@ -617,7 +709,8 @@ across two of four replicas; soak-clock for `v0.5.0` begins at full cutover.
   set under `agents/out/adr/0001-…`, design notes per ticket, rollout
   runbooks under `docs/rollout-v1/`.
 
-[Unreleased]: https://github.com/shelf-project/shelf/compare/v1.0.0-rc.4...HEAD
+[Unreleased]: https://github.com/shelf-project/shelf/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/shelf-project/shelf/releases/tag/v1.0.2
 [1.0.0-rc.4]: https://github.com/shelf-project/shelf/releases/tag/v1.0.0-rc.4
 [1.0.0-rc.3]: https://github.com/shelf-project/shelf/releases/tag/v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/shelf-project/shelf/releases/tag/v1.0.0-rc.2

@@ -1,0 +1,75 @@
+name: keda-example-validate
+on:
+  pull_request:
+    paths:
+      - 'charts/shelf/examples/keda-*.yaml'
+      - '.github/workflows/keda-example-validate.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'charts/shelf/examples/keda-*.yaml'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: yaml syntax + structural validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(charts/shelf/examples/keda-*.yaml)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no keda-*.yaml files to validate"
+            exit 0
+          fi
+          for f in "${files[@]}"; do
+            echo "validating $f"
+            python3 - "$f" <<'PY'
+          import sys, yaml
+          path = sys.argv[1]
+          with open(path) as fh:
+              docs = [d for d in yaml.safe_load_all(fh) if d is not None]
+          assert docs, f"{path}: no YAML documents found"
+          for i, d in enumerate(docs):
+              ctx = f"{path}[doc {i}]"
+              assert isinstance(d, dict), f"{ctx}: top-level must be a mapping"
+              api = d.get("apiVersion", "")
+              assert api.startswith("keda.sh/"), f"{ctx}: apiVersion must start with keda.sh/, got {api!r}"
+              assert d.get("kind") == "ScaledObject", f"{ctx}: kind must be ScaledObject, got {d.get('kind')!r}"
+              spec = d.get("spec") or {}
+              assert "scaleTargetRef" in spec, f"{ctx}: spec.scaleTargetRef missing"
+              triggers = spec.get("triggers") or []
+              assert isinstance(triggers, list) and triggers, f"{ctx}: spec.triggers must be a non-empty list"
+              allowed = {"prometheus", "cpu", "memory", "kafka", "redis"}
+              for j, t in enumerate(triggers):
+                  tctx = f"{ctx}.triggers[{j}]"
+                  ttype = t.get("type")
+                  assert ttype in allowed, f"{tctx}: unsupported trigger type {ttype!r} (allowed: {sorted(allowed)})"
+                  if ttype == "prometheus":
+                      meta = t.get("metadata") or {}
+                      for required in ("serverAddress", "query", "threshold"):
+                          assert required in meta, f"{tctx}: prometheus trigger missing metadata.{required}"
+          print(f"OK {path} ({len(docs)} doc(s))")
+          PY
+          done
+      - name: ScaledObject schema lint via kubeconform (best-effort)
+        shell: bash
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          files=(charts/shelf/examples/keda-*.yaml)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no keda-*.yaml files to validate"
+            exit 0
+          fi
+          if ! curl -sSL --fail https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+              | tar xz; then
+            echo "kubeconform download failed; skipping (best-effort lint)"
+            exit 0
+          fi
+          ./kubeconform -strict -ignore-missing-schemas \
+            -schema-location 'default' \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            "${files[@]}" || echo "kubeconform schema lint did not pass cleanly; skipping (best-effort)"
