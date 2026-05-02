@@ -153,6 +153,17 @@ data:
       overrides: {}
       {{- end }}
     {{- end }}
+    {{- with .Values.cache.podLoad }}
+    # K2 (rc.8) — HRW-skew-aware autoscaler integration. Default-on;
+    # hot-path cost is one atomic `fetch_add(Relaxed)` per accepted
+    # s3-shim request. Flip `cache.podLoad.enabled=false` for revert.
+    # See ADR-0042 + `examples/keda-scaledobject-skew-aware.yaml`.
+    pod_load:
+      enabled: {{ .enabled | default true }}
+      window: {{ .window | default "60s" | quote }}
+      aggregation_interval: {{ .aggregationInterval | default "30s" | quote }}
+      probe_timeout: {{ .probeTimeout | default "2s" | quote }}
+    {{- end }}
     {{- with .Values.cache.rewarm }}
     rewarm:
       enabled: {{ .enabled }}

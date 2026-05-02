@@ -370,6 +370,34 @@ async fn run(args: Args) -> anyhow::Result<()> {
         "SHELF-42 ab_tag receive path configured"
     );
 
+    // **K2 (rc.8)** — pod-load aggregator. Constructed here (after
+    // `router` exists) so `ServerState::with_pod_load` can hand the
+    // s3-shim accept handler a live `Arc<PodLoadAggregator>` whose
+    // `record_request` is a single atomic `fetch_add(Relaxed)`. The
+    // aggregator's background loop is spawned below, after the
+    // resolver, so the first peer probe sees a populated ring.
+    // Default-on; flip via `cache.podLoad.enabled=false` for revert.
+    let pod_load = Arc::new(shelfd::pod_load::PodLoadAggregator::new(
+        config.pod_load.clone(),
+        config.node.id.clone(),
+        router.clone(),
+        config.membership.stats_port,
+        peer_http.clone(),
+    ));
+    if config.pod_load.enabled {
+        tracing::info!(
+            window = ?config.pod_load.window,
+            interval = ?config.pod_load.aggregation_interval,
+            probe_timeout = ?config.pod_load.probe_timeout,
+            "K2 (rc.8) pod-load aggregator wired into s3_shim accept handler"
+        );
+    } else {
+        tracing::info!(
+            "K2 (rc.8) pod-load aggregator disabled (cache.podLoad.enabled=false); \
+             hot-path record_request() is a check-then-return"
+        );
+    }
+
     let mut state = ServerState::with_head_lru_and_pod_id(
         store.clone(),
         origin.clone(),
@@ -382,7 +410,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
     .with_drain_signal(drain_signal.clone())
     .with_peer_fetch(peer_http, config.membership.stats_port)
     .with_cost_state(cost_state.clone())
-    .with_ab_tag(ab_tag_state);
+    .with_ab_tag(ab_tag_state)
+    .with_pod_load(pod_load.clone());
     state.set_peer_fetch_enabled(peer_fetch_enabled);
     tracing::info!(
         peer_fetch_enabled,
@@ -532,6 +561,19 @@ async fn run(args: Args) -> anyhow::Result<()> {
         tracing::info!("membership resolver disabled by config (membership.enabled=false)");
         None
     };
+
+    // **K2 (rc.8)** — spawn the pod-load aggregator's background
+    // loop AFTER the membership resolver so the first
+    // `aggregate_once` tick sees a populated ring (peers won't
+    // appear until the resolver has done one DNS refresh, but the
+    // local-only QPS gauge populates on the first tick regardless).
+    // Cancellation is owned by the same `shutdown` token the rest
+    // of the long-lived tasks observe.
+    {
+        let pl = pod_load.clone();
+        let pl_shutdown = shutdown.clone();
+        tokio::spawn(async move { pl.run(pl_shutdown).await });
+    }
 
     spawn_signal_handler(shutdown.clone(), drain_signal.clone(), resolver.clone());
 

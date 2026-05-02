@@ -181,6 +181,16 @@ pub struct ServerState {
     /// authoritative byte cache for footer bytes is the metadata
     /// pool.
     pub page_index_cache: Arc<PageIndexCache>,
+    /// **K2 (rc.8)** — HRW-skew-aware pod-load aggregator. The
+    /// s3-shim accept handler bumps a single atomic counter on
+    /// every accepted request via
+    /// [`crate::pod_load::PodLoadAggregator::record_request`];
+    /// the background loop publishes `shelf_pod_load_qps` /
+    /// `shelf_pod_load_skew_ratio_bps` for HPA / KEDA scaling.
+    /// Defaults to a disabled instance for unit tests; `main`
+    /// overrides via [`Self::with_pod_load`] before traffic
+    /// arrives. See `agents/out/adr/0042-rc8-shelf-pool-rightsizing.md`.
+    pub pod_load: Arc<crate::pod_load::PodLoadAggregator>,
 }
 
 impl ServerState {
@@ -260,6 +270,10 @@ impl ServerState {
             // `/predicate-prune` request is rejected at the validator.
             predicate_allowlist: Arc::new(Vec::new()),
             page_index_cache: Arc::new(PageIndexCache::default()),
+            // K2 (rc.8) — sentinel disabled aggregator. `main`
+            // overrides via [`Self::with_pod_load`] with the live,
+            // router-backed instance before traffic arrives.
+            pod_load: Arc::new(default_disabled_pod_load()),
         }
     }
 
@@ -394,6 +408,35 @@ impl ServerState {
         self.drain_signal = signal;
         self
     }
+
+    /// **K2 (rc.8)** builder: install the operator-supplied pod-load
+    /// aggregator. `main` calls this with a live, router-backed
+    /// instance after the membership resolver is up; tests that
+    /// don't exercise pod-load behaviour inherit the
+    /// [`default_disabled_pod_load`] sentinel from the constructors,
+    /// which makes `record_request` a no-op.
+    pub fn with_pod_load(mut self, pod_load: Arc<crate::pod_load::PodLoadAggregator>) -> Self {
+        self.pod_load = pod_load;
+        self
+    }
+}
+
+/// **K2 (rc.8)** — fallback pod-load aggregator with `enabled=false`,
+/// no peers, and a sentinel `pod_id`. Used by [`ServerState`]
+/// constructors so unit tests never have to thread a router /
+/// resolver / reqwest client just to land a `ServerState`.
+fn default_disabled_pod_load() -> crate::pod_load::PodLoadAggregator {
+    let cfg = crate::pod_load::PodLoadConfig {
+        enabled: false,
+        ..crate::pod_load::PodLoadConfig::default()
+    };
+    crate::pod_load::PodLoadAggregator::new(
+        cfg,
+        "shelfd-disabled",
+        Arc::new(crate::router::Router::new()),
+        crate::membership::DEFAULT_STATS_PORT,
+        default_peer_http(),
+    )
 }
 
 /// SHELF-23 — fallback peer-fetch HTTP client. The values mirror the
@@ -1007,7 +1050,16 @@ pub mod handlers {
     ///   "rowgroup_pool": {"capacity_bytes": ..., "used_bytes": ...}
     /// }
     /// ```
-    pub async fn stats(State(state): State<Arc<ServerState>>) -> Response {
+    ///
+    /// **K2 (rc.8)** — passing `?include=pod_load` adds an opt-in
+    /// `pod_load: { qps, window_secs }` block to the response. The
+    /// in-cluster pod-load aggregator probes peers with this query
+    /// param so it never pays for the field on the always-on Agent
+    /// 5 polling path.
+    pub async fn stats(
+        State(state): State<Arc<ServerState>>,
+        Query(qs): Query<std::collections::HashMap<String, String>>,
+    ) -> Response {
         let span = tracing::info_span!(
             "http.stats",
             otel.kind = "server",
@@ -1016,7 +1068,11 @@ pub mod handlers {
         );
         let _e = span.enter();
         let start = std::time::Instant::now();
-        let resp = stats_inner(&state).await;
+        let include_pod_load = qs
+            .get("include")
+            .map(|v| v.split(',').any(|t| t.trim() == "pod_load"))
+            .unwrap_or(false);
+        let resp = stats_inner(&state, include_pod_load).await;
         state
             .metrics
             .request_seconds
@@ -1025,7 +1081,7 @@ pub mod handlers {
         resp
     }
 
-    async fn stats_inner(state: &Arc<ServerState>) -> Response {
+    async fn stats_inner(state: &Arc<ServerState>, include_pod_load: bool) -> Response {
         let metadata = PoolStats {
             capacity_bytes: state.store.capacity_bytes(Pool::Metadata),
             used_bytes: state.store.used_bytes(Pool::Metadata),
@@ -1051,6 +1107,20 @@ pub mod handlers {
             .disk_bytes_capacity
             .with_label_values(&["rowgroup"])
             .set(rowgroup.disk_capacity_bytes as i64);
+        // K2 (rc.8) — opt-in `pod_load` block, present only when
+        // the caller passed `?include=pod_load`. The pod-load
+        // aggregator owns the cumulative counter; we just snapshot
+        // the published QPS + window so peer probers see the same
+        // value the Prometheus gauge does, without holding a lock
+        // inside the request path.
+        let pod_load = if include_pod_load {
+            Some(crate::control::PodLoadStats {
+                qps: state.pod_load.current_local_qps(),
+                window_secs: state.pod_load.window_secs(),
+            })
+        } else {
+            None
+        };
         let stats = Stats {
             pod_id: state.pod_id.as_ref().to_owned(),
             capacity_bytes: metadata
@@ -1069,6 +1139,7 @@ pub mod handlers {
             // RC6 P1.2 — `0` on non-Linux dev hosts; on production
             // distroless this is the live `/proc/self/status` VmRSS.
             rss_bytes: crate::capacity_check::read_self_rss_bytes(),
+            pod_load,
         };
         (
             StatusCode::OK,
@@ -2176,9 +2247,21 @@ mod tests {
             // existing serializers happy and matches the non-Linux
             // dev-host fallback.
             rss_bytes: 0,
+            // K2 (rc.8) — opt-in `pod_load` block; absent on the
+            // default `/stats` shape so the wire payload Agent 5
+            // sees stays byte-identical with pre-K2.
+            pod_load: None,
         };
         let v = serde_json::to_value(&stats).expect("serialize");
         let obj = v.as_object().expect("object");
+        // K2 (rc.8) — `pod_load: None` must NOT appear in the
+        // serialised payload (Agent 5's HRW weighting depends on a
+        // stable shape). The `?include=pod_load` path round-trips
+        // a `Some(_)` value; covered separately below.
+        assert!(
+            !obj.contains_key("pod_load"),
+            "default /stats payload must omit pod_load (K2 contract)"
+        );
         for key in [
             "pod_id",
             "capacity_bytes",
@@ -2214,5 +2297,46 @@ mod tests {
         }
         assert_eq!(rg["disk_used_bytes"].as_u64(), Some(8));
         assert_eq!(rg["disk_capacity_bytes"].as_u64(), Some(2048));
+    }
+
+    /// **K2 (rc.8)** — `?include=pod_load` adds the optional
+    /// `pod_load: { qps, window_secs }` block. A stable shape
+    /// because the in-cluster aggregator probes peers with this
+    /// query string.
+    #[test]
+    fn stats_payload_includes_pod_load_when_requested() {
+        let stats = Stats {
+            pod_id: "shelf-3".into(),
+            capacity_bytes: 0,
+            used_bytes: 0,
+            metadata_pool: PoolStats {
+                capacity_bytes: 0,
+                used_bytes: 0,
+                disk_used_bytes: 0,
+                disk_capacity_bytes: 0,
+            },
+            rowgroup_pool: PoolStats {
+                capacity_bytes: 0,
+                used_bytes: 0,
+                disk_used_bytes: 0,
+                disk_capacity_bytes: 0,
+            },
+            pinned_bytes: 0,
+            pinned_count: 0,
+            draining: false,
+            rss_bytes: 0,
+            pod_load: Some(crate::control::PodLoadStats {
+                qps: 42,
+                window_secs: 60,
+            }),
+        };
+        let v = serde_json::to_value(&stats).expect("serialize");
+        let obj = v.as_object().expect("object");
+        let pl = obj
+            .get("pod_load")
+            .and_then(|p| p.as_object())
+            .expect("pod_load present when set");
+        assert_eq!(pl["qps"].as_u64(), Some(42));
+        assert_eq!(pl["window_secs"].as_u64(), Some(60));
     }
 }

@@ -636,6 +636,11 @@ mod tests {
             pinned_count: 0,
             draining,
             rss_bytes: 0,
+            // K2 (rc.8) — membership probes the always-on `/stats`
+            // path (no `?include=pod_load`), so the field stays
+            // `None` here. Decoding accepts either shape via
+            // `#[serde(default)]`.
+            pod_load: None,
         }
     }
 

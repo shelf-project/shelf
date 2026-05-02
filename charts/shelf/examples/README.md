@@ -38,3 +38,35 @@ Update this example when any of the following hold:
 - `charts/shelf/values.yaml` — `cache.abTag` block: SHELF-42 A/B
   tagging knob for attributing hit/miss across query cohorts. Pair with
   this recipe when measuring the impact of a single property flip.
+
+## `keda-scaledobject-skew-aware.yaml`
+
+K2 (rc.8) drop-in `KEDA ScaledObject` for HRW-skew-aware autoscaling
+of the `shelf-pool` StatefulSet. Targets `max(shelf_pod_load_skew_ratio_bps)
+> 150` (= ratio > 1.5×) — i.e. scale up when one shelf pod is doing
+significantly more work than the cluster median.
+
+| Trigger                           | Threshold | Why                                                                |
+|-----------------------------------|-----------|--------------------------------------------------------------------|
+| `max(shelf_pod_load_skew_ratio_bps)` | `150`  | Catches HRW hot-key fan-out (workspace memory: rep-2 `mbuser_admin` regime) |
+| `avg(shelf_pod_load_qps)`         | `800`     | Optional baseline; matches per-pod throughput envelope from rep-1 cutover |
+
+Adjust the `serverAddress`, `namespace`, and replica bounds for your
+cluster. Requires KEDA installed in-cluster. The chart does NOT depend
+on KEDA — this is a paste-in template.
+
+### When to revisit
+
+- Phase 4 lever flips land (decoded-metadata cache, range coalescing,
+  bloom-aware admission) — the per-pod throughput envelope shifts and
+  the `qps` baseline trigger may want re-tuning.
+- Your cluster's hot-key distribution evens out (e.g. by sharding a
+  Metabase user pool by `user_id` prefix) — the skew threshold can
+  rise without losing autoscaling responsiveness.
+
+### Related
+
+- `agents/out/adr/0042-rc8-shelf-pool-rightsizing.md` — design + rationale
+  for K1 (NVMe shrink) + K2 (skew autoscaler) together.
+- `shelfd/src/pod_load.rs` — the in-process aggregator that publishes
+  `shelf_pod_load_qps` + `shelf_pod_load_skew_ratio_bps`.

@@ -150,6 +150,18 @@ pub struct Config {
     /// Reads are unaffected — B3 is admit-only. See ADR-0038.
     #[serde(default)]
     pub transient_admission: crate::transient_admission::TransientAdmissionConfig,
+
+    /// **K2 (rc.8)** — HRW-skew-aware autoscaler integration.
+    /// Default-ON; the hot-path cost is one atomic `fetch_add` per
+    /// accepted s3-shim request. The background loop snapshots the
+    /// counter, probes each peer's `/stats?include=pod_load`, and
+    /// publishes `shelf_pod_load_qps` + `shelf_pod_load_skew_ratio_bps`
+    /// every `aggregation_interval` (default 30 s). The example
+    /// `KEDA ScaledObject` in `charts/shelf/examples/keda-scaledobject-skew-aware.yaml`
+    /// targets `> 150 bps` (1.5×) for scale-up. See
+    /// `agents/out/adr/0042-rc8-shelf-pool-rightsizing.md`.
+    #[serde(default)]
+    pub pod_load: crate::pod_load::PodLoadConfig,
 }
 
 fn default_head_lru_entries() -> u64 {
