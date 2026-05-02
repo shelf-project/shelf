@@ -329,6 +329,17 @@ impl S3Origin {
                 }
             }
         }
+        // S2 (rc.8 / ADR-0040) — single shared `S3Client` for the
+        // lifetime of this `S3Origin`. The SDK wraps the client in
+        // an `Arc`, so cloning it is cheap; reuse is the canonical
+        // pattern. The HTTP connector under the hood is the SDK's
+        // default (`aws-smithy-runtime` over `hyper-rustls`), which
+        // negotiates HTTP/2 with S3 via ALPN and maintains its own
+        // idle pool. ADR-0040 leaves the SDK's HTTP-client override
+        // out of scope for rc.8 because it would pull in
+        // `aws-smithy-runtime` directly and risk a major-version
+        // dep churn — to be reconsidered as a follow-up if profiling
+        // proves the default pool is the bottleneck.
         let client = S3Client::from_conf(s3_cfg_builder.build());
 
         Ok(Self {

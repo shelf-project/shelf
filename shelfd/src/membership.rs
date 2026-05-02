@@ -290,8 +290,19 @@ impl Resolver {
         drain: DrainSignal,
         shutdown: CancellationToken,
     ) -> crate::Result<Self> {
+        // S2 (rc.8 / ADR-0040) — explicit pool + HTTP/2 keepalive
+        // config so the membership stats poller doesn't pay a fresh
+        // TCP/TLS handshake on every probe interval. The keepalive
+        // knobs are no-ops over HTTP/1.1 (peers may stay on h1 if
+        // they don't advertise h2c) but cost nothing if HTTP/2 isn't
+        // negotiated.
         let http = reqwest::Client::builder()
             .pool_max_idle_per_host(2)
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .http2_keep_alive_interval(std::time::Duration::from_secs(30))
+            .http2_keep_alive_timeout(std::time::Duration::from_secs(60))
+            .http2_keep_alive_while_idle(true)
+            .tcp_nodelay(true)
             .timeout(config.stats_timeout)
             .build()
             .map_err(|e| crate::Error::Membership(format!("reqwest build: {e}")))?;

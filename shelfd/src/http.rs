@@ -404,9 +404,20 @@ impl ServerState {
 /// [`ServerState::with_peer_fetch`] with a more thoroughly-tuned
 /// client; this helper exists so unit/integration tests get a
 /// sensible default without needing to construct one themselves.
+///
+/// S2 (rc.8 / ADR-0040) — the test-time defaults track the
+/// production-side knobs added in `main`. The HTTP/2 keepalive
+/// settings are no-ops over HTTP/1.1 but keep the test client and
+/// the production client structurally aligned so a future feature-
+/// gating change in either place stays symmetric.
 fn default_peer_http() -> reqwest::Client {
     reqwest::Client::builder()
         .pool_max_idle_per_host(2)
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .http2_keep_alive_interval(std::time::Duration::from_secs(30))
+        .http2_keep_alive_timeout(std::time::Duration::from_secs(60))
+        .http2_keep_alive_while_idle(true)
+        .tcp_nodelay(true)
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .expect("default peer-fetch reqwest::Client")
@@ -508,6 +519,15 @@ pub async fn serve(
         .map_err(|e| crate::Error::Config(format!("http: bind {addr}: {e}")))?;
     tracing::info!(%addr, "shelfd http listener bound");
 
+    // S2 (rc.8 / ADR-0040) — `axum::serve` wraps
+    // `hyper_util::server::conn::auto::Builder` and calls
+    // `serve_connection_with_upgrades`, which detects the HTTP/2
+    // connection preface and negotiates h2c on the fly. With the
+    // workspace `axum` `http2` feature enabled, the listener accepts
+    // both HTTP/1.1 and HTTP/2 cleartext (h2c) clients on the same
+    // port without TLS. No code change needed here for h2c support;
+    // this comment exists so a future audit doesn't conclude we're
+    // forcing HTTP/1.1.
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { shutdown.cancelled().await })
         .await
@@ -544,6 +564,13 @@ pub async fn serve_s3_shim(
         .map_err(|e| crate::Error::Config(format!("s3_shim: bind {addr}: {e}")))?;
     tracing::info!(%addr, "shelfd s3-shim listener bound");
 
+    // S2 (rc.8 / ADR-0040) — same h2c story as the data plane
+    // [`serve`]: `axum::serve` + the workspace `http2` feature on
+    // `axum` mean a Trino native S3 client (or any client speaking
+    // the HTTP/2 prior-knowledge preface) gets multiplexed over a
+    // single connection, while legacy HTTP/1.1 clients keep working
+    // unchanged. The shim does not require TLS termination because
+    // it only ever runs in-cluster behind a Service.
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { shutdown.cancelled().await })
         .await
@@ -2068,6 +2095,33 @@ pub mod handlers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S2 (rc.8 / ADR-0040) — `default_peer_http()` builds a usable
+    /// `reqwest::Client`. Smoke that the explicit HTTP/2 keepalive +
+    /// pool-idle config doesn't violate any builder invariants on the
+    /// workspace-pinned reqwest version, and that cloning a Client
+    /// is cheap (the documented `Arc`-wrapped reuse pattern).
+    #[test]
+    fn default_peer_http_builds_and_clone_is_cheap() {
+        let client: reqwest::Client = default_peer_http();
+        let _aliased = client.clone();
+    }
+
+    /// S2 (rc.8 / ADR-0040) — type-level witness that
+    /// `ServerState::peer_http` is a concrete `reqwest::Client`
+    /// field, NOT a per-call factory closure or builder. Catches a
+    /// future refactor that replaces the field with something that
+    /// builds a fresh pool per request (which would defeat both
+    /// connection reuse and HTTP/2 multiplexing). If the field type
+    /// changes, this test fails to **compile**, surfacing the
+    /// regression before it lands.
+    #[test]
+    fn server_state_peer_http_field_is_reqwest_client() {
+        fn _project(state: &ServerState) -> &reqwest::Client {
+            &state.peer_http
+        }
+        let _ = _project as fn(&ServerState) -> &reqwest::Client;
+    }
 
     #[test]
     fn range_parses_round_trip() {
