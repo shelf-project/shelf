@@ -73,7 +73,7 @@ Highlights:
 | `service.dataPort`                     | 9090                 | ADR-0004 HTTP/2 only |
 | `cache.pools.metadata.sizeBytes`       | 5 GiB                | ADR-0008             |
 | `cache.pools.rowgroup.dramSizeBytes`   | 56 GiB               | ADR-0008             |
-| `cache.pools.rowgroup.nvmeSizeBytes`   | 500 GiB              | ADR-0008             |
+| `cache.pools.rowgroup.nvmeSizeBytes`   | 60 GiB               | ADR-0008, ADR-0042   |
 | `cache.admission.sizeThresholdMiB`     | 1024                 | ADR-0003             |
 | `cache.admission.model.enabled`        | false                | ADR-0003             |
 | `storage.storageClassName`             | local-nvme           | plan §4 SHELF-18     |

@@ -129,11 +129,25 @@ storage:
   # -- StorageClass. Prefer local-nvme; ebs-gp3-wffc is the fallback.
   # [plan §4 SHELF-18 "local NVMe StorageClass (preferred) or ebs-gp3-wffc (fallback)"]
   storageClassName: local-nvme
-  # -- Disk size per pod. ADR-0008 / SHELF-18 set 500 GiB as the
-  # aspirational size; the deployed PVC on rep-2 is 240 GiB so the
-  # default here matches reality. Bump in your overlay if your node
-  # pool's local NVMe has more capacity.
-  size: 240Gi
+  # -- Disk size per pod. rc.8 / K1 (ADR-0042) lowered the OSS
+  # default from 240 GiB to 60 GiB based on the May 1 2026 TPC-H
+  # SF100 benchmark showing peak per-pod NVMe utilisation of
+  # 7.82% (~18.77 GiB on a 240 GiB hybrid pool) — the 20 GB
+  # working set fit almost entirely in the 11 GiB DRAM rowgroup
+  # pool. 60 GiB leaves ~3× headroom over the observed peak while
+  # cutting the shelf-pool gp3 EBS line ~75%.
+  #
+  # Operators with large hot working sets (>30 GB per pod;
+  # high-traffic dashboards, multi-TB Iceberg scans) should raise
+  # this via overlay values back to 240Gi (or higher). See
+  # benchmarks/results/2026-05-01/4hr/COMPREHENSIVE-RESULTS.md
+  # and agents/out/adr/0042-rc8-nvme-sizing-rule.md.
+  #
+  # Existing deployments with 240 GiB PVCs are unaffected by a
+  # helm upgrade — StatefulSet volumeClaimTemplates are immutable
+  # post-create. Downsize requires an operator decision
+  # (kubectl patch pvc … then rebind; ADR-0042 "Migration").
+  size: 60Gi
   mountPath: /var/lib/shelf
 
 # ---------------------------------------------------------------------------
@@ -188,7 +202,7 @@ cache:
       #   shelfd/docs/runbooks/2026-04-shelf-1-oom.md
       # and the 2026-04-29 LODC regression entry in CHANGELOG.md.
       dramSizeBytes: 11811160064   # 11 GiB
-      nvmeSizeBytes: 257698037760  # 240 GiB; matches storage.size
+      nvmeSizeBytes: 64424509440   # 60 GiB; matches storage.size (rc.8 K1, ADR-0042)
       # -- Foyer Large-Object Disk Cache (LODC) pipeline knobs.
       #
       # Post-mortem 2026-04-27: shelf-1 was OOM-killed (exit 137) at
