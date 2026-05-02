@@ -101,6 +101,13 @@ percent-encoding = { workspace = true }
 # Content-Type from the asset path.
 rust-embed = { workspace = true, optional = true }
 mime_guess = { workspace = true, optional = true }
+# SHELF-S1 — optional `tokio-console` instrumentation for live profiling
+# once the shelf-bench cluster is restored. The Criterion harness in
+# `benches/shim_profile.rs` is the source of truth for shim hot spots
+# until then; this feature exists so an operator can rebuild a debug
+# image (`cargo build --features console`) and attach `tokio-console` on
+# a single shelf pod without modifying the production binary.
+console-subscriber = { version = "0.4", optional = true }
 # SHELF-46 footer-parser dep is already satisfied by the unconditional
 # `parquet = { workspace = true }` above (added by SHELF-50). The
 # `parquet_meta` feature below remains a marker feature: it toggles
@@ -108,7 +115,7 @@ mime_guess = { workspace = true, optional = true }
 # needing an extra optional crate.
 
 [dev-dependencies]
-criterion = { workspace = true }
+criterion = { workspace = true, features = ["async_tokio"] }
 tokio = { workspace = true }
 # SHELF-18 — integration tests for the hybrid NVMe pool need a
 # per-test temp directory that the foyer `DirectFsDevice` can own
@@ -119,6 +126,25 @@ tempfile = "3"
 # Pinned to the same line the upstream `parquet` crate ships; at
 # parquet 58 the thrift interop stays stable against 0.17.
 thrift = "0.17"
+# SHELF-S1 — in-process S3 origin for the shim Criterion bench. Pinned
+# to 0.7 (the latest line) which works against `tokio` 1 and exposes
+# the `MockServer::start_async` API the bench uses.
+httpmock = "0.7"
+# SHELF-S1 — `tower::ServiceExt::oneshot` drives the axum router
+# in-process so the bench excludes TCP framing from the measurement.
+tower = { workspace = true }
+# SHELF-S1 — `Body::collect` for draining the response body in the
+# bench's per-iteration cleanup. Already a transitive dep via axum;
+# declared here so the bench file isn't relying on transitive paths.
+http-body-util = "0.1"
+# SHELF-S1 — regex pattern matching for httpmock's path filter. Already
+# a transitive dep via tracing-subscriber; declared explicitly so the
+# bench imports are self-evident.
+regex = { workspace = true }
+# SHELF-S1 — `futures::future::join_all` for the concurrency bench.
+# `futures` is already a runtime dep; redeclared in dev-deps for
+# clarity.
+futures = { workspace = true }
 
 [features]
 # Feature flags track ADR-0001/2/3/4/8/9 scope. The defaults represent
@@ -178,7 +204,16 @@ side_bloom_module = []
 # dollars-saved counter into the same label without forcing a merge
 # order between the two PRs.
 ab_tag = []
+# SHELF-S1 — opt-in tokio-console instrumentation. Not on by default so
+# the stock binary stays unchanged. Pair with `RUSTFLAGS="--cfg
+# tokio_unstable"` per the tokio-console docs and run a debug build for
+# best resolution.
+console = ["dep:console-subscriber"]
 
 [[bench]]
 name = "hashring"
+harness = false
+
+[[bench]]
+name = "shim_profile"
 harness = false
