@@ -3,7 +3,10 @@
     "list": [
       {
         "builtIn": 1,
-        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
         "enable": true,
         "hide": true,
         "iconColor": "rgba(0, 211, 255, 1)",
@@ -12,48 +15,373 @@
       }
     ]
   },
-  "description": "Shelf overview v2 — insight-first dashboard for the rc.5 drain wave (PRs #40,#43,#46,#49,#50,#54,#67,#68,#69 + SHELF-21e/-23/-29 backfill). 20 actionable panels in 5 rows: traffic-light health, per-pool + cost, culprit tables, drain-wave feature observability, and A/B tag attribution (SHELF-42). Every panel passes the 'am I doing good or bad, what action do I take?' test. Migration note: this dashboard is intended to replace shelf-overview (uid=shelf-overview, 48 panels) once validated; until then both can coexist.",
+  "description": "Shelf overview v2 — insight-first dashboard for the rc.5 drain wave (PRs #40,#43,#46,#49,#50,#54,#67,#68,#69 + SHELF-21e/-23/-29 backfill). Row 1 (rc.8 K3) leads with the procurement KPI: **net dollars saved** at 24h/7d/30d, the amortized-cost anti-overclaim guard, and the cumulative trend. Rows 2-6 are the operator surface: traffic-light health, per-pool + cost, culprit tables, drain-wave feature observability, and A/B tag attribution (SHELF-42). 25 actionable panels in 6 rows. Every panel passes the 'am I doing good or bad, what action do I take?' test. Migration note: this dashboard is intended to replace shelf-overview (uid=shelf-overview, 48 panels) once validated; until then both can coexist.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
   "links": [
-    {"title": "Runbook: hit ratio low",   "url": "https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-hit-rate-too-low.md",  "type": "link", "icon": "external link"},
-    {"title": "Runbook: LODC drops",      "url": "https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-lodc-drops.md",         "type": "link", "icon": "external link"},
-    {"title": "Runbook: rewarm lag",      "url": "https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-rewarm-lag.md",         "type": "link", "icon": "external link"},
-    {"title": "Metric dictionary",        "url": "https://github.com/shelf-project/shelf/blob/main/shelfd/docs/metrics.md",               "type": "link", "icon": "doc"}
+    {
+      "title": "Runbook: hit ratio low",
+      "url": "https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-hit-rate-too-low.md",
+      "type": "link",
+      "icon": "external link"
+    },
+    {
+      "title": "Runbook: LODC drops",
+      "url": "https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-lodc-drops.md",
+      "type": "link",
+      "icon": "external link"
+    },
+    {
+      "title": "Runbook: rewarm lag",
+      "url": "https://github.com/shelf-project/shelf/blob/main/runbooks/shelf-rewarm-lag.md",
+      "type": "link",
+      "icon": "external link"
+    },
+    {
+      "title": "Metric dictionary",
+      "url": "https://github.com/shelf-project/shelf/blob/main/shelfd/docs/metrics.md",
+      "type": "link",
+      "icon": "doc"
+    }
   ],
   "liveNow": false,
   "panels": [
     {
+      "id": 50,
+      "type": "row",
+      "title": "Row 1 — Net dollars saved (procurement KPI)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Net $ saved (24h)",
+      "description": "A4 net counter (shelf_s3_dollars_saved_net_total) — gross S3 + data-transfer savings minus amortized shelf-pool cost over the last 24h, in dollars. **Procurement KPI**: answers 'is shelf paying for itself today?' at a glance. Red < $0 (cumulative regression — investigate amortization input or A4 tick() arithmetic). Amber 0-$100 (positive but below day-1 ROI floor). Green ≥ $100 (clearing operational cost). ANTI-OVERCLAIM: stays at exactly $0 until cache.cost.amortizedDollarsPerHour is set; see the amortized-cost panel.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 100
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(max without(prometheus, dataPrometheusReplica) (shelf_s3_dollars_saved_net_total{namespace=\"alluxio\", pod=~\"$pod\"})[24h:1m])) / 1e6",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "Net $ saved (7d)",
+      "description": "Net dollars saved over the last 7 days. **Procurement KPI**: the weekly cohort number for procurement reviews. Red < $0 (cumulative regression). Amber 0-$700 (positive but below the ~$100/day target). Green ≥ $700. Pair with the cumulative trend panel to see whether the week was front-loaded or steady.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 700
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(max without(prometheus, dataPrometheusReplica) (shelf_s3_dollars_saved_net_total{namespace=\"alluxio\", pod=~\"$pod\"})[7d:5m])) / 1e6",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "Net $ saved (30d)",
+      "description": "Net dollars saved over the last 30 days. **Procurement KPI**: the monthly headline number — the one that goes in the cluster-cost review deck. Red < $0 (cumulative regression). Amber 0-$3000 (positive but below the ~$100/day run-rate). Green ≥ $3000. If this stat goes red while 24h/7d are green, the regression is old — check pod-restart history and amortization-config history.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 3000
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(max without(prometheus, dataPrometheusReplica) (shelf_s3_dollars_saved_net_total{namespace=\"alluxio\", pod=~\"$pod\"})[30d:30m])) / 1e6",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "Amortized pool $/hr",
+      "description": "Active amortized shelf-pool cost in $/hr (gauge, divided by 1e6 from dollar-micros). **Anti-overclaim guard**: a value of exactly $0/hr means the operator has NOT set cache.cost.amortizedDollarsPerHour, so the net-saved counter is publishing as zero — every other panel in this row is meaningless until this stat goes green. Action when amber: configure cache.cost.amortizedDollarsPerHour in the Helm values and roll out shelfd. Yellow at unset, green > 0.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.01
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "sum(max without(prometheus, dataPrometheusReplica) (shelf_pool_amortized_dollars_per_hour{namespace=\"alluxio\", pod=~\"$pod\"})) / 1e6",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Cumulative net $ saved trend",
+      "description": "Cumulative net dollars saved (counter rendered as line) over the dashboard time-range, summed across in-scope shelf pods. **Procurement KPI**: the picture procurement actually wants — is the line trending up, flat, or down? An upward slope at steady rate = healthy run-rate. Downward slope = either pod restarts (counter resets to 0 per pod, sum dips) OR the amortized cost outweighs gross savings (real regression — check the amortized-cost panel and the bench narrative). Compare slope across the 24h / 7d / 30d stats to spot regime changes.",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(max without(prometheus, dataPrometheusReplica) (shelf_s3_dollars_saved_net_total{namespace=\"alluxio\", pod=~\"$pod\"})) / 1e6",
+          "legendFormat": "net $ saved (cumulative)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "id": 100,
       "type": "row",
-      "title": "Row 1 — Traffic light: am I doing good or bad?",
+      "title": "Row 2 — Traffic light: am I doing good or bad?",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0}
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      }
     },
     {
       "id": 1,
       "type": "stat",
       "title": "Hit ratio (5m)",
       "description": "Share of cache lookups served from local DRAM/NVMe instead of S3. Action: hit ratio < 40% in steady state ⇒ either cache is cold (recent restart, working-set churn) or NVMe is too small — open the runbook.",
-      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 1},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
-          "min": 0, "max": 1,
+          "min": 0,
+          "max": 1,
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "red",    "value": null},
-              {"color": "orange", "value": 0.40},
-              {"color": "green",  "value": 0.70}
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.4
+              },
+              {
+                "color": "green",
+                "value": 0.7
+              }
             ]
           }
         }
       },
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
       "targets": [
         {
           "expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s])) / clamp_min(sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s])) + sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_misses_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s])), 1)",
@@ -66,22 +394,47 @@
       "type": "stat",
       "title": "$/hr saved",
       "description": "Audit-able dollars saved per hour from cache hits (SHELF-40). ANTI-OVERCLAIM: the underlying counter refuses to publish unless cluster spec sets cost.amortizedDollarsPerHour. If this stat reads exactly $0/hr while hit ratio is healthy, the amortization input is missing — set it before claiming any savings figure. Source: shelf_s3_dollars_saved_rate_cents_per_sec * 36 (cents/sec × 3600 ÷ 100). Counter unit is integer cents.",
-      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 1},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "red",    "value": null},
-              {"color": "orange", "value": 0.01},
-              {"color": "green",  "value": 1}
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.01
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
             ]
           }
         }
       },
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
       "targets": [
         {
           "expr": "sum(max without(prometheus, dataPrometheusReplica) (shelf_s3_dollars_saved_rate_cents_per_sec{namespace=\"alluxio\", pod=~\"$pod\"})) * 36",
@@ -94,22 +447,47 @@
       "type": "stat",
       "title": "RSS max pod",
       "description": "Worst-pod resident memory. Hard ceiling on the alluxio NodePool is ~27.3 GiB allocatable per node; sustained > 26 GiB has historically preceded OOMKill. Action: > 22 GiB ⇒ watch LODC drops and rewarm queue depth; > 26 GiB ⇒ tune cache.pools.rowgroup.dramSizeBytes down or scale shelfd.",
-      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 1},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green",  "value": null},
-              {"color": "orange", "value": 23622320128},
-              {"color": "red",    "value": 27917287424}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 23622320128
+              },
+              {
+                "color": "red",
+                "value": 27917287424
+              }
             ]
           }
         }
       },
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
       "targets": [
         {
           "expr": "max(max without(prometheus, dataPrometheusReplica) (container_memory_working_set_bytes{namespace=\"alluxio\", pod=~\"shelf-.*\", pod=~\"$pod\", container=\"shelfd\"}))",
@@ -122,22 +500,47 @@
       "type": "stat",
       "title": "shelfd restarts (24h)",
       "description": "Container restart count over the last 24h, summed across all in-scope shelf pods. In a healthy cluster this is exactly 0. Most restarts are OOMKill — cross-check with kube events and the LODC-drops panel before drawing conclusions.",
-      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 1},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green",  "value": null},
-              {"color": "orange", "value": 1},
-              {"color": "red",    "value": 3}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
             ]
           }
         }
       },
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "none"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      },
       "targets": [
         {
           "expr": "sum(max without(prometheus, dataPrometheusReplica) (increase(kube_pod_container_status_restarts_total{namespace=\"alluxio\", pod=~\"shelf-.*\", pod=~\"$pod\", container=\"shelfd\"}[24h])))",
@@ -150,22 +553,47 @@
       "type": "stat",
       "title": "LODC drops/min",
       "description": "Hybrid-pool admissions dropped by SHELF-21e level gate (submit_queue_overflow) + SHELF-29 token-bucket (rate_limit). Sustained non-zero ⇒ NVMe drain falling behind ingress; the cache is doing less work than it could. Threshold: green 0 / amber 1-100 / red > 100. Drill into row 3 to see which reason.",
-      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 1},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green",  "value": null},
-              {"color": "orange", "value": 1},
-              {"color": "red",    "value": 100}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
             ]
           }
         }
       },
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
       "targets": [
         {
           "expr": "60 * sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_lodc_drops_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s]))",
@@ -178,22 +606,47 @@
       "type": "stat",
       "title": "shelfd errors/min",
       "description": "Typed shelfd errors per minute, summed across components (origin, store, control, peer, …). Healthy = 0. Sustained > 10/min ⇒ open row 3 'errors by component' to see where it lives. NOTE: peer-fetch and conditional-GET errors here are non-fatal (fail-open to origin); they still warrant investigation if the rate is sustained.",
-      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 1},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green",  "value": null},
-              {"color": "orange", "value": 1},
-              {"color": "red",    "value": 10}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
             ]
           }
         }
       },
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
       "targets": [
         {
           "expr": "60 * sum(rate(max without(prometheus, dataPrometheusReplica) (shelfd_error_total{namespace=\"alluxio\", pod=~\"$pod\"})[5m:30s]))",
@@ -204,33 +657,76 @@
     {
       "id": 200,
       "type": "row",
-      "title": "Row 2 — Per-pool & cost trends",
+      "title": "Row 3 — Per-pool & cost trends",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5}
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      }
     },
     {
       "id": 7,
       "type": "timeseries",
       "title": "Per-pool hit ratio (5m) — target 70%",
       "description": "Rolling hit ratio split by pool (metadata, rowgroup, text_index). The 70% target line is the v0.5 gate floor; the 40% red line is the auto-rollback signal for a fresh cutover. metadata pool should warm to ~100% within minutes; rowgroup pool to ~70% within 12h.",
-      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 6},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
-          "min": 0, "max": 1,
+          "min": 0,
+          "max": 1,
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "red",    "value": null},
-              {"color": "orange", "value": 0.40},
-              {"color": "green",  "value": 0.70}
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.4
+              },
+              {
+                "color": "green",
+                "value": 0.7
+              }
             ]
           },
-          "custom": {"thresholdsStyle": {"mode": "line"}, "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            },
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
         }
       },
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "min", "max"]}, "tooltip": {"mode": "multi"}},
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
           "expr": "sum by (pool) (rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s])) / clamp_min(sum by (pool) (rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s])) + sum by (pool) (rate(max without(prometheus, dataPrometheusReplica) (shelf_misses_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s])), 0.001)",
@@ -244,15 +740,39 @@
       "type": "timeseries",
       "title": "$ saved cumulative — SHELF-40 dollars-saved counter",
       "description": "Cumulative dollars saved (cents ÷ 100) since each pod's boot, summed across in-scope pods. ANTI-OVERCLAIM: stays at $0 until the operator sets the amortization input. A growing line that resets to 0 = pod restart, not lost savings. Pair with the row-1 $/hr stat for current rate.",
-      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 6},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
-          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 15}
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
         }
       },
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi"}},
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
           "expr": "sum by (outcome) (max without(prometheus, dataPrometheusReplica) (shelf_s3_dollars_saved_total{namespace=\"alluxio\", pod=~\"$pod\"})) / 100",
@@ -266,41 +786,119 @@
       "type": "timeseries",
       "title": "Peer-fetch + ETag-conditional outcomes (SHELF-23)",
       "description": "How often shelfd avoids an origin round-trip via cross-pod sharing or freshness-window skips. peer_hit = local miss served by a peer pod; conditional_skipped = freshness window let us skip the conditional GET entirely; conditional_not_modified = 304 round-trip, body served from cache; modified = origin had new ETag, cache invalidated. Healthy = peer_hit + conditional_skipped dominate; modified should be a thin baseline (writers writing).",
-      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 6},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
-          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "stacking": {"mode": "none"}}
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none"
+            }
+          }
         }
       },
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi"}},
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
-        {"expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_peer_hit_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s]))",                "legendFormat": "peer_hit",              "refId": "A"},
-        {"expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_peer_miss_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s]))",               "legendFormat": "peer_miss",             "refId": "B"},
-        {"expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_peer_timeout_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s]))",            "legendFormat": "peer_timeout",          "refId": "C"},
-        {"expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_peer_error_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s]))",              "legendFormat": "peer_error",            "refId": "D"},
-        {"expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_conditional_skipped_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s]))",     "legendFormat": "cond_skipped",          "refId": "E"},
-        {"expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_conditional_not_modified_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s]))","legendFormat": "cond_304_not_modified", "refId": "F"},
-        {"expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_conditional_modified_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s]))",    "legendFormat": "cond_200_modified",     "refId": "G"}
+        {
+          "expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_peer_hit_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s]))",
+          "legendFormat": "peer_hit",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_peer_miss_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s]))",
+          "legendFormat": "peer_miss",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_peer_timeout_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s]))",
+          "legendFormat": "peer_timeout",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_peer_error_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s]))",
+          "legendFormat": "peer_error",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_conditional_skipped_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s]))",
+          "legendFormat": "cond_skipped",
+          "refId": "E"
+        },
+        {
+          "expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_conditional_not_modified_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s]))",
+          "legendFormat": "cond_304_not_modified",
+          "refId": "F"
+        },
+        {
+          "expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_conditional_modified_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s]))",
+          "legendFormat": "cond_200_modified",
+          "refId": "G"
+        }
       ]
     },
     {
       "id": 300,
       "type": "row",
-      "title": "Row 3 — Culprits (empty when healthy)",
+      "title": "Row 4 — Culprits (empty when healthy)",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 13}
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      }
     },
     {
       "id": 10,
       "type": "table",
       "title": "Top 20 cold tables by miss rate (15m)",
       "description": "Per-Iceberg-table miss rate. The actionable list of pin-list / MV / dbt-materialisation candidates. Healthy clusters have a flat tail near 0; spikes pinpoint the dashboard or pipeline currently paying full S3 latency. Sentinel `other` covers non-Iceberg keys.",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "fieldConfig": {"defaults": {"unit": "ops"}},
-      "options": {"sortBy": [{"displayName": "Value", "desc": true}]},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 19
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "Value",
+            "desc": true
+          }
+        ]
+      },
       "targets": [
         {
           "expr": "topk(20, sum by (table) (rate(max without(prometheus, dataPrometheusReplica) (shelf_misses_by_table_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\", table=~\"$table\"})[15m:1m])))",
@@ -315,23 +913,59 @@
       "type": "timeseries",
       "title": "LODC drops by reason (rowgroup) — threshold band",
       "description": "Drops split by SHELF-21e (submit_queue_overflow) vs SHELF-29 (rate_limit). submit_queue_overflow ⇒ raise pools.rowgroup.diskCache.flushers / submitQueue. rate_limit ⇒ raise admission.maxBytesPerSec or maxBurstBytes. Threshold band: green 0, amber 0-100/min, red > 100/min.",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 19
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green",  "value": null},
-              {"color": "orange", "value": 0.0167},
-              {"color": "red",    "value": 1.667}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.0167
+              },
+              {
+                "color": "red",
+                "value": 1.667
+              }
             ]
           },
-          "custom": {"thresholdsStyle": {"mode": "area"}, "drawStyle": "line", "lineWidth": 2, "fillOpacity": 15}
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "area"
+            },
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
         }
       },
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi"}},
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
           "expr": "sum by (reason) (rate(max without(prometheus, dataPrometheusReplica) (shelf_lodc_drops_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\", reason=~\"$reason\"})[5m:30s]))",
@@ -343,25 +977,55 @@
     {
       "id": 400,
       "type": "row",
-      "title": "Row 4 — Drain-wave feature observability (rc.5)",
+      "title": "Row 5 — Drain-wave feature observability (rc.5)",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 22}
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      }
     },
     {
       "id": 12,
       "type": "timeseries",
       "title": "Read-path savings — coalesce + bloom + decoded-meta + page-index",
       "description": "Drain-wave read-path optimisations. coalesce_follower_ratio = SHELF-30 dedup of concurrent overlapping GETs (target ≥ 0.20 under bursty workloads). bloom_active_ratio = SHELF-46 share of admissions classified as footer/bloom_block (vs not_applicable). decoded_meta_hit_ratio = SHELF-50 in-process LRU hits over (hits+misses). predicate_prune_hit_ratio = SHELF-34 page-index sidecar warm-cache rate. Each line answers 'is the feature actually engaged?' — flat zero ⇒ feature not wired or not exercised.",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 23},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
-          "min": 0, "max": 1,
-          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 5}
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
         }
       },
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "mean"]}, "tooltip": {"mode": "multi"}},
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
           "expr": "sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_coalesce_followers_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s])) / clamp_min(sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_coalesce_leaders_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s])), 1)",
@@ -390,22 +1054,58 @@
       "type": "timeseries",
       "title": "Capacity & admission — compression + W-TinyLFU + A/B tag",
       "description": "compression_ratio = 1 − bytes_out / bytes_in (B1 zstd, opt-in via cache.pools.rowgroup.compression.enabled). Healthy when enabled: 0.40-0.70 for Parquet rowgroups. wtinylfu_admit_ratio = SHELF-33 fraction of admit decisions that pass the frequency gate; very high (>0.95) ⇒ working set fits and gate is soft, very low (<0.20) ⇒ scan-heavy workload, gate is filtering aggressively. ab_tag_cap_violations/min = SHELF-42 distinct tag wire-forms folded into 'other' per minute; > 0 ⇒ raise cache.abTag.maxDistinctTags or scrub noisy tag emitters.",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 23},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
           "min": 0,
-          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 5}
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
         },
         "overrides": [
           {
-            "matcher": {"id": "byName", "options": "ab_tag cap violations / min"},
-            "properties": [{"id": "unit", "value": "short"}, {"id": "custom.axisPlacement", "value": "right"}]
+            "matcher": {
+              "id": "byName",
+              "options": "ab_tag cap violations / min"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
           }
         ]
       },
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "mean"]}, "tooltip": {"mode": "multi"}},
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
           "expr": "1 - clamp_max(sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_compress_bytes_out_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s])) / clamp_min(sum(rate(max without(prometheus, dataPrometheusReplica) (shelf_compress_bytes_in_total{namespace=\"alluxio\", pod=~\"$pod\", pool=~\"$pool\"})[5m:30s])), 1), 1)",
@@ -429,25 +1129,73 @@
       "type": "timeseries",
       "title": "Compaction-aware rewarm reactor (SHELF-45)",
       "description": "Per-pod re-warm reactor health. p95(rewarm_lag) = seconds from snapshot commit to last-file warmed; SLO is 1800s (30 min). Healthy in steady state: queue depth flat near 0, inflight_files ≤ max_concurrent_files (default 4), errors/s flat near 0. queue_depth climbing toward queue_capacity = listener producing events faster than reactor's fetch budget — raise max_concurrent_files or accept higher lag.",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 31},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 5}
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
         },
         "overrides": [
           {
-            "matcher": {"id": "byRegexp", "options": "(queue depth|inflight files)"},
-            "properties": [{"id": "unit", "value": "short"}, {"id": "custom.axisPlacement", "value": "right"}]
+            "matcher": {
+              "id": "byRegexp",
+              "options": "(queue depth|inflight files)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
           },
           {
-            "matcher": {"id": "byRegexp", "options": "errors/s.*"},
-            "properties": [{"id": "unit", "value": "ops"}, {"id": "custom.axisPlacement", "value": "right"}]
+            "matcher": {
+              "id": "byRegexp",
+              "options": "errors/s.*"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ops"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
           }
         ]
       },
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi"}},
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum by (le) (rate(max without(prometheus, dataPrometheusReplica) (shelf_rewarm_lag_seconds_bucket{namespace=\"alluxio\", pod=~\"$pod\"})[15m:1m])))",
@@ -476,15 +1224,39 @@
       "type": "timeseries",
       "title": "shelfd error rate by component",
       "description": "Per-component shelfd_error_total rate. component values: origin, store, control, peer, freshness, telemetry, http, lodc, … Healthy: flat zero. Sustained > 1/s on any component is the fingerprint that maps to the corresponding error::Error variant — pull pod logs and pin the failing path.",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 31},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
-          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
         }
       },
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi"}},
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
           "expr": "sum by (component) (rate(max without(prometheus, dataPrometheusReplica) (shelfd_error_total{namespace=\"alluxio\", pod=~\"$pod\"})[5m:30s]))",
@@ -496,24 +1268,54 @@
     {
       "id": 500,
       "type": "row",
-      "title": "Row 5 — A/B tag attribution (SHELF-42)",
+      "title": "Row 6 — A/B tag attribution (SHELF-42)",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 39}
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      }
     },
     {
       "id": 16,
       "type": "stat",
       "title": "Top tags by query volume (5m, top 5)",
       "description": "Top 5 A/B tags by lookups/sec (hits + misses). Use this to identify which cohorts dominate the workload before reading the per-tag hit ratio. SHELF-42 emits a `tag` label on shelf_hits_by_tag_total / shelf_misses_by_tag_total when the plugin sets X-Shelf-Tag (default-off; enable cache.abTag.enabled). Empty stat = SHELF-42 not enabled or no tagged traffic in window.",
-      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 40},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 45
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
         }
       },
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none", "textMode": "value_and_name"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
       "targets": [
         {
           "expr": "topk(5, sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])) + sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_misses_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])))",
@@ -527,16 +1329,41 @@
       "type": "timeseries",
       "title": "Hit ratio by tag (5m, top 5 by volume)",
       "description": "Per-tag hit ratio over a 5m window, restricted to the 5 highest-volume tags. Use this to spot cohorts that are dragging the global hit ratio down (cold tag, scan-heavy cohort) vs cohorts that are warm. Reading: a tag flat near 0 = cohort always misses (working set never fits or never recurs); a tag flat near 1 = cohort fully cached. Diverging tags = workload mix is heterogeneous and a global hit-ratio number alone is misleading — use this row instead.",
-      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 40},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 45
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
-          "min": 0, "max": 1,
-          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 5}
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
         }
       },
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "mean"]}, "tooltip": {"mode": "multi"}},
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
           "expr": "topk(5, sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])) / clamp_min(sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])) + sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_misses_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])), 0.001))",
@@ -550,15 +1377,48 @@
       "type": "stat",
       "title": "Top tags by miss rate (5m, top 5)",
       "description": "Top 5 tags by miss rate (ops/sec) — these are the cohorts hitting origin (S3) the hardest. Action: a single tag dominating miss rate is the candidate for either explicit pin (tools/gen_pin_list.py) or a workload-level review (is this dbt model emitting one query per partition?). Note: shelf_origin_request_seconds has no `tag` label, so per-tag p99 origin latency is not available — use this miss-rate proxy + the global Origin-bytes panel together.",
-      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 40},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 45
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 5}, {"color": "red", "value": 25}]}
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 25
+              }
+            ]
+          }
         }
       },
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "none", "textMode": "value_and_name"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
       "targets": [
         {
           "expr": "topk(5, sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_misses_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])))",
@@ -572,37 +1432,151 @@
       "type": "table",
       "title": "A/B tag breakdown — full table",
       "description": "Full per-tag breakdown: query volume (lookups/sec), hit ratio, and miss rate. Sortable. Filter via the $ab_tag template variable to focus on a subset. Empty rows past the cardinality cap are folded into the `other` sentinel by the shelfd-side abTag handler (cap defaults to 16 — see panel 20).",
-      "gridPos": {"h": 8, "w": 18, "x": 0, "y": 48},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 18,
+        "x": 0,
+        "y": 53
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
-          "custom": {"align": "auto", "displayMode": "auto"},
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": [
-          {"matcher": {"id": "byName", "options": "Value #A"}, "properties": [{"id": "displayName", "value": "queries/s"}, {"id": "unit", "value": "ops"}, {"id": "decimals", "value": 2}]},
-          {"matcher": {"id": "byName", "options": "Value #B"}, "properties": [{"id": "displayName", "value": "hit ratio"}, {"id": "unit", "value": "percentunit"}, {"id": "decimals", "value": 3}]},
-          {"matcher": {"id": "byName", "options": "Value #C"}, "properties": [{"id": "displayName", "value": "miss rate (ops/s)"}, {"id": "unit", "value": "ops"}, {"id": "decimals", "value": 2}]},
-          {"matcher": {"id": "byName", "options": "tag"}, "properties": [{"id": "displayName", "value": "ab_tag"}]}
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "queries/s"
+              },
+              {
+                "id": "unit",
+                "value": "ops"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "hit ratio"
+              },
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #C"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "miss rate (ops/s)"
+              },
+              {
+                "id": "unit",
+                "value": "ops"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tag"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "ab_tag"
+              }
+            ]
+          }
         ]
       },
-      "options": {"showHeader": true, "footer": {"show": false}},
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        }
+      },
       "transformations": [
-        {"id": "merge", "options": {}},
-        {"id": "organize", "options": {"excludeByName": {"Time": true}, "indexByName": {"tag": 0, "Value #A": 1, "Value #B": 2, "Value #C": 3}}}
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "tag": 0,
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3
+            }
+          }
+        }
       ],
       "targets": [
         {
           "expr": "sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])) + sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_misses_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s]))",
-          "format": "table", "instant": true, "refId": "A"
+          "format": "table",
+          "instant": true,
+          "refId": "A"
         },
         {
           "expr": "sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])) / clamp_min(sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_hits_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])) + sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_misses_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s])), 0.001)",
-          "format": "table", "instant": true, "refId": "B"
+          "format": "table",
+          "instant": true,
+          "refId": "B"
         },
         {
           "expr": "sum by (tag) (rate(max without(prometheus, dataPrometheusReplica) (shelf_misses_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\", tag=~\"$ab_tag\"})[5m:30s]))",
-          "format": "table", "instant": true, "refId": "C"
+          "format": "table",
+          "instant": true,
+          "refId": "C"
         }
       ]
     },
@@ -611,15 +1585,43 @@
       "type": "stat",
       "title": "ab_tag cardinality (cap watch)",
       "description": "Distinct ab_tag values currently emitting metrics. Workspace cardinality cap = 16; over-cap tags are folded into the `other` sentinel by shelfd. green ≤ 16, red > 16 = the chart-side cap drifted from the shelfd-side cap (cache.abTag.maxDistinctTags). Cross-reference with shelf_ab_tag_cap_violations_total in row 4 to see the rate at which tags are being capped.",
-      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 48},
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 53
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 17}]}
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 17
+              }
+            ]
+          }
         }
       },
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "none"},
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      },
       "targets": [
         {
           "expr": "count(count by (tag) (max without(prometheus, dataPrometheusReplica) (shelf_hits_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\"})))",
@@ -631,11 +1633,20 @@
   "refresh": "30s",
   "schemaVersion": 39,
   "style": "dark",
-  "tags": ["shelf", "cache", "trino", "rc.5", "drain-wave"],
+  "tags": [
+    "shelf",
+    "cache",
+    "trino",
+    "rc.5",
+    "drain-wave"
+  ],
   "templating": {
     "list": [
       {
-        "current": {"text": "mimir-data", "value": "ddy2eykq2tfy8a"},
+        "current": {
+          "text": "mimir-data",
+          "value": "ddy2eykq2tfy8a"
+        },
         "name": "datasource",
         "type": "datasource",
         "query": "prometheus",
@@ -646,10 +1657,16 @@
         "name": "pod",
         "label": "pod",
         "type": "query",
-        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
         "query": "label_values(shelf_hits_total{namespace=\"alluxio\"}, pod)",
         "allValue": ".+",
-        "current": {"text": "All", "value": "$__all"},
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
         "includeAll": true,
         "multi": true,
         "refresh": 2,
@@ -660,10 +1677,16 @@
         "name": "pool",
         "label": "pool",
         "type": "query",
-        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
         "query": "label_values(shelf_hits_total{namespace=\"alluxio\", pod=~\"$pod\"}, pool)",
         "allValue": ".+",
-        "current": {"text": "All", "value": "$__all"},
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
         "includeAll": true,
         "multi": true,
         "refresh": 2,
@@ -674,10 +1697,16 @@
         "name": "table",
         "label": "table",
         "type": "query",
-        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
         "query": "label_values(shelf_hits_by_table_total{namespace=\"alluxio\", pod=~\"$pod\"}, table)",
         "allValue": ".+",
-        "current": {"text": "All", "value": "$__all"},
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
         "includeAll": true,
         "multi": true,
         "refresh": 2,
@@ -688,10 +1717,16 @@
         "name": "ab_tag",
         "label": "ab_tag",
         "type": "query",
-        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
         "query": "label_values(shelf_hits_by_tag_total{namespace=\"alluxio\", pod=~\"$pod\"}, tag)",
         "allValue": ".+",
-        "current": {"text": "All", "value": "$__all"},
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
         "includeAll": true,
         "multi": true,
         "refresh": 2,
@@ -702,10 +1737,16 @@
         "name": "reason",
         "label": "reason (LODC)",
         "type": "query",
-        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
         "query": "label_values(shelf_lodc_drops_total{namespace=\"alluxio\"}, reason)",
         "allValue": ".+",
-        "current": {"text": "All", "value": "$__all"},
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
         "includeAll": true,
         "multi": true,
         "refresh": 2,
@@ -714,11 +1755,14 @@
       }
     ]
   },
-  "time": {"from": "now-6h", "to": "now"},
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "",
   "title": "Shelf — Overview v2 (rc.5 drain wave)",
   "uid": "shelf-overview-v2",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }
