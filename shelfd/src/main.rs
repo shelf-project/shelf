@@ -283,11 +283,29 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // SHELF-23 — peer-fetch HTTP client. Uses the membership stats
     // timeout as a hard request ceiling so a wedged peer never
     // extends the outer Trino request beyond the same window the
-    // membership resolver already tolerates. `pool_max_idle_per_host
-    // = 4` keeps a warm pool to each peer (typical 3-pod cluster)
-    // without consuming unnecessary file descriptors.
+    // membership resolver already tolerates. Single shared instance
+    // for the lifetime of this process (reqwest::Client is cheap to
+    // clone — internal Arc — so threading it through ServerState is
+    // the canonical reuse pattern).
+    //
+    // S2 (rc.8 / ADR-0040) — explicit pool + HTTP/2 keepalive config
+    // so peer-fetch doesn't pay handshake cost on every refresh and
+    // can multiplex over a single h2c stream when peers negotiate
+    // HTTP/2. `pool_max_idle_per_host = 8` is a small bump from the
+    // pre-S2 value of 4: peer count is ≤ shelf-pool size (typically
+    // 3–6 pods) so 8 idle conns/peer covers the warm path without
+    // bloating fd usage. `pool_idle_timeout = 90s` matches S3's
+    // server-side keep-alive default and outlives a typical Trino
+    // query pause. The `http2_keep_alive_*` knobs are no-ops on the
+    // HTTP/1.1 path (peers default to h2c when both sides advertise
+    // it) but cost nothing if HTTP/2 isn't negotiated.
     let peer_http = reqwest::Client::builder()
-        .pool_max_idle_per_host(4)
+        .pool_max_idle_per_host(8)
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .http2_keep_alive_interval(std::time::Duration::from_secs(30))
+        .http2_keep_alive_timeout(std::time::Duration::from_secs(60))
+        .http2_keep_alive_while_idle(true)
+        .tcp_nodelay(true)
         .timeout(config.membership.stats_timeout)
         .build()
         .map_err(|e| anyhow::anyhow!("peer-fetch reqwest::Client build: {e}"))?;
