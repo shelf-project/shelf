@@ -5181,6 +5181,7 @@ dependencies = [
  "anyhow",
  "apache-avro",
  "aws-config",
+ "aws-credential-types",
  "aws-sdk-s3",
  "axum 0.8.9",
  "base64 0.22.1",

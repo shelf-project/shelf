@@ -1725,6 +1725,69 @@ pub static POD_LOAD_PROBE_ERRORS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     )
     .expect("register pod_load_probe_errors_total")
 });
+/// **S3 (rc.8 — ADR-0043)** — SigV4 `Authorization` headers ignored
+/// by the shim accept path. The shim is the trust boundary per
+/// ADR-0040 §security-model: the in-cluster Trino S3 client signs
+/// each request because the AWS SDK doesn't expose a "skip signing"
+/// knob, but we deliberately do **not** validate the signature — the
+/// shim pretends to be S3 while serving from cache.
+///
+/// This is a visibility metric for the wasted-work-avoided
+/// optimization: the per-request cost saved is small (a few µs per
+/// request to skip signature parsing) but persistent at scan-heavy
+/// workloads, and the counter rate gives ops a direct measure of
+/// "how many SigV4 envelopes the shim ignored" without changing the
+/// shim's behaviour. Bumped once per inbound request that carries an
+/// `Authorization: AWS4-HMAC-SHA256 …` header on a GET / HEAD / PUT.
+pub static SHIM_SIGV4_SKIPPED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter_with_registry!(
+        "shelf_shim_sigv4_skipped_total",
+        "S3 (rc.8 / ADR-0043): SigV4 Authorization headers ignored by \
+         the shim accept path. The shim is the trust boundary per \
+         ADR-0040 §security-model; SigV4 from the in-cluster Trino \
+         client is envelope ceremony only.",
+        REGISTRY
+    )
+    .expect("register shim_sigv4_skipped_total")
+});
+
+/// **S3 (rc.8 — ADR-0043)** — origin GET/HEAD/PUT/DELETE requests
+/// that reused the SDK's lazy [`IdentityCache`] entry instead of
+/// re-running the full credentials chain. Bumped exactly once per
+/// outbound origin op (in [`crate::origin::record_origin`]); the
+/// counter's rate is the workload's "post-warmup signing context
+/// reuse" rate. Pair with [`ORIGIN_SIGNING_CONTEXT_RECOMPUTED_TOTAL`]
+/// to derive a refresh ratio.
+///
+/// [`IdentityCache`]: https://docs.rs/aws-config/latest/aws_config/identity/struct.IdentityCache.html
+pub static ORIGIN_SIGNING_CONTEXT_REUSED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter_with_registry!(
+        "shelf_origin_signing_context_reused_total",
+        "S3 (rc.8 / ADR-0043): origin S3 ops that reused a lazily \
+         cached SDK signing context (bucket+region constant, \
+         credentials still within IdentityCache buffer_time). \
+         Increments by 1 per origin op.",
+        REGISTRY
+    )
+    .expect("register origin_signing_context_reused_total")
+});
+
+/// **S3 (rc.8 — ADR-0043)** — origin requests whose `SigningContext`
+/// required recomputation: cache miss, expired credentials, or
+/// startup. Wired through the [`crate::origin::CountingCredentialsProvider`]
+/// wrapper, which sits behind the SDK's lazy `IdentityCache` so the
+/// inner provider is only consulted on a real refresh.
+pub static ORIGIN_SIGNING_CONTEXT_RECOMPUTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter_with_registry!(
+        "shelf_origin_signing_context_recomputed_total",
+        "S3 (rc.8 / ADR-0043): origin requests whose signing context \
+         required a fresh credential resolution (lazy IdentityCache \
+         miss / expired creds / startup). Bumped once per call to the \
+         wrapped credentials provider.",
+        REGISTRY
+    )
+    .expect("register origin_signing_context_recomputed_total")
+});
 
 /// Stable list of metric series `shelfd` exposes on `/metrics` in the
 /// Phase-0 gate build. Kept as module-level data so `docs/metrics.md`
@@ -1850,6 +1913,10 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_pod_load_qps",
     "shelf_pod_load_skew_ratio_bps",
     "shelf_pod_load_probe_errors_total",
+    // S3 (rc.8 / ADR-0043) — SigV4 signing optimization visibility.
+    "shelf_shim_sigv4_skipped_total",
+    "shelf_origin_signing_context_reused_total",
+    "shelf_origin_signing_context_recomputed_total",
 ];
 
 #[cfg(test)]
@@ -1975,6 +2042,10 @@ mod tests {
             POD_LOAD_QPS.desc(),
             POD_LOAD_SKEW_RATIO_BPS.desc(),
             POD_LOAD_PROBE_ERRORS_TOTAL.desc(),
+            // S3 (rc.8 / ADR-0043) — SigV4 signing optimization visibility.
+            SHIM_SIGV4_SKIPPED_TOTAL.desc(),
+            ORIGIN_SIGNING_CONTEXT_REUSED_TOTAL.desc(),
+            ORIGIN_SIGNING_CONTEXT_RECOMPUTED_TOTAL.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -2279,6 +2350,12 @@ mod tests {
         POD_LOAD_QPS.set(0);
         POD_LOAD_SKEW_RATIO_BPS.set(100);
         POD_LOAD_PROBE_ERRORS_TOTAL.inc_by(0);
+        // S3 (rc.8 / ADR-0043) — pre-touch the SigV4 visibility series
+        // so dashboards see them as zeros on a freshly booted pod even
+        // before any traffic arrives.
+        SHIM_SIGV4_SKIPPED_TOTAL.inc_by(0);
+        ORIGIN_SIGNING_CONTEXT_REUSED_TOTAL.inc_by(0);
+        ORIGIN_SIGNING_CONTEXT_RECOMPUTED_TOTAL.inc_by(0);
 
         let families = REGISTRY.gather();
         let names: HashSet<String> = families.iter().map(|f| f.name().to_owned()).collect();

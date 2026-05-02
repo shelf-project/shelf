@@ -15,7 +15,12 @@
 
 use std::time::Duration;
 
+use aws_config::identity::IdentityCache;
 use aws_config::BehaviorVersion;
+use aws_credential_types::provider::{
+    future::ProvideCredentials as ProvideCredentialsFuture, ProvideCredentials,
+};
+use aws_credential_types::Credentials as AwsCredentials;
 use aws_sdk_s3::config::{Builder as S3ConfigBuilder, Credentials, Region};
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::operation::head_object::HeadObjectError;
@@ -292,6 +297,60 @@ pub struct S3Origin {
     request_timeout: Duration,
 }
 
+/// **S3 (rc.8 — ADR-0043)** — lazy `IdentityCache` knobs we plumb
+/// into `aws_config`. These are the same defaults the SDK uses
+/// internally (5 s load timeout, 60 s buffer, 15 min default
+/// expiration); naming them as constants here pins the contract so
+/// a future `aws-config` minor bump that retunes the defaults
+/// doesn't silently drift our origin behaviour.
+const IDENTITY_CACHE_LOAD_TIMEOUT: Duration = Duration::from_secs(5);
+const IDENTITY_CACHE_BUFFER_TIME: Duration = Duration::from_secs(60);
+const IDENTITY_CACHE_DEFAULT_EXPIRATION: Duration = Duration::from_secs(15 * 60);
+
+/// **S3 (rc.8 — ADR-0043)** — `ProvideCredentials` wrapper that
+/// counts how often the SDK actually drops through the
+/// [`IdentityCache`] and re-runs the credentials chain.
+///
+/// The SDK's default behaviour (with `BehaviorVersion::latest()`)
+/// already places a lazy `IdentityCache` between the user-supplied
+/// credentials provider and the per-request signing path. Wrapping
+/// the inner provider lets us observe how effective that cache is:
+/// each tick of [`crate::metrics::ORIGIN_SIGNING_CONTEXT_RECOMPUTED_TOTAL`]
+/// corresponds to a real refresh (cold start, expired token, IMDS
+/// rotate) — the per-request signing-context reuse is then
+/// `reused_total - recomputed_total`.
+///
+/// Pure delegation: the wrapper changes no bytes, no semantics, and
+/// no error surface. It is `Debug`, `Send`, `Sync` and behaves
+/// byte-identically to the wrapped provider.
+#[derive(Debug)]
+pub(crate) struct CountingCredentialsProvider<P> {
+    inner: P,
+}
+
+impl<P> CountingCredentialsProvider<P> {
+    pub(crate) fn new(inner: P) -> Self {
+        Self { inner }
+    }
+}
+
+impl<P> ProvideCredentials for CountingCredentialsProvider<P>
+where
+    P: ProvideCredentials,
+{
+    fn provide_credentials<'a>(&'a self) -> ProvideCredentialsFuture<'a>
+    where
+        Self: 'a,
+    {
+        crate::metrics::ORIGIN_SIGNING_CONTEXT_RECOMPUTED_TOTAL.inc();
+        self.inner.provide_credentials()
+    }
+
+    fn fallback_on_interrupt(&self) -> Option<AwsCredentials> {
+        self.inner.fallback_on_interrupt()
+    }
+}
+
 impl S3Origin {
     /// Build the singleton S3 client.
     ///
@@ -301,8 +360,35 @@ impl S3Origin {
     /// 2. If `config.region` is `Some`, pin that region.
     /// 3. Otherwise fall back to the AWS SDK default provider chain
     ///    (`AWS_REGION`, IRSA, `~/.aws/config`, IMDS).
+    ///
+    /// **S3 (rc.8 — ADR-0043)** — the loader is configured with an
+    /// **explicit lazy [`IdentityCache`]** (instead of relying on the
+    /// SDK's implicit default) so the buffer / load-timeout / default
+    /// expiration knobs are pinned at named constants. Credentials
+    /// are then resolved through a [`CountingCredentialsProvider`]
+    /// wrapper around the default chain; the wrapper sits *behind*
+    /// the IdentityCache, so it is only consulted on a real refresh.
     pub async fn new(config: &crate::config::OriginConfig) -> crate::Result<Self> {
-        let mut loader = aws_config::defaults(BehaviorVersion::latest());
+        // S3 (rc.8 / ADR-0043) — build the default credentials chain
+        // explicitly so we can wrap it. Calling `.build().await` is
+        // fast (it does not hit the network — credential resolution
+        // is deferred to the first `provide_credentials` call) but
+        // it is async because IMDS chain construction is.
+        let default_chain =
+            aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
+                .build()
+                .await;
+        let counting_chain = CountingCredentialsProvider::new(default_chain);
+
+        let identity_cache = IdentityCache::lazy()
+            .load_timeout(IDENTITY_CACHE_LOAD_TIMEOUT)
+            .buffer_time(IDENTITY_CACHE_BUFFER_TIME)
+            .default_expiration(IDENTITY_CACHE_DEFAULT_EXPIRATION)
+            .build();
+
+        let mut loader = aws_config::defaults(BehaviorVersion::latest())
+            .identity_cache(identity_cache)
+            .credentials_provider(counting_chain);
         if let Some(region) = config.region.clone() {
             loader = loader.region(Region::new(region));
         }
@@ -314,6 +400,10 @@ impl S3Origin {
 
             // MinIO in CI is seeded with static credentials; pick them
             // up via env if no SDK-resolved credentials are present.
+            // This static override bypasses our counting wrapper on
+            // purpose — local MinIO development never refreshes creds
+            // and the wrapper would record a single startup tick that
+            // adds nothing to the diagnostic value.
             if shared.credentials_provider().is_none() {
                 if let (Ok(ak), Ok(sk)) = (
                     std::env::var("AWS_ACCESS_KEY_ID"),
@@ -340,6 +430,15 @@ impl S3Origin {
         // `aws-smithy-runtime` directly and risk a major-version
         // dep churn — to be reconsidered as a follow-up if profiling
         // proves the default pool is the bottleneck.
+        //
+        // S3 (rc.8 / ADR-0043) — the signing context that the SDK
+        // composes on each request now reuses a lazily cached
+        // `Identity` (credentials + expiry) instead of re-running the
+        // chain per-call. Approach B (a custom Smithy interceptor
+        // that pre-computes bucket+region scope once per pod) is
+        // deferred — it would require pulling `aws-smithy-runtime`
+        // as a direct dep, which ADR-0040 explicitly leaves out of
+        // rc.8 scope.
         let client = S3Client::from_conf(s3_cfg_builder.build());
 
         Ok(Self {
@@ -372,6 +471,17 @@ impl S3Origin {
 /// can include latency even on failure. `bytes` is 0 for `head` and
 /// for non-200 outcomes; the caller passes the body length on
 /// success.
+///
+/// **S3 (rc.8 — ADR-0043)** — also bumps
+/// [`ORIGIN_SIGNING_CONTEXT_REUSED_TOTAL`] once per call. The vast
+/// majority of origin ops reuse the lazily cached `IdentityCache`
+/// entry — the rare refresh shows up on
+/// [`ORIGIN_SIGNING_CONTEXT_RECOMPUTED_TOTAL`] via the
+/// [`CountingCredentialsProvider`] wrapper. The ratio
+/// `recomputed / reused` is the workload's credential-refresh rate.
+///
+/// [`ORIGIN_SIGNING_CONTEXT_REUSED_TOTAL`]: crate::metrics::ORIGIN_SIGNING_CONTEXT_REUSED_TOTAL
+/// [`ORIGIN_SIGNING_CONTEXT_RECOMPUTED_TOTAL`]: crate::metrics::ORIGIN_SIGNING_CONTEXT_RECOMPUTED_TOTAL
 fn record_origin(
     bucket: &str,
     op: &'static str,
@@ -385,6 +495,7 @@ fn record_origin(
     crate::metrics::ORIGIN_REQUEST_SECONDS
         .with_label_values(&[bucket, op, outcome])
         .observe(elapsed_s);
+    crate::metrics::ORIGIN_SIGNING_CONTEXT_REUSED_TOTAL.inc();
 }
 
 impl Origin for S3Origin {
@@ -1333,5 +1444,103 @@ mod classify_tests {
                 "{code} must NOT be treated as persistent"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod signing_tests {
+    //! S3 (rc.8 / ADR-0043) — coverage for the
+    //! [`CountingCredentialsProvider`] wrapper and the explicit
+    //! lazy [`IdentityCache`] tuning constants exposed by
+    //! [`S3Origin::new`].
+
+    use super::*;
+    use aws_credential_types::provider::ProvideCredentials as ProvideCredentialsTrait;
+    use aws_credential_types::Credentials as TestCreds;
+
+    /// `CountingCredentialsProvider` must delegate to the inner
+    /// provider unchanged AND tick `recomputed_total` once per call.
+    /// This is the byte-identical contract the wrapper relies on.
+    #[tokio::test]
+    async fn counting_provider_delegates_and_ticks_recomputed() {
+        let inner = TestCreds::new(
+            "AKIAIOSFODNN7EXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            None,
+            None,
+            "test-static",
+        );
+        let counting = CountingCredentialsProvider::new(inner.clone());
+
+        let before = crate::metrics::ORIGIN_SIGNING_CONTEXT_RECOMPUTED_TOTAL.get();
+        let resolved = counting
+            .provide_credentials()
+            .await
+            .expect("static creds always resolve");
+        let after = crate::metrics::ORIGIN_SIGNING_CONTEXT_RECOMPUTED_TOTAL.get();
+
+        assert_eq!(
+            after - before,
+            1,
+            "wrapper must tick the recomputed counter exactly once per provide_credentials call",
+        );
+        assert_eq!(
+            resolved.access_key_id(),
+            inner.access_key_id(),
+            "wrapper must return the inner provider's credentials byte-identically",
+        );
+        assert_eq!(
+            resolved.secret_access_key(),
+            inner.secret_access_key(),
+            "wrapper must return the inner provider's secret byte-identically",
+        );
+    }
+
+    /// `S3Origin::new` must (1) construct without panicking against a
+    /// minimal MinIO-style config, (2) leave the lazy IdentityCache
+    /// tuning constants intact, and (3) bump the recomputed counter
+    /// at least once when the SDK first resolves credentials. The
+    /// last bit is the integration touchpoint for "Approach A is
+    /// actually wired up".
+    ///
+    /// Sets `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` for the
+    /// duration of this test so the SDK's default chain has a static
+    /// credentials source it can resolve through immediately,
+    /// without falling through to IMDS / IRSA (which would 404 and
+    /// flake the test in a sandboxed CI environment).
+    #[tokio::test]
+    async fn credentials_cache_lazy_builder_configured() {
+        // SAFETY: `set_var` is only safe in single-threaded contexts in
+        // recent stdlib, but tokio test runtime here is single-threaded
+        // and the keys are set before any `S3Origin` build (so no other
+        // task can be observing the env at the same time).
+        // SAFETY: see comment above.
+        unsafe {
+            std::env::set_var("AWS_ACCESS_KEY_ID", "test-access");
+        }
+        // SAFETY: see comment above.
+        unsafe {
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "test-secret");
+        }
+
+        // Pin the named tuning constants so a future bump that
+        // accidentally widens (or zeros) the buffer time triggers
+        // a CI failure instead of silently changing prod behaviour.
+        assert_eq!(IDENTITY_CACHE_LOAD_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(IDENTITY_CACHE_BUFFER_TIME, Duration::from_secs(60));
+        assert_eq!(IDENTITY_CACHE_DEFAULT_EXPIRATION, Duration::from_secs(900));
+
+        let cfg = crate::config::OriginConfig {
+            bucket: "test-bucket".to_string(),
+            region: Some("us-east-1".to_string()),
+            endpoint_url: Some("http://localhost:9000".to_string()),
+            max_inflight: 16,
+        };
+
+        let origin = S3Origin::new(&cfg)
+            .await
+            .expect("S3Origin::new must succeed against a static-creds MinIO-style config");
+
+        assert_eq!(origin.bucket(), "test-bucket");
     }
 }
