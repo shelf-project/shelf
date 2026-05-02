@@ -272,7 +272,7 @@ GROUP BY 1, 2, 3
 ORDER BY scan_bytes_in_window * queries_in_window DESC
 LIMIT {int(top_n)}
 """
-    cols, rows = trino_query(creds, sql, catalog="warehouse", schema="trino_logs")
+    cols, rows = trino_query(creds, sql)
     LOG.info("top_tables_via_trino: %d rows", len(rows))
     out: list[TableRank] = []
     for r in rows:

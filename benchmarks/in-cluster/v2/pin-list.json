@@ -1,0 +1,82 @@
+[
+  {
+    "bucket": "your-bench-bucket",
+    "key": "your_schema/gold_users/metadata/00001-abc123-snap.metadata.json",
+    "size_estimate": null,
+    "access_count": 10000,
+    "table": "your_catalog.your_schema.gold_users",
+    "source": "placeholder_oss"
+  },
+  {
+    "bucket": "your-bench-bucket",
+    "key": "your_schema/gold_users/metadata/snap-1-1-abc123.avro",
+    "size_estimate": null,
+    "access_count": 10000,
+    "table": "your_catalog.your_schema.gold_users",
+    "source": "placeholder_oss"
+  },
+  {
+    "bucket": "your-bench-bucket",
+    "key": "your_schema/gold_transactions/metadata/00001-def456-snap.metadata.json",
+    "size_estimate": null,
+    "access_count": 7500,
+    "table": "your_catalog.your_schema.gold_transactions",
+    "source": "placeholder_oss"
+  },
+  {
+    "bucket": "your-bench-bucket",
+    "key": "your_schema/gold_transactions/metadata/snap-2-1-def456.avro",
+    "size_estimate": null,
+    "access_count": 7500,
+    "table": "your_catalog.your_schema.gold_transactions",
+    "source": "placeholder_oss"
+  },
+  {
+    "bucket": "your-bench-bucket",
+    "key": "your_schema/gold_orders/metadata/00001-789xyz-snap.metadata.json",
+    "size_estimate": null,
+    "access_count": 6300,
+    "table": "your_catalog.your_schema.gold_orders",
+    "source": "placeholder_oss"
+  },
+  {
+    "bucket": "your-bench-bucket",
+    "key": "your_schema/gold_orders/metadata/snap-3-1-789xyz.avro",
+    "size_estimate": null,
+    "access_count": 6300,
+    "table": "your_catalog.your_schema.gold_orders",
+    "source": "placeholder_oss"
+  },
+  {
+    "bucket": "your-bench-bucket",
+    "key": "your_schema/gold_dbt_orders_base_fact/metadata/00001-mview-snap.metadata.json",
+    "size_estimate": null,
+    "access_count": 5500,
+    "table": "your_catalog.your_schema.gold_dbt_orders_base_fact",
+    "source": "placeholder_oss"
+  },
+  {
+    "bucket": "your-bench-bucket",
+    "key": "your_schema/gold_dbt_orders_base_fact/metadata/snap-4-1-mview.avro",
+    "size_estimate": null,
+    "access_count": 5500,
+    "table": "your_catalog.your_schema.gold_dbt_orders_base_fact",
+    "source": "placeholder_oss"
+  },
+  {
+    "bucket": "your-bench-bucket",
+    "key": "your_schema/silver_users_evolving/metadata/00001-silver-snap.metadata.json",
+    "size_estimate": null,
+    "access_count": 4500,
+    "table": "your_catalog.your_schema.silver_users_evolving",
+    "source": "placeholder_oss"
+  },
+  {
+    "bucket": "your-bench-bucket",
+    "key": "your_schema/silver_users_evolving/metadata/snap-5-1-silver.avro",
+    "size_estimate": null,
+    "access_count": 4500,
+    "table": "your_catalog.your_schema.silver_users_evolving",
+    "source": "placeholder_oss"
+  }
+]

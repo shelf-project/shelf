@@ -1,0 +1,78 @@
+# 04-bench-trino-catalogs.yaml
+#
+# Two Iceberg catalogs for the bench Trino, sharing one HMS endpoint
+# (the prod-HMS-pivot pattern from `benchmarks/results/2026-05-01/SUMMARY.md`
+# §"How the cluster bench was unblocked"):
+#
+#   bench_iceberg          — direct S3 baseline. iceberg.metadata-cache=TRUE
+#                            so the JVM-local MemoryFileSystemCache stays on
+#                            (matches an unmodified Trino install).
+#   bench_iceberg_shelf    — shelf-fronted. s3.endpoint points at the
+#                            shelf-bench-pool ClusterIP shim. Two non-default
+#                            tunings carried over from a cost-neutral
+#                            production tuning cycle:
+#                              - iceberg.metadata-cache.enabled=false
+#                                (unshadows shelf metadata-pool hits — Trino's
+#                                 JVM-local MemoryFileSystemCache otherwise
+#                                 caches metadata reads in-process and the
+#                                 shelf metadata-pool stays at ~0% hit ratio)
+#                              - s3.max-connections=256
+#                                (raises native-S3 client pool from default 50)
+#
+# Rendered as a kubectl-direct ConfigMap so V2 needs no helm at all on the
+# bench Trino side. Mount under /etc/trino/catalog/ in the bench coord pod
+# (see ../RUN.md §"Wiring the bench Trino" for both helm and direct paths).
+#
+# Operator-substituted at run.sh time:
+#   ${BENCH_NAMESPACE}    target k8s namespace
+#   ${PROD_HMS_URI}       e.g. thrift://hive-metastore-host:9083
+#                         (per the SUMMARY.md prod-HMS workaround)
+#   ${ORIGIN_REGION}      AWS region of the bench bucket
+#
+# How to wire into the bench Trino:
+#   - Trino chart values must include either
+#       additionalCatalogs:
+#         bench_iceberg:        |- (concat keys[\"bench_iceberg.properties\"])
+#         bench_iceberg_shelf:  |- (concat keys[\"bench_iceberg_shelf.properties\"])
+#     or operators may mount this ConfigMap directly under
+#     `/etc/trino/catalog/` on the coordinator pod.
+#   - After mount, restart the coordinator (catalog .properties are parsed
+#     at coord startup, NOT hot-reloaded).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bench-trino-catalogs
+  namespace: ${BENCH_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: shelf-bench
+    app.kubernetes.io/component: catalog
+data:
+  bench_iceberg.properties: |
+    connector.name=iceberg
+    iceberg.catalog.type=hive_metastore
+    hive.metastore.uri=${PROD_HMS_URI}
+    iceberg.file-format=PARQUET
+
+    fs.native-s3.enabled=true
+    s3.endpoint=https://s3.${ORIGIN_REGION}.amazonaws.com
+    s3.region=${ORIGIN_REGION}
+    s3.path-style-access=false
+
+    iceberg.metadata-cache.enabled=true
+    iceberg.dynamic-filtering.wait-timeout=3s
+  bench_iceberg_shelf.properties: |
+    connector.name=iceberg
+    iceberg.catalog.type=hive_metastore
+    hive.metastore.uri=${PROD_HMS_URI}
+    iceberg.file-format=PARQUET
+
+    fs.native-s3.enabled=true
+    s3.endpoint=http://shelf-bench-pool.${BENCH_NAMESPACE}.svc.cluster.local:9092
+    s3.path-style-access=true
+    s3.region=${ORIGIN_REGION}
+
+    iceberg.metadata-cache.enabled=false
+    s3.max-connections=256
+    iceberg.dynamic-filtering.wait-timeout=3s
+    parquet.small-file-threshold=8MB
+    s3.tcp-keep-alive=true

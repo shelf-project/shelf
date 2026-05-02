@@ -1,0 +1,62 @@
+# 03-shelf-bench-service.yaml
+#
+# Two Services for the shelf-bench StatefulSet:
+#   1. shelf-bench-headless  — headless ClusterIP for SHELF-23 peer-fetch
+#                              membership (DNS resolves to all pod IPs).
+#                              Required for `pools.membership` config.
+#   2. shelf-bench-pool      — ClusterIP load-balanced across all bench
+#                              pods on s3shim:9092 (the catalog endpoint
+#                              the bench Trino points its s3.endpoint at).
+#
+# Operator-substituted at run.sh time:
+#   ${BENCH_NAMESPACE}    target k8s namespace
+apiVersion: v1
+kind: Service
+metadata:
+  name: shelf-bench-headless
+  namespace: ${BENCH_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: shelf-bench
+    app.kubernetes.io/component: cache
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: shelf
+    app.kubernetes.io/instance: shelf-bench
+  ports:
+    - name: data
+      port: 9090
+      targetPort: data
+      protocol: TCP
+    - name: s3shim
+      port: 9092
+      targetPort: s3shim
+      protocol: TCP
+    - name: admin
+      port: 9093
+      targetPort: admin
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shelf-bench-pool
+  namespace: ${BENCH_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: shelf-bench
+    app.kubernetes.io/component: cache
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: shelf
+    app.kubernetes.io/instance: shelf-bench
+  ports:
+    - name: s3shim
+      port: 9092
+      targetPort: s3shim
+      protocol: TCP
+    - name: data
+      port: 9090
+      targetPort: data
+      protocol: TCP
