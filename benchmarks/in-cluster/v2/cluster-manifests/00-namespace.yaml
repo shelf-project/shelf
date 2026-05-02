@@ -1,0 +1,22 @@
+# 00-namespace.yaml
+#
+# V2 production-trace replay bench namespace. Default is `trino-bench`;
+# operators reusing an existing shelf namespace can override
+# `BENCH_NAMESPACE` at run.sh time.
+#
+# Operator-substituted via `envsubst` in run.sh; see ../RUN.md for the
+# substitution table.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${BENCH_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: shelf-bench
+    shelf.io/scope: ephemeral
+  annotations:
+    shelf.io/description: |
+      V2 12-hour production-trace replay bench fixture. shelf-bench-pool
+      StatefulSet stands here; if the operator overrides BENCH_NAMESPACE
+      to reuse an existing shelf namespace, prod shelf-pool is untouched
+      because the bench StatefulSet uses distinct labels + Services. Tear
+      down via 99-cleanup.yaml.

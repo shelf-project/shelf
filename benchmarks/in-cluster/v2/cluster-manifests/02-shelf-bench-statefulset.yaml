@@ -1,0 +1,226 @@
+# 02-shelf-bench-statefulset.yaml
+#
+# shelf-bench StatefulSet — 3 fresh shelfd pods for the V2 12-hour
+# production-trace replay. Distinct from any prod shelf-pool: own headless
+# service, own PVCs, fresh cold cache so V2's cold→warm comparison is not
+# contaminated by warm prod state.
+#
+# Capacity engineering rule (post-incident learning, see RUN.md
+# §"Failure-mode quick reference"):
+#   - Pod memory limit 40 GiB on m-family (NOT 32 GiB on c6a — OOM trap).
+#     c6a is compute-optimised (8 GiB RAM/vCPU) so a 4xlarge advertises only
+#     ~27 GiB allocatable. A 32 GiB limit is mathematically guaranteed to
+#     OOM the moment workload climbs past ~27 GiB.
+#   - RSS warn watermark 22 GiB, OOM ceiling 24 GiB.
+#   - NodePool MUST drop c6a from instance-family (m5a / m6a / m7a / r-family).
+#
+# K1 default (PR #106): NVMe per-pod = 60 GiB on the OSS values. V2 keeps
+# this default to mirror the OSS-onboarding profile a fresh operator gets.
+#
+# Image: ghcr.io/shelf-project/shelfd:1.0.1 (latest published GA tag).
+# The shelfd binary lives in a distroless image (no /bin/sh) — operator
+# scrapes /metrics via the curl sidecar pattern in scrape_shelf_metrics.sh.
+#
+# Operator-substituted at run.sh time:
+#   ${BENCH_NAMESPACE}     target k8s namespace
+#   ${SHELF_IMAGE_TAG}     defaults to 1.0.1; bump only with a same-major image
+#   ${ORIGIN_BUCKET}       S3 bucket the bench Trino reads from (no s3:// prefix)
+#   ${ORIGIN_REGION}       AWS region of that bucket
+#   ${SHELF_BENCH_NVME_GIB}  PVC size per pod (default 60Gi per K1)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: shelf-bench
+  namespace: ${BENCH_NAMESPACE}
+  labels:
+    app.kubernetes.io/name: shelf
+    app.kubernetes.io/instance: shelf-bench
+    app.kubernetes.io/part-of: shelf-bench
+    app.kubernetes.io/component: cache
+spec:
+  serviceName: shelf-bench-headless
+  replicas: 3
+  podManagementPolicy: OrderedReady
+  minReadySeconds: 30
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: shelf
+      app.kubernetes.io/instance: shelf-bench
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: shelf
+        app.kubernetes.io/instance: shelf-bench
+        app.kubernetes.io/part-of: shelf-bench
+        app.kubernetes.io/component: cache
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: shelf-bench-sa
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/instance: shelf-bench
+      containers:
+        - name: shelfd
+          image: ghcr.io/shelf-project/shelfd:${SHELF_IMAGE_TAG}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: data
+              containerPort: 9090
+              protocol: TCP
+            - name: s3shim
+              containerPort: 9092
+              protocol: TCP
+            - name: admin
+              containerPort: 9093
+              protocol: TCP
+          env:
+            - name: SHELFD_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SHELFD_LOG
+              value: "info"
+            - name: SHELFD_ORIGIN_BUCKET
+              value: ${ORIGIN_BUCKET}
+            - name: SHELFD_ORIGIN_REGION
+              value: ${ORIGIN_REGION}
+            - name: AWS_REGION
+              value: ${ORIGIN_REGION}
+            - name: AWS_STS_REGIONAL_ENDPOINTS
+              value: "regional"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: data
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: data
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: data
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "4"
+              memory: "32Gi"
+            limits:
+              cpu: "8"
+              memory: "40Gi"
+          volumeMounts:
+            - name: nvme
+              mountPath: /var/lib/shelfd
+            - name: tmp
+              mountPath: /tmp
+            - name: shelfd-config
+              mountPath: /etc/shelfd
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: shelfd-config
+          configMap:
+            name: shelf-bench-config
+  volumeClaimTemplates:
+    - metadata:
+        name: nvme
+        labels:
+          app.kubernetes.io/instance: shelf-bench
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: ebs-gp3-wffc
+        resources:
+          requests:
+            storage: ${SHELF_BENCH_NVME_GIB}Gi
+---
+# Companion ConfigMap: shelfd.yaml mounted at /etc/shelfd/shelfd.yaml.
+# Path is fixed by the published image's CMD (workspace memory: shelfd
+# Dockerfile pins /etc/shelfd/shelfd.yaml; CLI default is config.yaml,
+# but the published image overrides via CMD).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shelf-bench-config
+  namespace: ${BENCH_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: shelf-bench
+    app.kubernetes.io/component: cache
+data:
+  shelfd.yaml: |
+    node:
+      id: shelf-bench-placeholder
+    http:
+      listen: "0.0.0.0:9090"
+      request_timeout: 30s
+    control:
+      listen: "0.0.0.0:9093"
+    origin:
+      bucket: "${ORIGIN_BUCKET}"
+      region: "${ORIGIN_REGION}"
+      max_inflight: 128
+    pools:
+      metadata:
+        dram_bytes: 5368709120
+      rowgroup:
+        dram_bytes: 11811160064
+        nvme_dir: "/var/lib/shelfd"
+        nvme_bytes: ${SHELF_BENCH_NVME_BYTES}
+        eviction_policy: "lru"
+        disk_cache:
+          flushers: 4
+          buffer_pool_size_bytes: 268435456
+          submit_queue_size_threshold_bytes: 1073741824
+    admission:
+      size_threshold_bytes: 1073741824
+      pinned_bypass: true
+    membership:
+      headless_service: shelf-bench-headless.${BENCH_NAMESPACE}.svc.cluster.local
+      dns_refresh: 5s
+    head_lru_entries: 10000
+    s3_shim:
+      enabled: true
+      bind_address: "0.0.0.0:9092"
+      max_full_object_bytes: 268435456

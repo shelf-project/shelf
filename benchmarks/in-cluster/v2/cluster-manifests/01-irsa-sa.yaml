@@ -1,0 +1,24 @@
+# 01-irsa-sa.yaml
+#
+# ServiceAccount with IRSA annotation for shelf-bench-pool. The role MUST
+# carry `s3:GetObject` + `s3:HeadObject` on the bench bucket(s); writes are
+# only required if the bench fixture needs to materialise tables (the V2
+# replay-only path is read-only).
+#
+# Operator-substituted at run.sh time:
+#   ${BENCH_NAMESPACE}    target k8s namespace
+#   ${IRSA_ROLE_ARN}      e.g. arn:aws:iam::123456789012:role/shelf-bench-s3
+#
+# OSS-hygiene: NO real account ID, NO real role name shipped here. The
+# operator's actual ARN lives only in their shell env; this manifest reads
+# it via envsubst at apply time.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: shelf-bench-sa
+  namespace: ${BENCH_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: shelf-bench
+    app.kubernetes.io/component: cache
+  annotations:
+    eks.amazonaws.com/role-arn: ${IRSA_ROLE_ARN}

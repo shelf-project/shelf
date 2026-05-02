@@ -1,0 +1,66 @@
+# 05-curl-pod-rbac.yaml
+#
+# RBAC for the V1 sidecar curl pod that scrapes shelf-bench /metrics +
+# /stats. Walks around the distroless-image limitation (`kubectl exec
+# shelf-X -- wget` fails silently on shelfd's distroless container per
+# benchmarks/results/2026-05-01/SUMMARY.md §"Metric scrape gap"):
+# scrape_shelf_metrics.sh creates an ephemeral curlimages/curl pod in the
+# bench namespace, kubectl-execs curl from inside the cluster network, and
+# tears it down on every exit path including SIGINT.
+#
+# Permissions are **scoped to bench-pod scrapes only**:
+#   - create / delete / get pods in ${BENCH_NAMESPACE} only
+#   - exec into the ephemeral curl pod
+# No watch / list / delete-collection — keeps the blast radius minimal.
+#
+# Bound to ${SCRAPER_SA} (default `shelf-bench-scraper`), used by the
+# operator's harness invocation. The operator may override the SA name via
+# env-var if their cluster's PodSecurity admission requires a specific SA.
+#
+# Operator-substituted at run.sh time:
+#   ${BENCH_NAMESPACE}    target k8s namespace
+#   ${SCRAPER_SA}         scraper SA name (default: shelf-bench-scraper)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ${SCRAPER_SA}
+  namespace: ${BENCH_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: shelf-bench
+    app.kubernetes.io/component: scraper
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: shelf-bench-scraper
+  namespace: ${BENCH_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: shelf-bench
+    app.kubernetes.io/component: scraper
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: shelf-bench-scraper
+  namespace: ${BENCH_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: shelf-bench
+    app.kubernetes.io/component: scraper
+subjects:
+  - kind: ServiceAccount
+    name: ${SCRAPER_SA}
+    namespace: ${BENCH_NAMESPACE}
+roleRef:
+  kind: Role
+  name: shelf-bench-scraper
+  apiGroup: rbac.authorization.k8s.io

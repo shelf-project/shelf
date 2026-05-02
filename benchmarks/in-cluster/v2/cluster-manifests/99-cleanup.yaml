@@ -1,0 +1,76 @@
+# 99-cleanup.yaml
+#
+# DELETE manifest for full V2 teardown. Apply after the bench completes
+# OR on emergency abort. Idempotent: re-applies tolerated.
+#
+# Order: child resources first, headless Services + StatefulSet last so
+# kubelet can drain pods cleanly before the namespace is gone.
+#
+# What is NOT deleted:
+#   - The namespace itself (00-namespace.yaml). If the operator co-located
+#     V2 with `shelf-pool` in `alluxio` ns, blasting the namespace would
+#     take prod down. This file scopes deletes to V2 resources only.
+#   - The IRSA role on the AWS side. ServiceAccount unbinds; the AWS role
+#     stays so the operator can re-use it on the next V2 run.
+#
+# Operator-substituted at run.sh time:
+#   ${BENCH_NAMESPACE}    target k8s namespace
+#   ${SCRAPER_SA}         scraper SA name from 05-curl-pod-rbac.yaml
+#
+# Apply with:
+#   envsubst < 99-cleanup.yaml | kubectl delete --ignore-not-found -f -
+#
+# (kubectl apply on a delete-only manifest is a no-op; use `delete -f`.)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bench-trino-catalogs
+  namespace: ${BENCH_NAMESPACE}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shelf-bench-config
+  namespace: ${BENCH_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: shelf-bench-scraper
+  namespace: ${BENCH_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: shelf-bench-scraper
+  namespace: ${BENCH_NAMESPACE}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ${SCRAPER_SA}
+  namespace: ${BENCH_NAMESPACE}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: shelf-bench-sa
+  namespace: ${BENCH_NAMESPACE}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shelf-bench-pool
+  namespace: ${BENCH_NAMESPACE}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shelf-bench-headless
+  namespace: ${BENCH_NAMESPACE}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: shelf-bench
+  namespace: ${BENCH_NAMESPACE}

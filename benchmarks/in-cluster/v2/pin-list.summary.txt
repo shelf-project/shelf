@@ -1,0 +1,90 @@
+V2 pin-list summary
+====================
+
+source: placeholder_oss
+
+The pin-list checked into this repo (./pin-list.json) is a 10-entry SAMPLE
+that exists only so:
+  * the harness chain (replay_pinlist.py → prod_replay.py → run_prod_replay.sh
+    → run.sh) has a schema-valid file to point --pinlist-override at on
+    `--plan-only`;
+  * `test_pin_list.sh` has something to pass through `replay_pinlist.py
+    --dry-run` for CI smoke;
+  * a fresh OSS operator can clone the repo, point run.sh at their own
+    cluster, and not have it bail on a missing default pin-list.
+
+It is NOT a usable pre-warm against any real cluster — every bucket / key
+is a `your-*` placeholder. Operators MUST regenerate against their own
+Trino cluster before launching the 12-hour bench. See `RUN.md` §"Pin-list".
+
+Regenerate command (operator-side):
+
+    python3 ../../tools/gen_replay_list.py \
+      --replica         <rep-N>                      \
+      --catalog         <your_catalog>               \
+      --days            7                            \
+      --top             20000                        \
+      --top-tables      200                          \
+      --logs-table      <your.trino_logs.table>      \
+      --out             ./pin-list.json
+
+  (creds for the Trino REST call are read from ~/.cursor/mcp.json's
+  `mcp-trino` block per gen_replay_list.py's docstring; nothing on argv.)
+
+Format (one entry per row in pin-list.json):
+
+  table | total_bytes | access_count | avg_bytes_per_access
+
+The placeholder ./pin-list.json contains:
+
+  table                                            | total_bytes | access_count | avg_bytes_per_access
+  ------------------------------------------------ | ----------- | ------------ | --------------------
+  your_catalog.your_schema.gold_users              | unknown     | 10000        | unknown
+  your_catalog.your_schema.gold_transactions       | unknown     | 7500         | unknown
+  your_catalog.your_schema.gold_orders             | unknown     | 6300         | unknown
+  your_catalog.your_schema.gold_dbt_orders_base_fact | unknown   | 5500         | unknown
+  your_catalog.your_schema.silver_users_evolving   | unknown     | 4500         | unknown
+
+For comparison, the V2-prep author ran the real generator against
+their own Trino on 2026-05-02 and saw the following shape (numbers
+included for V3 sizing purposes; bucket / key strings are NOT shipped
+in the OSS tree per the release-pipeline forbidden-identifier
+tripwire):
+
+  source: trino-mcp                                # successful MCP path
+  window: 7 days
+  replica: rep-0 (heaviest replica = best table coverage)
+  top tables resolved: 100
+  total entries (pre-trim): 13955
+  total entries (post-trim, --top 5000): 5000
+  distinct tables in pin-list: 41 of top 100 by access_count
+  distinct buckets observed: 4 (gold/silver/bronze/temp tier)
+  pin-list size on disk: ~1.5 MB
+
+  (--top 5000 capped the rank; raise to --top 20000 for full 100-table
+   coverage. The 41 covered tables were the heaviest by access_count,
+   and a 5000-entry pin-list still pre-warms ~250 MB of metadata —
+   well within the 5 GiB metadata pool budget per
+   02-shelf-bench-statefulset.yaml.)
+
+How the operator-private pin-list was kept out of the OSS repo
+---------------------------------------------------------------
+
+The MCP-derived pin-list naturally contained operator-private S3 bucket
+names (e.g. `your-data-prefix-prod-*` would render as the operator's
+real `<vendor-prefix>-cdp-prod-<tier>` strings on a real cluster). Those
+bucket names match the release-pipeline tripwire patterns in
+`.github/workflows/release.yml` and would hard-fail any tag release.
+
+The V2-prep workflow:
+
+  1. Generate the real pin-list under `~/.cursor-private/v2-prep/`
+     (gitignored).
+  2. Ship a `your-*`-placeholder pin-list to the OSS tree.
+  3. Document the regeneration command in RUN.md so a fresh operator
+     can produce a real pin-list for their own cluster in ~15 minutes.
+
+This is the same OSS-hygiene pattern used for everything else under
+`benchmarks/in-cluster/` (Helm values, catalog `.properties` files):
+operator-private values land in env-vars at apply time, not in the
+default tree.
