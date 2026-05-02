@@ -49,6 +49,11 @@ humantime-serde = { workspace = true }
 clap = { workspace = true }
 aws-config = { workspace = true }
 aws-sdk-s3 = { workspace = true }
+# S3 (rc.8 / ADR-0043) — direct dep so `origin.rs` can name the
+# `ProvideCredentials` trait (for the `CountingCredentialsProvider`
+# wrapper) without depending on a transitive re-export from
+# `aws-config`. Same major line as `aws-sdk-s3` / `aws-config`.
+aws-credential-types = { workspace = true }
 foyer = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }

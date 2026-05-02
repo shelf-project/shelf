@@ -188,6 +188,31 @@ pub(crate) fn pool_for(key: &str) -> Pool {
     }
 }
 
+/// **S3 (rc.8 — ADR-0043)** — record that the shim ignored an inbound
+/// SigV4 `Authorization` header.
+///
+/// The shim is the trust boundary per ADR-0040 §security-model: the
+/// in-cluster Trino S3 client signs each request because the AWS SDK
+/// doesn't expose a "skip signing" knob, but the shim deliberately
+/// does **not** validate the signature — it serves cached bytes
+/// while pretending to be S3. Computing or parsing the signature on
+/// the accept path is wasted work.
+///
+/// This helper exists purely to make the no-op visible to ops. The
+/// O(1) header-presence check is constant-time, allocates nothing,
+/// and the counter rate gives a direct measure of how many SigV4
+/// envelopes the shim ignored without touching the bytes. The
+/// matching ADR (0043) writes this contract down so a future audit
+/// doesn't try to "harden" the shim by validating signatures inside
+/// the trust boundary — that would be both pointless and a perf
+/// regression.
+#[inline]
+fn note_sigv4_skipped(headers: &HeaderMap) {
+    if headers.contains_key(header::AUTHORIZATION) {
+        crate::metrics::SHIM_SIGV4_SKIPPED_TOTAL.inc();
+    }
+}
+
 /// SHELF-25 — does this PUT/UploadPart request advertise the AWS
 /// SigV4 streaming chunked-transfer envelope?
 ///
@@ -624,6 +649,11 @@ pub async fn handle_head_object(
     // tables; excluding HEADs would under-count the planner-driven
     // skew that K2 was built to surface).
     state.pod_load.record_request();
+    // S3 (rc.8 / ADR-0043) — record that we ignored any inbound
+    // SigV4 Authorization header. The trust boundary is the shim
+    // itself (in-cluster, Service-fronted); validating signatures
+    // here is wasted work.
+    note_sigv4_skipped(&headers);
     // SHELF-42 — resolve the A/B tag once per HEAD as well so
     // dashboards see HEAD-side cohort behaviour (Iceberg planning is
     // HEAD-heavy on cold tables; tagging it lets us tell which cohort
@@ -898,6 +928,10 @@ pub async fn handle_get_object(
     // matches the autoscaler's intent (skew = the request *load*
     // imbalance, not just the served-byte imbalance).
     state.pod_load.record_request();
+    // S3 (rc.8 / ADR-0043) — note the SigV4 Authorization header is
+    // ignored by design. The shim is the trust boundary per
+    // ADR-0040; signature validation here would be wasted work.
+    note_sigv4_skipped(&headers);
     // SHELF-42 — resolve the A/B tag label once per request. Empty
     // when the header is absent / disabled; cap-violations are
     // counted inside `tag_label_for`.
@@ -1387,6 +1421,14 @@ pub async fn handle_put_object(
     body: Body,
 ) -> Response {
     let start = std::time::Instant::now();
+    // S3 (rc.8 / ADR-0043) — record that we ignored the inbound
+    // SigV4 Authorization header. The PUT body's
+    // `x-amz-content-sha256` / `Content-Encoding: aws-chunked`
+    // envelope IS still parsed (via [`is_aws_chunked`] +
+    // `decode_aws_chunked`) because that envelope changes the
+    // *bytes* the SDK uploads to origin — but the signature itself
+    // is never validated.
+    note_sigv4_skipped(&headers);
 
     // Buffer the body. v1 of the shim is single-shot only; >256 MiB
     // single PUTs are vanishingly rare in Trino's S3 filesystem (it
@@ -2545,5 +2587,75 @@ mod tests {
         let s = haystack.find(open)? + open.len();
         let e = haystack[s..].find(close)? + s;
         Some(&haystack[s..e])
+    }
+
+    // ---- S3 (rc.8 / ADR-0043) — SigV4 accept-side skip metric ----
+
+    /// A representative SigV4 Authorization header value as the AWS
+    /// SDK / Trino's S3 filesystem emits it. Verbatim shape:
+    /// `AWS4-HMAC-SHA256 Credential=<key>/<date>/<region>/s3/aws4_request,
+    ///  SignedHeaders=<hdrs>, Signature=<hex>`.
+    const SAMPLE_SIGV4: &str = "AWS4-HMAC-SHA256 \
+        Credential=AKIAIOSFODNN7EXAMPLE/20260502/us-east-1/s3/aws4_request, \
+        SignedHeaders=host;x-amz-content-sha256;x-amz-date, \
+        Signature=fe5f80f77d5fa3beca038a248ff027d0445342fe2855ddc963176630326f1024";
+
+    /// Serialize the SigV4 skip-metric tests so their before / after
+    /// counter snapshots are not interleaved by a sibling test in
+    /// the same `cargo test` process. The metric is a single global
+    /// `IntCounter` (no labels), so without this lock the tests
+    /// would race on `.get()` and the delta assertion would flake.
+    static SIGV4_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn sigv4_header_present_increments_skip_metric() {
+        let _guard = SIGV4_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let before = crate::metrics::SHIM_SIGV4_SKIPPED_TOTAL.get();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static(SAMPLE_SIGV4),
+        );
+
+        note_sigv4_skipped(&headers);
+
+        let after = crate::metrics::SHIM_SIGV4_SKIPPED_TOTAL.get();
+        assert_eq!(
+            after - before,
+            1,
+            "SigV4 Authorization presence must tick the skip counter exactly once \
+             (before={before}, after={after})",
+        );
+    }
+
+    #[test]
+    fn sigv4_header_absent_no_increment() {
+        let _guard = SIGV4_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Anonymous client (boto3 with `signature_version=UNSIGNED`,
+        // DuckDB's default HTTPFS, `curl http://shelfd:9092/...`) does
+        // not send Authorization. Counter must NOT advance.
+        let before = crate::metrics::SHIM_SIGV4_SKIPPED_TOTAL.get();
+        let headers = HeaderMap::new();
+        note_sigv4_skipped(&headers);
+        assert_eq!(
+            crate::metrics::SHIM_SIGV4_SKIPPED_TOTAL.get(),
+            before,
+            "missing Authorization header must NOT tick the skip counter",
+        );
+
+        // Sanity: a header set to a non-SigV4 value (e.g. a Bearer
+        // token from a misconfigured client) still counts as
+        // "Authorization present" — the helper deliberately does no
+        // parsing. The shim ignores the value either way.
+        let mut other = HeaderMap::new();
+        other.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer x"));
+        let before_bearer = crate::metrics::SHIM_SIGV4_SKIPPED_TOTAL.get();
+        note_sigv4_skipped(&other);
+        assert_eq!(
+            crate::metrics::SHIM_SIGV4_SKIPPED_TOTAL.get(),
+            before_bearer + 1,
+            "any Authorization header (parsed or not) must tick the skip counter",
+        );
     }
 }
