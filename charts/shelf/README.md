@@ -60,7 +60,9 @@ helm lint charts/shelf -f charts/shelf/values-prod.yaml
 helm lint charts/shelf -f charts/shelf/ci/lint-values.yaml --strict
 ```
 
-CI runs the `--strict` form against `ci/lint-values.yaml` on every PR.
+CI strict-lints `ci/lint-values.yaml` on every PR and merges each
+`charts/shelf/examples/*.yaml` on top for the latency-first NVMe overlay
+(`values-latency-priority.yaml`).
 
 ## Configuration quick-reference
 
@@ -72,8 +74,8 @@ Highlights:
 | `replicaCount`                         | 3                    | plan §3 Phase 1      |
 | `service.dataPort`                     | 9090                 | ADR-0004 HTTP/2 only |
 | `cache.pools.metadata.sizeBytes`       | 5 GiB                | ADR-0008             |
-| `cache.pools.rowgroup.dramSizeBytes`   | 56 GiB               | ADR-0008             |
-| `cache.pools.rowgroup.nvmeSizeBytes`   | 60 GiB               | ADR-0008, ADR-0042   |
+| `cache.pools.rowgroup.dramSizeBytes`   | 11 GiB               | values.yaml          |
+| `cache.pools.rowgroup.nvmeSizeBytes`   | 60 GiB               | ADR-0042 (K1); use `examples/values-latency-priority.yaml` for 500Gi |
 | `cache.admission.sizeThresholdMiB`     | 1024                 | ADR-0003             |
 | `cache.admission.model.enabled`        | false                | ADR-0003             |
 | `storage.storageClassName`             | local-nvme           | plan §4 SHELF-18     |

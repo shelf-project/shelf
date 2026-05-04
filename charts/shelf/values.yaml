@@ -147,6 +147,13 @@ storage:
   # helm upgrade — StatefulSet volumeClaimTemplates are immutable
   # post-create. Downsize requires an operator decision
   # (kubectl patch pvc … then rebind; ADR-0042 "Migration").
+  #
+  # Latency-first / large working set: merge the optional overlay
+  # `charts/shelf/examples/values-latency-priority.yaml` (500Gi +
+  # matched `nvmeSizeBytes`) on top of your env values when rowgroup
+  # hit ratio is low at full NVMe util and S3 GET-variable spend is
+  # high — validate `allowVolumeExpansion` on your StorageClass before
+  # expanding existing PVCs.
   size: 60Gi
   mountPath: /var/lib/shelf
 
