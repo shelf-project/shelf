@@ -62,7 +62,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # GitHub-hosted runners ship with ~14 GiB free on /, which is
       # borderline for examples that pull a 5 GiB image (StarRocks)
