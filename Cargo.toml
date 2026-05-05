@@ -90,7 +90,7 @@ base64 = "0.22"
 percent-encoding = "2"
 # SHELF-50 — bounded in-process LRU for decoded Iceberg manifests
 # and Parquet footers.
-lru = "0.12"
+lru = "0.16"
 # SHELF-34 + SHELF-50 — Apache Parquet footer / page-index extractor.
 # `default-features = false` cuts the arrow-* tree (~3 MB compile
 # output); SHELF-34 upgrades the line from 53 → 58 for the richer
