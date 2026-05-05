@@ -154,7 +154,7 @@ jobs:
 
       - name: Upload run log on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.engine }}-run-log
           path: examples/${{ matrix.engine }}/run.log
@@ -166,7 +166,7 @@ jobs:
         # directory next to run.sh with metrics.* / cold.txt / warm.txt
         # / summary.txt that's invaluable when triaging a CI flake.
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.engine }}-results
           path: examples/${{ matrix.engine }}/results/
