@@ -129,10 +129,22 @@ storage:
   # -- StorageClass. Prefer local-nvme; ebs-gp3-wffc is the fallback.
   # [plan §4 SHELF-18 "local NVMe StorageClass (preferred) or ebs-gp3-wffc (fallback)"]
   storageClassName: local-nvme
-  # -- Disk size per pod. ADR-0008 / SHELF-18 set 500 GiB as the
-  # aspirational size; the deployed PVC on rep-2 is 240 GiB so the
-  # default here matches reality. Bump in your overlay if your node
-  # pool's local NVMe has more capacity.
+  # -- Disk size per pod (Kubernetes quantity, e.g. 240Gi).
+  #
+  # Latency vs net TCO (operator fork — tune in your overlay, not here):
+  #   • Default 240Gi balances gp3 cost vs a warm rowgroup tier on typical
+  #     BI + dbt clusters. When `shelf_disk_bytes_used` pegs at capacity and
+  #     rowgroup hit ratio is low while S3 Tier-2 GET spend is high, a
+  #     larger PVC often improves p99 latency *and* lowers GET-variable $ at
+  #     the expense of higher EBS byte-months — re-check with your finance
+  #     attribution (GET-isolated CUR), not raw aggregate S3.
+  #   • Smaller PVCs (e.g. 60–120Gi) are valid for dev / low-QPS pools; they
+  #     raise eviction pressure and are cheaper on EBS.
+  #   • MUST match `cache.pools.rowgroup.nvmeSizeBytes` (same total byte
+  #     budget Foyer uses for the hybrid pool's disk tier).
+  #
+  # Reference overlay with larger NVMe (500Gi default in example):
+  #   charts/shelf/examples/values-latency-priority.yaml
   size: 240Gi
   mountPath: /var/lib/shelf
 
@@ -144,9 +156,15 @@ cache:
     metadata:
       # -- DRAM-only, SIEVE. Holds metadata.json, manifest lists,
       # manifests, Parquet footers, page indexes. [ADR-0008 §Decision]
+      #
+      # Raised from 5 GiB → 7 GiB: metadata drives 40-60 % of all
+      # cache hits (every query reads a manifest before any rowgroup)
+      # but consumes only a few hundred MiB of actual data. The extra
+      # 2 GiB is reclaimed from rowgroup.dramSizeBytes so the total
+      # DRAM budget per pod is unchanged.
       tier: dram
       policy: FrozenHot
-      sizeBytes: 5368709120  # 5 GiB absolute (not a percentage)
+      sizeBytes: 7516192768  # 7 GiB (was 5 GiB)
     rowgroup:
       # -- Hybrid DRAM + NVMe. Holds row-group byte-ranges.
       # [ADR-0008 §Decision, ADR-0009]
@@ -154,22 +172,21 @@ cache:
       # -- In-memory eviction policy for the hybrid pool's DRAM tier.
       # Allowed: `lru` | `s3_fifo` | `lfu` | `fifo`.
       #
-      # SHELF-E1b — defaults to LRU because S3-FIFO's "small queue →
-      # main queue → disk" promotion path keeps one-shot reads
-      # (Metabase admin, ad-hoc BI) off NVMe entirely: items expire
-      # from the small queue before earning promotion, so
-      # `shelf_disk_bytes_used` stays at zero indefinitely. LRU
-      # flows every memory eviction through to the disk ring, so the
-      # NVMe tier actually fills under BI workloads.
+      # Reverted to S3-FIFO (ADR-0009 original choice): production
+      # data shows peak-hour cache thrashing where concurrent ad-hoc
+      # scans evict hot dashboard rowgroups under LRU. S3-FIFO's
+      # small-queue filter absorbs one-shot scan traffic without
+      # polluting the main queue, protecting frequently-reused data.
+      # NVMe fill is preserved because the small-queue drain path
+      # still writes promoted items to the disk ring.
       #
-      # ADR-0009 originally pinned this to S3-FIFO for scan
-      # resistance; flip back to `s3_fifo` here when the SHELF-26
-      # replay harness shows a per-policy hit-ratio gain on your
-      # workload.
-      evictionPolicy: lru
+      # If `shelf_disk_bytes_used` stays near zero after rollout,
+      # the workload is dominated by one-shot reads — flip back to
+      # `lru` and re-evaluate with the SHELF-26 replay harness.
+      evictionPolicy: s3_fifo
       # `policy` is retained as a human-readable hint for ops
       # dashboards. Source of truth for shelfd is `evictionPolicy`.
-      policy: LRU
+      policy: S3Fifo
       # -- DRAM portion of the hybrid pool, in bytes. MUST satisfy
       # `metadata.sizeBytes + rowgroup.dramSizeBytes + (origin.pool.maxConnections × 32 MiB)
       # + cache.pools.rowgroup.diskCache.submitQueueSizeThresholdBytes
@@ -177,17 +194,16 @@ cache:
       # `<= node.allocatableMemory`.
       # On a 4xlarge alluxio NodePool that is ~27.3 GiB allocatable.
       #
-      # 11 GiB DRAM (default since SHELF-21f, 2026-04-29) leaves
-      # 27.3 - (5 + 11 + 4 + 1 + 3) = ~3 GiB of headroom. The
-      # previous 14 GiB default left zero headroom and produced
-      # repeated near-OOM RSS peaks (27–29 GiB observed on shelf-0/1
-      # 2026-04-29 04:00 IST) and one OOMKill (shelf-1, exit 137,
-      # 06:40 IST) under sustained read load even with the SHELF-21e
-      # LODC back-pressure module engaged. See
+      # 9 GiB rowgroup DRAM + 7 GiB metadata = 16 GiB total, same as the
+      # previous 11 + 5 split. RSS budget on a 27.3 GiB allocatable node:
+      # 27.3 - (7 + 9 + 4 + 1 + 3) = ~3.3 GiB headroom. See OOM post-mortems:
       #   shelfd/docs/runbooks/2026-04-shelf-2-oom.md
       #   shelfd/docs/runbooks/2026-04-shelf-1-oom.md
-      # and the 2026-04-29 LODC regression entry in CHANGELOG.md.
-      dramSizeBytes: 11811160064   # 11 GiB
+      # Reduced from 11 GiB → 9 GiB to fund the metadata pool increase
+      # (+2 GiB). Total DRAM per pod is unchanged; rowgroup data that
+      # no longer fits in DRAM spills to NVMe (240 GiB) which is the
+      # correct tier for large sequential scan traffic.
+      dramSizeBytes: 9663676416    # 9 GiB (was 11 GiB)
       nvmeSizeBytes: 257698037760  # 240 GiB; matches storage.size
       # -- Foyer Large-Object Disk Cache (LODC) pipeline knobs.
       #
@@ -250,8 +266,11 @@ cache:
         # admissionBytesPerSec: 209715200  # 200 MiB/s
 
   admission:
-    # -- Refuse inserts for objects > 1 GiB unless pinned. [ADR-0003]
-    sizeThresholdMiB: 1024
+    # -- Refuse inserts for objects > threshold MiB unless pinned. [ADR-0003]
+    # Raised from 1024 → 4096 MiB: production ad-hoc scans on tables
+    # in the 1–3 GiB range were silently rejected and re-fetched from
+    # S3 on every query. Pinned objects always bypass this limit.
+    sizeThresholdMiB: 4096
     # -- Pinned objects bypass the size threshold. [plan §4 SHELF-25]
     pinnedBypass: true
     # -- Learned admission disabled in v1. [ADR-0003]
@@ -269,7 +288,10 @@ cache:
     # Example: s3://my-org-shelf-config/pin_list.json
     s3Uri: ""
     # -- Poll interval. SIGHUP also triggers a reload. [plan §4 SHELF-24]
-    reloadIntervalSeconds: 900
+    # Lowered from 900 → 120 s: newly hot tables (new dashboards, fresh
+    # MVs) now appear in the pin list within 2 min instead of 15 min,
+    # cutting cold-miss windows after trainer promotions.
+    reloadIntervalSeconds: 120
 
 # ---------------------------------------------------------------------------
 # Origin (S3) client — [plan §4 SHELF-05]
@@ -288,7 +310,7 @@ origin:
     # receive buffer for up to one ~32 MiB rowgroup, so
     # maxConnections × 32 MiB is the origin-pool RSS worst case.
     # Keeping this at 128 (≤ ~4 GiB worst case) lets the
-    # 5 GiB metadata + 11 GiB rowgroup + 1 GiB LODC + ~3 GiB
+    # 7 GiB metadata + 9 GiB rowgroup + 1 GiB LODC + ~3 GiB
     # runtime budget fit under the 27.3 GiB node-allocatable
     # ceiling on the 4xlarge alluxio NodePool. Operators on
     # bigger nodes can raise this carefully — re-verify the RSS

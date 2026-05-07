@@ -34,17 +34,43 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Default number of consecutive 304s required before the freshness
-/// window opens. `10` is large enough to ignore one-off 200s on a
-/// rapidly-changing object (a manifest list rotated every 10 reads
-/// would never enter the window) but small enough that a long-tail
-/// stable object reaches the window quickly.
-pub const DEFAULT_FRESHNESS_THRESHOLD: u32 = 10;
+/// window opens for **mutable** objects. `3` reaches the trust window
+/// quickly for stable dashboards while still catching objects that
+/// rotate on every few reads (a manifest list updated every 2 reads
+/// would never enter the window). Previously 10 — reduced to cut
+/// S3 HEAD overhead by ~3× on steady-state workloads.
+pub const DEFAULT_FRESHNESS_THRESHOLD: u32 = 3;
 
 /// Default trust window once `DEFAULT_FRESHNESS_THRESHOLD` has been
 /// hit. `5 s` matches the negative-cache TTL elsewhere in shelfd —
 /// short enough that a cross-pod write becomes visible within ~one
 /// scan-loop iteration, long enough to absorb the burst.
 pub const DEFAULT_FRESHNESS_WINDOW: Duration = Duration::from_secs(5);
+
+/// Trust window for immutable Iceberg objects after a single 304.
+/// Parquet data files and Avro manifest files are content-addressed
+/// and never overwritten once committed, so one successful validation
+/// is sufficient for the lifetime of the entry in the cache.
+pub const IMMUTABLE_FRESHNESS_WINDOW: Duration = Duration::from_secs(86400);
+
+/// Returns `true` when the S3 key refers to a file that is immutable
+/// by the Iceberg specification:
+///
+/// - `.parquet` — data files (content-addressed by UUID in the path)
+/// - `.avro`    — manifest files and manifest-list files
+/// - versioned metadata files (`NNNNN-<uuid>.metadata.json`) — written
+///   once per snapshot, never updated in place
+///
+/// Plain `metadata.json` (the current-version pointer) is explicitly
+/// excluded: it is rewritten on every snapshot commit.
+pub fn is_iceberg_immutable(key: &str) -> bool {
+    if key.ends_with(".parquet") || key.ends_with(".avro") {
+        return true;
+    }
+    // Versioned metadata: ends with ".metadata.json" but NOT the bare
+    // "metadata.json" pointer (which has no digit prefix).
+    key.ends_with(".metadata.json") && !key.ends_with("/metadata.json")
+}
 
 /// Per-(bucket, key) freshness state. `consecutive_304s` saturates at
 /// `u32::MAX` rather than wrapping; the trust window only widens with
@@ -92,22 +118,30 @@ impl FreshnessTracker {
     /// skip the conditional-GET round-trip and serve directly from
     /// the local cache.
     ///
-    /// The window opens iff the last `threshold` validations all
-    /// returned 304 *and* the most recent validation was inside `window`.
-    /// Any other state (no entry, fewer than `threshold` 304s, or an
-    /// expired window) returns `false` so the caller re-validates.
+    /// For **immutable** Iceberg objects (`.parquet`, `.avro`, versioned
+    /// `.metadata.json`) one consecutive 304 is sufficient; the trust
+    /// window is 24 h. For all other objects the configurable
+    /// `threshold` / `window` pair applies (defaults: 3 / 5 s).
+    ///
+    /// Any other state (no entry, insufficient 304s, or an expired
+    /// window) returns `false` so the caller re-validates.
     pub fn can_skip(&self, bucket: &str, key: &str) -> bool {
         if self.threshold == 0 || self.window.is_zero() {
             return false;
         }
+        let (effective_threshold, effective_window) = if is_iceberg_immutable(key) {
+            (1u32, IMMUTABLE_FRESHNESS_WINDOW)
+        } else {
+            (self.threshold, self.window)
+        };
         let entry = match self.entries.get(&(bucket.to_owned(), key.to_owned())) {
             Some(e) => e.value().clone(),
             None => return false,
         };
-        if entry.consecutive_304s < self.threshold {
+        if entry.consecutive_304s < effective_threshold {
             return false;
         }
-        Instant::now().duration_since(entry.last_validated_at) < self.window
+        Instant::now().duration_since(entry.last_validated_at) < effective_window
     }
 
     /// Record a 304 (cache validated, object unchanged). Bumps the
@@ -215,14 +249,48 @@ mod tests {
     #[test]
     fn consecutive_count_saturates_safely() {
         let f = FreshnessTracker::with_params(8, 1, Duration::from_secs(60));
-        // Bump enough times to verify the saturating_add path doesn't
-        // wrap (we can't realistically count to u32::MAX in a test,
-        // but we sanity-check the bookkeeping holds beyond the
-        // threshold).
         for _ in 0..100 {
             f.record_not_modified("b", "k");
         }
         assert_eq!(f.consecutive_304s("b", "k"), 100);
         assert!(f.can_skip("b", "k"));
+    }
+
+    // --- immutable Iceberg helpers ---
+
+    #[test]
+    fn immutable_parquet_skips_after_one_304() {
+        let f = FreshnessTracker::with_params(8, DEFAULT_FRESHNESS_THRESHOLD, DEFAULT_FRESHNESS_WINDOW);
+        let key = "cdp/icesheet/data/00000-0-abc123.parquet";
+        assert!(!f.can_skip("b", key), "no entry yet");
+        f.record_not_modified("b", key);
+        assert!(f.can_skip("b", key), "one 304 is enough for immutable");
+    }
+
+    #[test]
+    fn immutable_avro_skips_after_one_304() {
+        let f = FreshnessTracker::with_params(8, DEFAULT_FRESHNESS_THRESHOLD, DEFAULT_FRESHNESS_WINDOW);
+        let key = "warehouse/tbl/metadata/snap-42-1-abc.avro";
+        f.record_not_modified("b", key);
+        assert!(f.can_skip("b", key));
+    }
+
+    #[test]
+    fn versioned_metadata_json_is_immutable() {
+        assert!(is_iceberg_immutable("tbl/metadata/00001-abc.metadata.json"));
+        assert!(!is_iceberg_immutable("tbl/metadata/metadata.json"),
+            "bare metadata.json pointer is mutable");
+    }
+
+    #[test]
+    fn mutable_metadata_json_still_requires_threshold() {
+        let f = FreshnessTracker::with_params(8, DEFAULT_FRESHNESS_THRESHOLD, DEFAULT_FRESHNESS_WINDOW);
+        let key = "tbl/metadata/metadata.json";
+        f.record_not_modified("b", key);
+        assert!(!f.can_skip("b", key), "mutable object needs threshold 304s, not just 1");
+        f.record_not_modified("b", key);
+        assert!(!f.can_skip("b", key));
+        f.record_not_modified("b", key);
+        assert!(f.can_skip("b", key), "reaches threshold=3");
     }
 }

@@ -39,12 +39,13 @@ use crate::store::{Key, Pool};
 
 /// SHELF-23 — peer-fetch deadline for the `POST /cache/contains` probe.
 ///
-/// 10 ms matches the budget documented in
-/// [`crate::peer::race_peer_or_origin`]: same-AZ k8s pod-to-pod p99
-/// HTTP probe latency is < 2 ms per the SHELF-08 jitter data, so 10 ms
-/// absorbs a GC pause without letting a slow peer delay the S3
-/// fallback.
-pub const PEER_PROBE_DEADLINE: Duration = Duration::from_millis(10);
+/// 50 ms gives a pod under NVMe flush pressure (Tokio task starvation
+/// can push same-AZ p99 to 20–50 ms) time to respond before we fall
+/// back to S3. S3 round-trip is ~100 ms, so waiting up to 50 ms for a
+/// peer hit is still net-positive. The previous 10 ms budget was too
+/// tight under bursty load: pods that had the data timed out and callers
+/// re-fetched from S3 unnecessarily.
+pub const PEER_PROBE_DEADLINE: Duration = Duration::from_millis(50);
 
 /// Header set by [`crate::peer::peer_body_fetch`] (and recognised here)
 /// to mark an inbound `/cache/<pool>/<key>/<range>` request as a
