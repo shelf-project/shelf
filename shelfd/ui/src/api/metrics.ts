@@ -181,6 +181,59 @@ export function listSeries(
   }));
 }
 
+// --- CacheEvent stream helpers ---
+
+/** A single cache hit or miss event derived from per-table counter deltas. */
+export type CacheEvent = {
+  kind: "hit" | "miss";
+  /** Table name from the `table` label of shelf_hits/misses_by_table_total. */
+  table: string;
+  /** Delta count since the previous poll. */
+  count: number;
+};
+
+type EventStreamState = {
+  prevHits: Record<string, number>;
+  prevMisses: Record<string, number>;
+};
+
+/** Returns a fresh, empty event-stream accumulator for `deriveEvents`. */
+export function emptyEventStream(): EventStreamState {
+  return { prevHits: {}, prevMisses: {} };
+}
+
+/** Compute `CacheEvent[]` by diffing per-table counters against `state`.
+ * Mutates `state` in-place so the caller's `useRef` stays consistent across
+ * polls without needing reassignment. */
+export function deriveEvents(
+  samples: Sample[],
+  state: EventStreamState,
+): CacheEvent[] {
+  const hits = new Map<string, number>();
+  const misses = new Map<string, number>();
+  for (const s of samples) {
+    if (s.name === "shelf_hits_by_table_total") {
+      const t = s.labels["table"] ?? "unknown";
+      hits.set(t, (hits.get(t) ?? 0) + s.value);
+    } else if (s.name === "shelf_misses_by_table_total") {
+      const t = s.labels["table"] ?? "unknown";
+      misses.set(t, (misses.get(t) ?? 0) + s.value);
+    }
+  }
+  const events: CacheEvent[] = [];
+  for (const [table, count] of hits) {
+    const delta = count - (state.prevHits[table] ?? 0);
+    if (delta > 0) events.push({ kind: "hit", table, count: delta });
+    state.prevHits[table] = count;
+  }
+  for (const [table, count] of misses) {
+    const delta = count - (state.prevMisses[table] ?? 0);
+    if (delta > 0) events.push({ kind: "miss", table, count: delta });
+    state.prevMisses[table] = count;
+  }
+  return events;
+}
+
 /** Approximate a percentile from a Prom histogram by linear
  * interpolation inside the bucket that first reaches the target
  * cumulative count. Not exact, but good enough for a single-value
