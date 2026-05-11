@@ -3,7 +3,17 @@
 _Raw benchmark output lives here. One file per run. Publishing,
 versioning, and discovery rules below._
 
-Status: **empty at launch**.
+Status: **empty at launch**. Populated by either:
+1. The in-cluster bench fixture (v1 publication path) — see
+   [`../in-cluster/README.md`](../in-cluster/README.md) and
+   [`../in-cluster/RUNBOOK.md`](../in-cluster/RUNBOOK.md).
+2. The standalone EKS path (`benchmarks/env/`) — see
+   [`../env/README.md`](../env/README.md). Not the v1 publication
+   path; preserved for users who want a fully-isolated cluster.
+
+Both paths produce the same per-record JSON shape and the same
+`<date>/<backend>/<benchmark>-<run-id>.json` layout, so consumers
+of this directory don't need to know which path produced a record.
 
 ---
 
@@ -73,13 +83,23 @@ see `RESULTS.md` `Changelog` for the public URL.
 
 ---
 
-## TODO_SHELF-26
+## SHELF-26 closer (v1)
 
-`replay/run.sh` must emit a record that links back to:
+`replay/run.py` (the v1 online driver, not the v0 `run.sh` scaffold)
+emits a record that links back to:
 
-- the `trino_queries` snapshot ID it replayed (so the input is
-  reproducible),
-- the shelfd commit SHA that served the run,
-- the Trino image digest.
+- the `trino_queries` snapshot ID it replayed (read from
+  `<date>/replay-fixture/metadata.json`),
+- the shelfd commit SHA that served the run (`SHELF_BENCH_COMMIT_SHA`
+  env or `git rev-parse HEAD`),
+- the Trino image tag (recorded under `config.trino_image`).
 
-See `replay/SPEC.md` §Reproducibility Command.
+Run records are validated against `../<benchmark>/schema.json` before
+write. The harness end-to-end is exercised by:
+
+```bash
+python3 -m unittest benchmarks.tools.test_gate
+```
+
+See [`../replay/SPEC.md`](../replay/SPEC.md) §Reproducibility Command for
+the full reproduction recipe.

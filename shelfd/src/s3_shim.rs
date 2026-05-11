@@ -788,6 +788,14 @@ fn finish_get_response(
     )
 }
 
+fn observe_shim_get_phase(phase: &'static str, phase_mark: &mut std::time::Instant) {
+    let now = std::time::Instant::now();
+    crate::metrics::S3_SHIM_GET_PHASE_SECONDS
+        .with_label_values(&[phase])
+        .observe(now.duration_since(*phase_mark).as_secs_f64());
+    *phase_mark = now;
+}
+
 /// `GET /:bucket/*key` — S3 `GetObject` (honours `Range:` if set).
 pub async fn handle_get_object(
     State(state): State<Arc<ServerState>>,
@@ -798,8 +806,12 @@ pub async fn handle_get_object(
     // observation in `record_get_latency` covers HEAD-LRU lookup,
     // origin HEAD (if needed), single-flight wait, and Foyer get.
     let start = std::time::Instant::now();
+    let mut phase_mark = start;
     let range_spec = match parse_range_header(&headers) {
-        Ok(r) => r,
+        Ok(r) => {
+            observe_shim_get_phase("range_parse", &mut phase_mark);
+            r
+        }
         Err(()) => {
             // No size context yet → `bytes */0` is still a valid
             // `Content-Range` per RFC 9110.
@@ -808,7 +820,10 @@ pub async fn handle_get_object(
     };
 
     let meta = match head_meta(&state, &bucket, &key).await {
-        Ok(Some(m)) => m,
+        Ok(Some(m)) => {
+            observe_shim_get_phase("head_meta", &mut phase_mark);
+            m
+        }
         Ok(None) => {
             return record_get_latency(&state, start, "not_found", no_such_key(&bucket, &key));
         }
@@ -956,6 +971,8 @@ pub async fn handle_get_object(
         .get_or_fetch(pool, key_obj, state.admission.as_ref(), fetcher)
         .await;
 
+    observe_shim_get_phase("fetch_body", &mut phase_mark);
+
     // Bookkeeping parity with the native `/cache/...` data plane: a
     // shim read that hits Foyer is a cache hit and must bump
     // `shelf_hits_total{pool=...}`; a miss bumps `shelf_misses_total`.
@@ -1040,6 +1057,8 @@ pub async fn handle_get_object(
     } else {
         StatusCode::OK
     };
+
+    observe_shim_get_phase("assemble_response", &mut phase_mark);
 
     record_get_latency(
         &state,

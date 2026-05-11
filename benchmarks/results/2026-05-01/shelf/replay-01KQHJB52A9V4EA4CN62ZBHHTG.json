@@ -1,0 +1,65 @@
+{
+  "run_id": "01KQHJB52A9V4EA4CN62ZBHHTG",
+  "timestamp": "2026-05-01T10:46:24Z",
+  "commit_sha": "0000000000000000000000000000000000000000",
+  "release_tag": "v1.0.0-smoke",
+  "benchmark": "replay",
+  "backend": "shelf",
+  "config": {
+    "config_hash": "sha256:02df1fc4b50332d4fc09a8de154d307894a2908ab5dc414e0432ec9ebabd6447",
+    "trino_image": "trinodb/trino:480",
+    "backend_image": "ghcr.io/shelf-project/shelfd:1.0.0 (smoke-built)",
+    "plugin_jar_sha256": null
+  },
+  "cluster_shape": {
+    "region": "ap-south-1",
+    "k8s_version": "n/a-docker-compose",
+    "trino_instance_type": "docker-laptop",
+    "trino_worker_count": 1,
+    "shelf_instance_type": "docker-laptop",
+    "shelf_node_count": 1,
+    "driver_instance_type": "n/a",
+    "scale_factor": null,
+    "partial": true
+  },
+  "trace": {
+    "source_table": "cdp.trino_logs.trino_queries",
+    "snapshot_id": "smoke-tpch-region-nation-orders-2026-05-01",
+    "from": "2026-05-01T10:46:24Z",
+    "to": "2026-05-01T10:46:24Z",
+    "replica": "rep-2",
+    "query_count": 10,
+    "speed": "1x"
+  },
+  "samples": [
+    {
+      "t_seconds": 0.0,
+      "hit_rate": 0.881578947368421,
+      "gold_dbt_ok_rate": 1.0
+    },
+    {
+      "t_seconds": 0.2297651767730713,
+      "hit_rate": 0.881578947368421,
+      "gold_dbt_ok_rate": 1.0
+    }
+  ],
+  "summary": {
+    "latency_ns_p50": 4809042,
+    "latency_ns_p95": 9017625,
+    "latency_ns_p99": 9066225,
+    "latency_ns_p999": 9077160,
+    "hit_rate": 0.881578947368421,
+    "bytes_read": 77766,
+    "bytes_admitted": 77766,
+    "dollars_per_query": 0.0
+  },
+  "gate": {
+    "hit_rate_7d_cumulative": 0.881578947368421,
+    "gold_dbt_ok_rate": 1.0,
+    "latency_ns_p95_vs_alluxio": null,
+    "shelf_caused_pages": 0,
+    "oncall_surface_ratio": null,
+    "verdict": "n/a",
+    "failed_metrics": []
+  }
+}

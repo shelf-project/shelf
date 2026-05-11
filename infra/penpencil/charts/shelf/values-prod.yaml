@@ -17,7 +17,7 @@
 # under load. The defaults below are conservative for a 32 GiB pod limit
 # on a node with ~27 GiB allocatable.
 
-replicaCount: 3
+replicaCount: 6
 
 image:
   repository: ghcr.io/shelf-project/shelfd
@@ -43,44 +43,43 @@ resources:
     memory: "32Gi"
 
 storage:
-  # Prefer local-nvme on instance-store node families (i4i, c6id, m6id,
-  # c7gd). Fall back to ebs-gp3-wffc on EBS-only families.
-  storageClassName: local-nvme
-  size: 240Gi
+  # Cluster uses EBS gp3; must match the storageClass already in the
+  # StatefulSet VolumeClaimTemplate (immutable after first deploy).
+  storageClassName: ebs-gp3-wffc
+  size: 300Gi
 
 cache:
   pools:
     metadata:
-      sizeBytes: 5368709120          # 5 GiB
+      sizeBytes: 7516192768          # 7 GiB (was 5 GiB; rebalanced from rowgroup DRAM)
     rowgroup:
-      # SHELF-E1b — LRU so every memory eviction flows through to NVMe.
-      # S3-FIFO is scan-resistant but keeps one-shot BI reads off NVMe;
-      # flip back to s3_fifo only when the SHELF-26 replay harness
-      # shows a per-policy hit-ratio gain on your workload.
-      evictionPolicy: lru
-      # SHELF-21f (2026-04-29): see overlay note in values.yaml.
-      dramSizeBytes: 11811160064     # 11 GiB (was 14 GiB)
-      nvmeSizeBytes: 257698037760    # 240 GiB; matches storage.size
-      # Foyer LODC tunables — bound the disk-cache submit queue so a
-      # burst of inflight rowgroups can't OOM the pod under load.
-      # SHELF-21f bumped flushers + bufferPool so the queue actually
-      # drains in steady state.
+      # Reverted to S3-FIFO: production peak-hour thrashing showed
+      # concurrent ad-hoc scans evicting hot dashboard rowgroups under
+      # LRU. S3-FIFO's small-queue filter protects frequently-reused
+      # data from one-shot scan pollution.
+      evictionPolicy: s3_fifo
+      # 9 GiB + 7 GiB metadata = 16 GiB total, same as before.
+      # RSS budget: 27.3 - (7+9+4+1+3) = ~3.3 GiB headroom.
+      dramSizeBytes: 9663676416      # 9 GiB (was 11 GiB)
+      nvmeSizeBytes: 322122547200    # 300 GiB; matches storage.size
       diskCache:
-        flushers: 8                                 # was 4 (was Foyer default 1)
-        bufferPoolSizeBytes: 402653184              # 384 MiB (was 256 MiB)
-        submitQueueSizeThresholdBytes: 1073741824   # 1 GiB hard cap on LODC RSS pressure
+        flushers: 8
+        bufferPoolSizeBytes: 402653184              # 384 MiB
+        submitQueueSizeThresholdBytes: 1073741824   # 1 GiB
   admission:
-    sizeThresholdMiB: 1024
+    # Raised from 1024 → 4096 MiB: 1-3 GiB tables were silently
+    # rejected and re-fetched from S3 on every query.
+    sizeThresholdMiB: 4096
     pinnedBypass: true
     model:
       enabled: false
       s3Uri: ""
       maxAgeHours: 48
   pinList:
-    # S3-backed pin list. Operators regenerate this from query logs;
-    # see tools/gen_pin_list.py.
     s3Uri: ""
-    reloadIntervalSeconds: 900
+    # Lowered from 900 → 120 s so newly hot tables appear in the pin
+    # list within 2 min instead of 15 min.
+    reloadIntervalSeconds: 120
 
 origin:
   # Origin bucket (the data lake Trino reads).

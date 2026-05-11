@@ -6,7 +6,7 @@
 //! - SHELF-06 — full read-through path (see `http::handlers::get_cache`).
 //!
 //! `main` composes `Config`, `metrics::Registry`, `origin::S3Origin`,
-//! `store::FoyerStore`, `router::Router`, `admission::SizeThresholdPolicy`
+//! `store::FoyerStore`, `router::Router`, `admission::build_admission_policy`
 //! into an `http::ServerState`, then drives `http::serve` under a
 //! SIGTERM/SIGINT-triggered `CancellationToken`.
 
@@ -14,7 +14,6 @@ use std::sync::Arc;
 
 use clap::Parser;
 use shelfd::{
-    admission::SizeThresholdPolicy,
     config::Config,
     head_lru::HeadLru,
     http::{self, ServerState},
@@ -78,7 +77,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let origin = Arc::new(S3Origin::new(&config.origin).await?);
     let store = Arc::new(FoyerStore::open(&config.pools).await?);
     let router = Arc::new(Router::new());
-    let admission = Arc::new(SizeThresholdPolicy::from_config(&config.admission));
+    let admission = shelfd::admission::build_admission_policy(&config.admission);
     let head_lru = Arc::new(HeadLru::new(config.head_lru_entries));
 
     // SHELF-20: shared lameduck bit. Cloned into `ServerState` so

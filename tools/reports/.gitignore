@@ -1,0 +1,4 @@
+# Generated daily reports (keep success_metrics.json)
+*.json
+!success_metrics.json
+20*.md

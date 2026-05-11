@@ -1,0 +1,10 @@
+# TPC-H SF1 — cluster bench (Shelf via shelf-pool vs raw S3)
+# 6 queries × 3 reps × 2 backends, 4-worker dev Trino, prod shelf-pool
+
+query                        shelf cold   shelf warm   rawS3 cold   rawS3 warm    warm delta
+q01_pricing_summary            2510.7ms     2253.3ms     2264.9ms     2325.6ms        -3.1%
+q03_shipping_priority          3800.6ms     2793.9ms     2426.4ms     2460.0ms       +13.6%
+q06_forecasting                2497.7ms     2176.8ms     2185.8ms     2385.3ms        -8.7%
+q10_returned_items             2929.6ms     2361.8ms     2299.3ms     2107.2ms       +12.1%
+q12_shipping_modes             2452.5ms     2298.2ms     2385.4ms     2181.5ms        +5.3%
+q14_promotion_effect           2443.8ms     2296.9ms     2162.4ms     2252.0ms        +2.0%

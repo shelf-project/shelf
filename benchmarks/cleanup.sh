@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # cleanup.sh — tear down everything bootstrap.sh installed.
 # Leaves env/ alone; run `make env-down` to delete the cluster itself.
+#
+# Scope: this script handles the STANDALONE EKS path under env/. If you
+# used the in-cluster bench fixture instead (the v1 publication path),
+# run benchmarks/in-cluster/down.sh — it manages the trino-bench
+# namespace separately and never touches the env/ Terraform state.
 
 set -euo pipefail
 

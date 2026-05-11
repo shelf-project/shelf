@@ -41,7 +41,7 @@ pub struct ServerState {
     pub store: Arc<crate::store::FoyerStore>,
     pub origin: Arc<crate::origin::S3Origin>,
     pub router: Arc<crate::router::Router>,
-    pub admission: Arc<crate::admission::SizeThresholdPolicy>,
+    pub admission: Arc<dyn crate::admission::AdmissionPolicy>,
     pub metrics: Arc<crate::metrics::Registry>,
     /// LRU of `HeadObject` responses keyed on `(bucket, s3_key)`
     /// (SHELF-07). Wired in via [`ServerState::with_head_lru_and_pod_id`];
@@ -143,7 +143,7 @@ impl ServerState {
         store: Arc<crate::store::FoyerStore>,
         origin: Arc<crate::origin::S3Origin>,
         router: Arc<crate::router::Router>,
-        admission: Arc<crate::admission::SizeThresholdPolicy>,
+        admission: Arc<dyn crate::admission::AdmissionPolicy>,
         metrics: Arc<crate::metrics::Registry>,
     ) -> Self {
         Self::with_head_lru_and_pod_id(
@@ -163,7 +163,7 @@ impl ServerState {
         store: Arc<crate::store::FoyerStore>,
         origin: Arc<crate::origin::S3Origin>,
         router: Arc<crate::router::Router>,
-        admission: Arc<crate::admission::SizeThresholdPolicy>,
+        admission: Arc<dyn crate::admission::AdmissionPolicy>,
         metrics: Arc<crate::metrics::Registry>,
         head_lru: Arc<HeadLru>,
         pod_id: impl Into<Arc<str>>,

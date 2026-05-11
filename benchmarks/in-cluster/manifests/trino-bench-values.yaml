@@ -1,0 +1,124 @@
+# trino-bench-values.yaml — Helm values for the official Trino chart.
+#
+# Used with the upstream Trino chart at https://trinodb.github.io/charts.
+#
+# Spec contract:
+#   - Trino 480 (matches prod replica image so bench numbers map cleanly).
+#   - 1 coordinator + N workers, default N=4, parameterised so the
+#     cold-start benchmark can scale to 20 via `kubectl scale`.
+#   - Two catalogs side-by-side: cdp (raw S3) and cdp_shelf
+#     (s3.endpoint=shelf-bench:9092). Same HMS, same buckets, same fixture.
+#   - iceberg.metadata-cache.enabled=false on cdp_shelf — required to
+#     surface the metadata-pool hit-ratio climb cold→warm; otherwise
+#     Trino's JVM-local MemoryFileSystemCache shadows shelfd
+#     (workspace AGENTS.md, "Iceberg gotcha" line).
+#   - JDBC password auth enabled with a single bench-runner user. PASSWORD
+#     over HTTP requires Trino's TLS allowlist; we use the `insecure`
+#     authenticator + clientTags carrying the run-id so RESULTS.md rows
+#     can attribute metrics back to the harness.
+#
+# Usage:
+#   helm install trino-bench trino/trino \
+#     -n trino-bench --version <chart-version> \
+#     -f benchmarks/in-cluster/manifests/trino-bench-values.yaml \
+#     --set image.tag=480 \
+#     --set additionalCatalogs.cdp.<rendered-from-catalogs/cdp.properties>
+
+image:
+  repository: trinodb/trino
+  tag: "480"
+
+server:
+  workers: 4
+  config:
+    path: /etc/trino
+    http:
+      port: 8080
+    query:
+      maxMemory: "30GB"
+      maxMemoryPerNode: "8GB"
+    authenticationType: "PASSWORD"
+  exchangeManager:
+    name: filesystem
+  coordinatorExtraConfig: |
+    optimizer.experimental.iterative-optimizer-timeout=60s
+  workerExtraConfig: ""
+
+# Resource sizing — comparable to a small dev Trino. Operators on
+# beefier nodes should bump these for the SF1000 path.
+coordinator:
+  resources:
+    requests:
+      cpu: "4"
+      memory: "16Gi"
+    limits:
+      cpu: "8"
+      memory: "32Gi"
+  jvm:
+    maxHeapSize: "12G"
+    gcMethod:
+      type: "UseG1GC"
+worker:
+  resources:
+    requests:
+      cpu: "4"
+      memory: "16Gi"
+    limits:
+      cpu: "8"
+      memory: "32Gi"
+  jvm:
+    maxHeapSize: "12G"
+    gcMethod:
+      type: "UseG1GC"
+
+# Catalogs are inlined as a map; values come from manifests/catalogs/*.properties
+# Operators using up.sh can `--set-file` to read from disk.
+catalogs:
+  tpcds: |
+    connector.name=tpcds
+    tpcds.splits-per-node=1
+  # cdp and cdp_shelf are populated by up.sh from the catalogs/ directory
+  # so the actual content stays version-controlled at:
+  #   benchmarks/in-cluster/manifests/catalogs/cdp.properties
+  #   benchmarks/in-cluster/manifests/catalogs/cdp_shelf.properties
+  cdp: ""
+  cdp_shelf: ""
+
+# Single bench user with predictable creds. Override at install time.
+# IMPORTANT: this is bench-only; rotate after every run via down.sh.
+auth:
+  passwordAuth: |
+    bench-runner:$2y$10$placeholder.replace.me.with.a.bcrypt.hash
+
+# Service exposed only inside the cluster. The harness driver pod hits
+# coordinator-svc:8080 directly; no Ingress needed.
+service:
+  type: ClusterIP
+
+# Plain ServiceAccount; no IRSA on Trino — Trino's S3 reads go through
+# shelfd which has its own IRSA role (see shelf-bench-values.yaml).
+# Operators can attach an IRSA role here if cdp.s3.endpoint points at
+# raw S3 directly (raw-s3 baseline).
+serviceAccount:
+  create: true
+  name: trino-bench
+
+# Ephemeral by design. No persistent state.
+storage:
+  enabled: false
+
+# Anti-affinity to spread workers across nodes so cold-start scaling is
+# realistic.
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: trino
+              app.kubernetes.io/component: worker
+
+nodeSelector: {}
+tolerations: []

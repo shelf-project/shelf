@@ -1,0 +1,10 @@
+# Smoke replay (TPC-H shape, docker-compose, no penpencil data)
+run_id          01KQHJEB0VYZC5JXE8PJSRY3Z4
+trace fixture   default.region (5) + default.nation (25) + default.orders_small (1k)
+cold metrics    hits=67 misses=9
+warm metrics    hits=67 misses=9
+hit rate (warm) 0.882
+origin bytes    77766
+cold p50/p95    10.1 / 54.3 ms
+warm p50/p95    6.3 / 10.5 ms
+warm p99/p999   12.8 / 13.3 ms

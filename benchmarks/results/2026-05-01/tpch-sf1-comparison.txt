@@ -1,0 +1,9 @@
+# TPC-H SF1 — Shelf vs raw-S3 (docker-compose smoke, MinIO)
+# 6 queries × 3 reps each × 2 backends
+
+metric          shelf       raw-s3       delta
+p50 wall          410.6 ms    300.0 ms   +36.9%
+p95 wall         1303.0 ms    782.0 ms   +66.6%
+p99 wall         1574.2 ms   1233.8 ms   +27.6%
+shelf hit_rate  0.863
+shelf orig B    615,631,910

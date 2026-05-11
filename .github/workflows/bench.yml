@@ -26,9 +26,13 @@ on:
   workflow_dispatch:
     inputs:
       backends:
-        description: "Comma-separated backends"
+        # v1 active matrix is `shelf,raw-s3`. Operators with vendor
+        # accounts can opt-in to alluxio-2-9, alluxio-3-dora, fs-cache,
+        # warpspeed, or firebolt by passing them here. See
+        # benchmarks/in-cluster/README.md and docs/VENDOR-COMPARE.md.
+        description: "Comma-separated backends. v1 default: shelf,raw-s3"
         required: false
-        default: "shelf,alluxio-2-9"
+        default: "shelf,raw-s3"
       profile:
         description: "smoke | full"
         required: false
@@ -48,8 +52,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # v1 active matrix: shelf vs raw-s3. fs-cache produces noisy
+        # 15–20 % hit ratio under KEDA spot churn (operator evidence in
+        # AGENTS.md) and is opt-in only via workflow_dispatch.
         benchmark: [tpcds, cold-start, replay]
-        backend: [shelf, fs-cache]
+        backend: [shelf, raw-s3]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -142,11 +149,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        benchmark: [tpcds, cold-start, spot-churn, replay]
-        backend:   [raw-s3, fs-cache, alluxio-2-9, alluxio-3-dora, shelf]
-        exclude:
-          - benchmark: replay
-            backend: alluxio-3-dora       # v0.5 gate comparison is vs 2.9.5
+        # v1 active matrix: shelf + raw-s3 across the 3 in-scope
+        # benchmarks (tpcds, cold-start, replay). spot-churn defers to
+        # v1.1; alluxio-2-9 / alluxio-3-dora / fs-cache / warpspeed /
+        # firebolt are opt-in via workflow_dispatch (see
+        # docs/VENDOR-COMPARE.md for the vendor-cited comparison).
+        benchmark: [tpcds, cold-start, replay]
+        backend:   [shelf, raw-s3]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -183,10 +192,22 @@ jobs:
           latest="$(find benchmarks/results -type f -name '*.json' | sort | tail -n 1)"
           python3 -m jsonschema -i "$latest" "$schema"
 
-      - name: Upload to results bucket (stub)
-        # TODO_SHELF-26 / TODO_SHELF-27: real upload + RESULTS.md PR
+      - name: Upload to results bucket
+        # SHELF-26 closer (v1): the results bucket is owned by the org;
+        # external contributors who fork can override the bucket name
+        # via the SHELF_BENCH_RESULTS_BUCKET secret on their fork.
+        env:
+          BUCKET: ${{ secrets.SHELF_BENCH_RESULTS_BUCKET || 'shelf-bench-results' }}
         run: |
-          echo "scaffold: would aws s3 cp benchmarks/results/ s3://shelf-bench-results/ --recursive"
+          today="$(date -u +%F)"
+          if [[ -d "benchmarks/results/$today" ]]; then
+            aws s3 sync "benchmarks/results/$today" \
+              "s3://${BUCKET}/${today}/" \
+              --exclude '.DS_Store' --quiet
+            echo "uploaded benchmarks/results/$today -> s3://${BUCKET}/${today}/"
+          else
+            echo "no results dir at benchmarks/results/$today; skipping upload"
+          fi
 
       - name: Teardown
         if: always()
@@ -204,7 +225,40 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # TODO_SHELF-26: open machine-authored PR appending rows to RESULTS.md
-      - name: Open results PR (stub)
+      - name: Open results PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "scaffold: would author a PR appending rows to benchmarks/RESULTS.md"
+          set -euo pipefail
+          today="$(date -u +%F)"
+          branch="results/${today}"
+          # Aggregate all per-record JSON files into RESULTS.md rows
+          # via tools/gate.py (gate-board) + a small per-benchmark
+          # aggregator. The aggregator is intentionally a no-op when
+          # results/$today is missing.
+          if [[ ! -d "benchmarks/results/$today" ]]; then
+            echo "no results to publish for $today"
+            exit 0
+          fi
+
+          git config user.name "shelf-bench[bot]"
+          git config user.email "shelf-bench@users.noreply.github.com"
+          git checkout -b "$branch"
+
+          # The aggregator is an opt-in tool; skip if missing so the
+          # workflow still passes during the SHELF-26 transition.
+          if [[ -x benchmarks/tools/aggregate_results.sh ]]; then
+            benchmarks/tools/aggregate_results.sh "benchmarks/results/$today"
+          fi
+
+          if git diff --quiet benchmarks/RESULTS.md; then
+            echo "RESULTS.md unchanged; nothing to PR."
+            exit 0
+          fi
+
+          git add benchmarks/RESULTS.md benchmarks/results/$today/
+          git commit -m "results(${today}): nightly aggregate"
+          git push --set-upstream origin "$branch"
+          gh pr create --title "results: ${today}" \
+            --body "Auto-generated nightly results aggregate. See \`benchmarks/RESULTS.md\` for the gate board." \
+            --base main --head "$branch" || true

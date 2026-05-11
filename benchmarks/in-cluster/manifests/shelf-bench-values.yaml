@@ -1,0 +1,169 @@
+# shelf-bench-values.yaml — Helm values for the in-cluster benchmark fixture.
+#
+# Layered on top of charts/shelf/values.yaml. Goals:
+#   1. Vendor-neutral defaults — any OSS user can `helm install` this on
+#      their own k8s cluster (no GitLab pull-secret, no penpencil overlays).
+#   2. Cold cache — fresh shelfd pods, no shared state with prod shelf-pool.
+#   3. Capacity engineering rule from AGENTS.md (May 1):
+#        Pod limit 40 GiB on m-family (NOT 32 GiB on c6a — OOM trap).
+#        RSS warn = 22 GiB, OOM ceiling = 24 GiB.
+#   4. Apples-to-apples versus the prod shelfd image tag — use the public
+#      OSS image so external contributors reproduce against the same bits.
+#
+# Usage:
+#   helm install shelf-bench charts/shelf \
+#     -n trino-bench \
+#     -f benchmarks/in-cluster/manifests/shelf-bench-values.yaml \
+#     --set origin.bucket=<your-bench-bucket> \
+#     --set origin.region=<your-aws-region>
+#
+# Required overrides at install time (no defaults so accidents fail fast):
+#   origin.bucket            — S3 bucket holding the TPC-DS Iceberg fixture
+#   origin.region            — AWS region of that bucket
+#   serviceAccount.annotations[eks.amazonaws.com/role-arn]
+#                            — IRSA role with s3:GetObject on the bucket
+
+replicaCount: 3
+
+image:
+  repository: ghcr.io/shelf-project/shelfd
+  pullPolicy: IfNotPresent
+  tag: "1.0.0"
+
+# Bench fixture is vendor-neutral. No GitLab pull secret on the OSS path.
+imagePullSecrets: []
+
+# IRSA — operator MUST set this annotation at `helm install` time.
+serviceAccount:
+  create: true
+  annotations: {}
+  name: shelf-bench
+
+# Sized for a fresh, cold-cache bench. RSS budget on a 40 GiB pod-limit:
+#   metadata 5 GiB + rowgroup-DRAM 11 GiB + LODC 1 GiB + origin-pool ~4 GiB
+#   + ~3 GiB Rust runtime ≈ 24 GiB worst case → safely under the 40 GiB cap.
+resources:
+  requests:
+    cpu: "4"
+    memory: "32Gi"
+  limits:
+    cpu: "8"
+    memory: "40Gi"
+
+# Default to ebs-gp3-wffc (most clusters have it). Operators on bare-metal
+# or local-NVMe nodes should override storage.storageClassName.
+storage:
+  storageClassName: ebs-gp3-wffc
+  size: 240Gi
+
+# Two-pool layout per ADR-0008. Sizes match prod (rep-1/rep-2) so bench
+# numbers are comparable to the operator-evidence sidebar in COMPARISON.md.
+cache:
+  pools:
+    metadata:
+      tier: dram
+      policy: FrozenHot
+      sizeBytes: 5368709120     # 5 GiB
+    rowgroup:
+      tier: hybrid
+      evictionPolicy: lru       # see values.yaml comment on SHELF-E1b
+      policy: LRU
+      dramSizeBytes: 11811160064   # 11 GiB
+      nvmeSizeBytes: 257698037760  # 240 GiB; matches storage.size
+      diskCache:
+        flushers: 8
+        bufferPoolSizeBytes: 402653184       # 384 MiB
+        submitQueueSizeThresholdBytes: 1073741824  # 1 GiB
+  admission:
+    sizeThresholdMiB: 1024
+    pinnedBypass: true
+    model:
+      enabled: false
+  pinList:
+    s3Uri: ""                  # bench has no pre-warm; cold-start is the point
+
+origin:
+  bucket: ""                   # MUST be set at `helm install` time
+  region: ""                   # MUST be set at `helm install` time
+  pool:
+    maxConnections: 128
+    idleTimeoutSeconds: 60
+
+# Trino integration — the bench Trino runs in the same namespace.
+trino:
+  namespace: trino-bench
+  coordinatorPodLabels:
+    app.kubernetes.io/name: trino
+    app.kubernetes.io/component: coordinator
+  workerPodLabels:
+    app.kubernetes.io/name: trino
+    app.kubernetes.io/component: worker
+
+networkPolicy:
+  enabled: true
+  extraIngressFrom:
+    # Allow the bench harness driver pod to hit /admin and /metrics.
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: shelf-bench-driver
+  extraEgress: []
+
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  additionalLabels:
+    release: kube-prometheus-stack
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+# Bench fixture is ephemeral; do NOT hold a high-priority class slot on
+# the cluster after teardown. priorityClass.create=false leaves the
+# cluster's PriorityClasses untouched (the chart still sets a name; it's
+# operator-side responsibility to provision it if needed).
+priorityClass:
+  create: false
+priorityClassName: ""
+
+# Keep bench pods off any prod-dedicated NodePool.
+nodeSelector: {}
+tolerations: []
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: shelf
+
+probes:
+  startup:
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 60        # 5 min total grace for Foyer NVMe init
+  liveness:
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 6
+
+logging:
+  level: info
+  format: json
+
+# Grafana dashboards / alerts: opt-out by default for bench. The fixture
+# lifecycle is short and the dashboard ConfigMaps would orphan after
+# teardown.
+grafana:
+  enabled: false

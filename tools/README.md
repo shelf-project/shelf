@@ -12,6 +12,7 @@ prewarm) and **3b** (byte-diff smoke harness) of
 | `gen_replay_list.py` | 3a | Build a replay list of S3 paths from the last N days of `cdp.trino_logs.trino_queries` |
 | `replay_pinlist.py`  | 3a | Issue HTTP GETs against the shelf S3 shim to fault every entry into the cache |
 | `smoke_harness.py`   | 3b | Run 5 canonical queries against two catalogs and byte-diff the results |
+| `shelf_daily_report.py` | ops | Daily Prom/Mimir snapshot via Grafana API + traffic-light report vs `tools/reports/success_metrics.json` |
 | `gen_pin_list.py` (existing) | n/a | Strict-pin mode — emits sha256 cache keys for shelfd `PinListLoader` (different output schema from the new replay list; do not conflate) |
 
 > Why two `gen_*` tools? `gen_pin_list.py` produces shelfd's strict pin

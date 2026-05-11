@@ -262,6 +262,19 @@ pub static S3_SHIM_RESPONSE_BYTES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("register s3_shim_response_bytes_total")
 });
 
+/// SHELF daily-ops — segment times between milestones in S3 shim
+/// `GetObject` (range parse → HEAD meta → fetch body → assemble).
+pub static S3_SHIM_GET_PHASE_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec_with_registry!(
+        "shelf_s3_shim_get_phase_seconds",
+        "Wall-clock duration of each phase in S3 shim GetObject (success path segments).",
+        &["phase"],
+        prometheus::exponential_buckets(0.000_1, 2.0, 20).expect("shim phase buckets"),
+        REGISTRY
+    )
+    .expect("register shelf_s3_shim_get_phase_seconds")
+});
+
 /// Track E8 — admission-policy outcomes. `decision` is one of
 /// `admit`, `reject_size`, `reject_model`, `reject_other`. `pool`
 /// matches the cache pool label used elsewhere.
@@ -729,6 +742,7 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_origin_request_bytes_total",
     "shelf_origin_request_seconds",
     "shelf_s3_shim_response_bytes_total",
+    "shelf_s3_shim_get_phase_seconds",
     // Track E8 — admission + eviction + single-flight telemetry.
     "shelf_admissions_total",
     "shelf_evictions_total",
@@ -837,6 +851,7 @@ mod tests {
             CONDITIONAL_MODIFIED_TOTAL.desc(),
             CONDITIONAL_SKIPPED_TOTAL.desc(),
             CONDITIONAL_ERROR_TOTAL.desc(),
+            S3_SHIM_GET_PHASE_SECONDS.desc(),
         ] {
             for d in collector {
                 names.insert(d.fq_name.clone());
@@ -963,6 +978,9 @@ mod tests {
         CONDITIONAL_ERROR_TOTAL
             .with_label_values(&["metadata"])
             .inc_by(0);
+        S3_SHIM_GET_PHASE_SECONDS
+            .with_label_values(&["fetch_body"])
+            .observe(0.0);
 
         let families = REGISTRY.gather();
         let names: HashSet<String> = families.iter().map(|f| f.get_name().to_owned()).collect();

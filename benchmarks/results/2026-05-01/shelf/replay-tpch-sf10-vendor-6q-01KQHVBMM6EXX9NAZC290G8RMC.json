@@ -1,0 +1,54 @@
+{
+  "run_id": "01KQHVBMM6EXX9NAZC290G8RMC",
+  "timestamp": "2026-05-01T13:23:57Z",
+  "commit_sha": "0000000000000000000000000000000000000000",
+  "release_tag": "v1.0.0-tpch-sf10-vendor-6q",
+  "benchmark": "replay",
+  "backend": "shelf",
+  "config": {
+    "config_hash": "sha256:d99428e8cb0a46240822b53ffe72c066bbfce16f5eba81172ac665478cbc15c3",
+    "trino_image": "trinodb/trino:480",
+    "backend_image": "ghcr.io/shelf-project/shelfd:1.0.0 (prod shelf-pool)",
+    "plugin_jar_sha256": null
+  },
+  "cluster_shape": {
+    "region": "ap-south-1",
+    "k8s_version": "1.30",
+    "trino_instance_type": "data-platform-cluster (32cpu/128GB)",
+    "trino_worker_count": 4,
+    "shelf_instance_type": "alluxio-pool-m5a.4xlarge",
+    "shelf_node_count": 6,
+    "driver_instance_type": "n/a",
+    "scale_factor": null,
+    "partial": true
+  },
+  "trace": {
+    "source_table": "cdp.trino_logs.trino_queries",
+    "snapshot_id": "tpch-sf10-vendor-6q-2026-05-01",
+    "from": "2026-05-01T13:23:57Z",
+    "to": "2026-05-01T13:23:57Z",
+    "replica": "rep-2",
+    "query_count": 18,
+    "speed": "1x"
+  },
+  "samples": [],
+  "summary": {
+    "latency_ns_p50": 2625934187,
+    "latency_ns_p95": 3740411193,
+    "latency_ns_p99": 4190108538,
+    "latency_ns_p999": 4291290441,
+    "hit_rate": 0.0,
+    "bytes_read": 0,
+    "bytes_admitted": 0,
+    "dollars_per_query": 0.0
+  },
+  "gate": {
+    "hit_rate_7d_cumulative": 0.0,
+    "gold_dbt_ok_rate": 1.0,
+    "latency_ns_p95_vs_alluxio": null,
+    "shelf_caused_pages": 0,
+    "oncall_surface_ratio": null,
+    "verdict": "n/a",
+    "failed_metrics": []
+  }
+}

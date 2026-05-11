@@ -48,6 +48,11 @@ row into the table above in the same PR that wires the emission.
 
 ## Notes
 
+- **`shelf_s3_shim_get_phase_seconds{phase}`** — shim `GetObject` segment
+  durations (`range_parse`, `head_meta`, `fetch_body`, `assemble_response`).
+- **`shelf_admissions_total{decision="reject_frequency"}`** — rowgroup insert
+  refused by frequency-sketch admission when `admission.policy=frequency`.
+
 - All `*_seconds` histograms use the exponential buckets
   `prometheus::exponential_buckets(0.0005, 2.0, 16)` — 500 µs → ~33 s.
 - `pool` label values are `{metadata, rowgroup}` (ADR-0008).

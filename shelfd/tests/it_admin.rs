@@ -12,7 +12,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use shelfd::{
-    admission::SizeThresholdPolicy,
     config::{AdmissionConfig, MetadataPoolConfig, PoolsConfig, RowGroupPoolConfig},
     http::{self, ServerState},
     membership::DrainSignal,
@@ -90,10 +89,12 @@ async fn spawn_admin_server() -> AdminHarness {
     );
 
     let router = Arc::new(ShelfRouter::new());
-    let admission = Arc::new(SizeThresholdPolicy::from_config(&AdmissionConfig {
+    let admission = shelfd::admission::build_admission_policy(&AdmissionConfig {
         size_threshold_bytes: 1 << 30,
         pinned_bypass: true,
-    }));
+        policy: shelfd::config::AdmissionPolicyKind::SizeThreshold,
+        frequency_min_hits: 2,
+    });
     let drain = DrainSignal::new();
     let state = Arc::new(
         ServerState::new(store.clone(), origin, router.clone(), admission, metrics)

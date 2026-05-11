@@ -7,12 +7,12 @@ placeholders until Phase 0 benchmarks E3 / E10 land.
 ## Prerequisites
 
 - Kubernetes ≥ 1.27 (we rely on `policy/v1` PDB and the headless
-  service membership flow in ADR-0001).
+service membership flow in ADR-0001).
 - `kube-prometheus-stack` installed in the cluster (for the
-  `ServiceMonitor` CRD). Disable with `serviceMonitor.enabled=false`
-  if not applicable.
+`ServiceMonitor` CRD). Disable with `serviceMonitor.enabled=false`
+if not applicable.
 - `local-nvme` StorageClass on rep-2 nodes, or fall back to
-  `ebs-gp3-wffc` in the staging overlay.
+`ebs-gp3-wffc` in the staging overlay.
 - IRSA-ready IAM role for S3 read-only access to the origin bucket.
 
 ## Install
@@ -60,6 +60,10 @@ helm lint charts/shelf -f charts/shelf/values-prod.yaml
 helm lint charts/shelf -f charts/shelf/ci/lint-values.yaml --strict
 ```
 
+Latency-first sizing (larger NVMe for the rowgroup tier) is linted in CI
+as a merge on top of `ci/lint-values.yaml`; see
+`charts/shelf/examples/values-latency-priority.yaml`.
+
 CI runs the `--strict` form against `ci/lint-values.yaml` on every PR.
 
 ## Configuration quick-reference
@@ -67,17 +71,19 @@ CI runs the `--strict` form against `ci/lint-values.yaml` on every PR.
 The full matrix of values lives in `values.yaml` with inline citations.
 Highlights:
 
-| Key                                    | Default              | Citation             |
-| -------------------------------------- | -------------------- | -------------------- |
-| `replicaCount`                         | 3                    | plan §3 Phase 1      |
-| `service.dataPort`                     | 9090                 | ADR-0004 HTTP/2 only |
-| `cache.pools.metadata.sizeBytes`       | 5 GiB                | ADR-0008             |
-| `cache.pools.rowgroup.dramSizeBytes`   | 56 GiB               | ADR-0008             |
-| `cache.pools.rowgroup.nvmeSizeBytes`   | 500 GiB              | ADR-0008             |
-| `cache.admission.sizeThresholdMiB`     | 1024                 | ADR-0003             |
-| `cache.admission.model.enabled`        | false                | ADR-0003             |
-| `storage.storageClassName`             | local-nvme           | plan §4 SHELF-18     |
-| `podDisruptionBudget.maxUnavailable`   | 1                    | agents/8-operator    |
+
+| Key                                  | Default    | Citation               |
+| ------------------------------------ | ---------- | ---------------------- |
+| `replicaCount`                       | 3          | plan §3 Phase 1        |
+| `service.dataPort`                   | 9090       | ADR-0004 HTTP/2 only   |
+| `cache.pools.metadata.sizeBytes`     | 5 GiB      | ADR-0008               |
+| `cache.pools.rowgroup.dramSizeBytes` | 11 GiB     | values.yaml            |
+| `cache.pools.rowgroup.nvmeSizeBytes` | 240 GiB    | matches `storage.size` |
+| `cache.admission.sizeThresholdMiB`   | 1024       | ADR-0003               |
+| `cache.admission.model.enabled`      | false      | ADR-0003               |
+| `storage.storageClassName`           | local-nvme | plan §4 SHELF-18       |
+| `podDisruptionBudget.maxUnavailable` | 1          | agents/8-operator      |
+
 
 ## Runbooks + dashboards
 
@@ -91,9 +97,10 @@ Highlights:
 ## Intentional omissions
 
 - **No Raft sidecar, port, or ConfigMap.** ADR-0001 removed embedded
-  Raft; membership is the headless service, pin list is an S3 JSON.
+Raft; membership is the headless service, pin list is an S3 JSON.
 - **No Arrow Flight port.** ADR-0004: HTTP/2 only in v1.
 - **No ONNX inference container.** ADR-0003: size-threshold admission
-  in v1; `cache.admission.model.enabled=false`.
+in v1; `cache.admission.model.enabled=false`.
 - **No `shelf-result-cache` Deployment.** ADR-0006 punts result caching
-  to the existing Redis-Gateway plugin.
+to the existing Redis-Gateway plugin.
+

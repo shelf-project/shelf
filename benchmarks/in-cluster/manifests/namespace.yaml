@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trino-bench
+  labels:
+    app.kubernetes.io/part-of: shelf-bench
+    shelf.io/scope: ephemeral
+  annotations:
+    shelf.io/description: |
+      Ephemeral Shelf benchmark fixture: parallel Trino + fresh shelfd, two
+      catalogs (cdp = raw S3 baseline, cdp_shelf = Shelf-fronted). Apply
+      with benchmarks/in-cluster/up.sh; tear down with down.sh. Zero touch
+      to prod trino-db / alluxio namespaces.

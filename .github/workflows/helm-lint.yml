@@ -59,6 +59,19 @@ jobs:
             --values charts/shelf/ci/lint-values.yaml \
             --strict
 
+      - name: Lint chart with example overlays (strict, merged on CI values)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in charts/shelf/examples/*.yaml; do
+            echo "::group::helm lint ci+${f}"
+            helm lint charts/shelf \
+              --values charts/shelf/ci/lint-values.yaml \
+              --values "${f}" \
+              --strict
+            echo "::endgroup::"
+          done
+
       # Env overlays are linted non-strict: prod values legitimately
       # require IRSA annotations that dev/staging omit, and --strict
       # would flag those as warnings-as-errors.

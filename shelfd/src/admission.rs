@@ -3,10 +3,13 @@
 //! Ticket ownership:
 //! - SHELF-25 — size-threshold admission per ADR-0003. Refuse inserts
 //!   for objects > 1 GiB unless the key is in the pin list.
-//! - SHELF-24 — `PinList` lookup (reloaded from S3 on SIGHUP / 15 min).
-//! - Phase 4 (SHELF-4x) — optional LightGBM escape hatch. Only
-//!   shipped if it adds ≥ 5 pp hit rate over size-threshold on the
-//!   `trino_logs` replay harness (SHELF-26).
+//! - SHELF-24 — Pinned keys bypass admission via
+//!   [`crate::store::FoyerStore::is_pinned`] (fed by [`crate::pinlist`]
+//!   S3 reload on boot, timer, SIGHUP, and `/admin/reload`).
+//! - Daily ops loop — frequency-sketch admission for the rowgroup pool
+//!   (Count–Min style) so one-shot cold scans do not flood the LODC
+//!   queue; keys must reach `frequency_min_hits` observations before
+//!   NVMe insert (metadata pool skips frequency gate).
 //!
 //! References:
 //! - `agents/out/adr/0003-size-threshold-admission-over-onnx-mlp.md`
@@ -14,6 +17,11 @@
 //!   kill-switch metric this policy directly affects (hit rate).
 
 use std::fmt::Debug;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
+use crate::config::{AdmissionConfig, AdmissionPolicyKind};
+use crate::store::Key;
 
 /// Decision returned by the policy.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -24,23 +32,38 @@ pub enum AdmissionDecision {
     Reject,
 }
 
+/// Sub-reason when [`AdmissionDecision::Reject`] — drives
+/// `shelf_admissions_total{decision="reject_*"}` in `store.rs`.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum AdmissionRejectKind {
+    ObjectTooLarge,
+    FrequencyBelowThreshold,
+    Other,
+}
+
 /// Context the policy inspects before admitting an object.
 #[derive(Debug, Clone)]
 pub struct AdmissionContext<'a> {
     pub pool: crate::store::Pool,
     pub key: &'a crate::store::Key,
     pub size_bytes: u64,
-    /// Whether the key is in the pin list (see `PinList::contains`).
+    /// Whether the key is in the pin set (see `FoyerStore::is_pinned`).
     pub pinned: bool,
 }
 
 /// The admission policy interface.
 ///
-/// Kept sync + lock-free so the HTTP hot path can call it without
-/// awaiting. The pin list is held behind `arc-swap` and refreshed
-/// off-path (SHELF-24).
+/// Kept sync so the HTTP hot path can call it without awaiting.
 pub trait AdmissionPolicy: Send + Sync + Debug + 'static {
-    fn decide(&self, ctx: &AdmissionContext<'_>) -> AdmissionDecision;
+    fn decide(&self, ctx: &AdmissionContext<'_>) -> (AdmissionDecision, AdmissionRejectKind);
+}
+
+/// Build the production policy from operator config.
+pub fn build_admission_policy(cfg: &AdmissionConfig) -> Arc<dyn AdmissionPolicy> {
+    match cfg.policy {
+        AdmissionPolicyKind::SizeThreshold => Arc::new(SizeThresholdPolicy::from_config(cfg)),
+        AdmissionPolicyKind::Frequency => Arc::new(CompositeAdmissionPolicy::from_config(cfg)),
+    }
 }
 
 /// Size-threshold policy: admit everything ≤ `size_threshold_bytes`,
@@ -52,7 +75,7 @@ pub struct SizeThresholdPolicy {
 }
 
 impl SizeThresholdPolicy {
-    pub fn from_config(cfg: &crate::config::AdmissionConfig) -> Self {
+    pub fn from_config(cfg: &AdmissionConfig) -> Self {
         Self {
             size_threshold_bytes: cfg.size_threshold_bytes,
             pinned_bypass: cfg.pinned_bypass,
@@ -61,33 +84,103 @@ impl SizeThresholdPolicy {
 }
 
 impl AdmissionPolicy for SizeThresholdPolicy {
-    fn decide(&self, ctx: &AdmissionContext<'_>) -> AdmissionDecision {
+    fn decide(&self, ctx: &AdmissionContext<'_>) -> (AdmissionDecision, AdmissionRejectKind) {
         if ctx.size_bytes > self.size_threshold_bytes {
             if self.pinned_bypass && ctx.pinned {
-                AdmissionDecision::Admit
+                (AdmissionDecision::Admit, AdmissionRejectKind::Other)
             } else {
-                AdmissionDecision::Reject
+                (AdmissionDecision::Reject, AdmissionRejectKind::ObjectTooLarge)
             }
         } else {
-            AdmissionDecision::Admit
+            (AdmissionDecision::Admit, AdmissionRejectKind::Other)
         }
     }
 }
 
-/// Pin list — reloaded from S3 (SHELF-24). Phase-0 exposes only the
-/// lookup surface with an empty set; the S3-backed loader lands with
-/// SHELF-24.
-#[derive(Debug, Default)]
-pub struct PinList {
-    _private: (),
+/// Size threshold, then optional frequency sketch for `rowgroup` pool.
+#[derive(Debug)]
+pub struct CompositeAdmissionPolicy {
+    size: SizeThresholdPolicy,
+    frequency: FrequencySketchAdmission,
 }
 
-impl PinList {
-    /// Whether `key` belongs to a pinned table + partition combination.
-    /// Phase-0 always returns `false` (SHELF-24 will swap the body for
-    /// a real lookup).
-    pub fn contains(&self, _key: &crate::store::Key) -> bool {
-        false
+impl CompositeAdmissionPolicy {
+    pub fn from_config(cfg: &AdmissionConfig) -> Self {
+        Self {
+            size: SizeThresholdPolicy::from_config(cfg),
+            frequency: FrequencySketchAdmission::new(cfg.frequency_min_hits.max(1)),
+        }
+    }
+}
+
+impl AdmissionPolicy for CompositeAdmissionPolicy {
+    fn decide(&self, ctx: &AdmissionContext<'_>) -> (AdmissionDecision, AdmissionRejectKind) {
+        let (d, k) = self.size.decide(ctx);
+        if d == AdmissionDecision::Reject {
+            return (d, k);
+        }
+        if ctx.pinned || ctx.pool == crate::store::Pool::Metadata {
+            return (AdmissionDecision::Admit, AdmissionRejectKind::Other);
+        }
+        self.frequency.decide_rowgroup(ctx)
+    }
+}
+
+/// Count–Min sketch (4 × 2048 × u32) — frequency estimate for cache keys.
+///
+/// Implements the same *frequency-estimation* role TinyLFU admission needs;
+/// avoids coupling to the `tinyufo` crate’s full cache API (pingora TinyUFO
+/// is an integrated policy + storage structure, not a drop-in sketch-only dep).
+/// collisions, which is safe for admission (only admits *more* eagerly).
+#[derive(Debug)]
+pub struct FrequencySketchAdmission {
+    min_hits: u32,
+    /// Row-major: index `row * COLS + col`.
+    cells: Vec<AtomicU32>,
+}
+
+const CMS_ROWS: usize = 4;
+const CMS_COLS: usize = 2048;
+
+impl FrequencySketchAdmission {
+    pub fn new(min_hits: u32) -> Self {
+        let len = CMS_ROWS * CMS_COLS;
+        let mut cells = Vec::with_capacity(len);
+        for _ in 0..len {
+            cells.push(AtomicU32::new(0));
+        }
+        Self { min_hits, cells }
+    }
+
+    fn row_hash(key: &Key, row: usize) -> usize {
+        let k = key.0;
+        let mut h: u64 = u64::from_le_bytes(k[0..8].try_into().unwrap_or([0u8; 8]));
+        h ^= (row as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        h = h.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        (h as usize) % CMS_COLS
+    }
+
+    fn increment_and_estimate(&self, key: &Key) -> u32 {
+        let mut min_seen = u32::MAX;
+        for row in 0..CMS_ROWS {
+            let col = Self::row_hash(key, row);
+            let idx = row * CMS_COLS + col;
+            let v = self.cells[idx].fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+            min_seen = min_seen.min(v);
+        }
+        min_seen
+    }
+
+    fn decide_rowgroup(
+        &self,
+        ctx: &AdmissionContext<'_>,
+    ) -> (AdmissionDecision, AdmissionRejectKind) {
+        let est = self.increment_and_estimate(ctx.key);
+        if est >= self.min_hits {
+            (AdmissionDecision::Admit, AdmissionRejectKind::Other)
+        } else {
+            (AdmissionDecision::Reject, AdmissionRejectKind::FrequencyBelowThreshold)
+        }
     }
 }
 
@@ -113,8 +206,14 @@ mod tests {
             size_threshold_bytes: 1024,
             pinned_bypass: true,
         };
-        assert_eq!(policy.decide(&ctx(512, false)), AdmissionDecision::Admit);
-        assert_eq!(policy.decide(&ctx(1024, false)), AdmissionDecision::Admit);
+        assert_eq!(
+            policy.decide(&ctx(512, false)),
+            (AdmissionDecision::Admit, AdmissionRejectKind::Other)
+        );
+        assert_eq!(
+            policy.decide(&ctx(1024, false)),
+            (AdmissionDecision::Admit, AdmissionRejectKind::Other)
+        );
     }
 
     #[test]
@@ -123,7 +222,13 @@ mod tests {
             size_threshold_bytes: 1024,
             pinned_bypass: true,
         };
-        assert_eq!(policy.decide(&ctx(1025, false)), AdmissionDecision::Reject);
+        assert_eq!(
+            policy.decide(&ctx(1025, false)),
+            (
+                AdmissionDecision::Reject,
+                AdmissionRejectKind::ObjectTooLarge
+            )
+        );
     }
 
     #[test]
@@ -132,7 +237,10 @@ mod tests {
             size_threshold_bytes: 1024,
             pinned_bypass: true,
         };
-        assert_eq!(policy.decide(&ctx(1 << 30, true)), AdmissionDecision::Admit);
+        assert_eq!(
+            policy.decide(&ctx(1 << 30, true)),
+            (AdmissionDecision::Admit, AdmissionRejectKind::Other)
+        );
     }
 
     #[test]
@@ -143,18 +251,62 @@ mod tests {
         };
         assert_eq!(
             policy.decide(&ctx(1 << 30, true)),
-            AdmissionDecision::Reject
+            (
+                AdmissionDecision::Reject,
+                AdmissionRejectKind::ObjectTooLarge
+            )
+        );
+    }
+
+    #[test]
+    fn frequency_rejects_first_admit_second_same_key() {
+        let policy = CompositeAdmissionPolicy {
+            size: SizeThresholdPolicy {
+                size_threshold_bytes: 1 << 30,
+                pinned_bypass: true,
+            },
+            frequency: FrequencySketchAdmission::new(2),
+        };
+        assert_eq!(
+            policy.decide(&ctx(100, false)),
+            (
+                AdmissionDecision::Reject,
+                AdmissionRejectKind::FrequencyBelowThreshold
+            )
+        );
+        assert_eq!(
+            policy.decide(&ctx(100, false)),
+            (AdmissionDecision::Admit, AdmissionRejectKind::Other)
+        );
+    }
+
+    #[test]
+    fn frequency_skips_metadata_pool() {
+        static KEY: once_cell::sync::Lazy<crate::store::Key> =
+            once_cell::sync::Lazy::new(|| key_from_tuple(b"etag2", 0, 1, 0).unwrap());
+        let ctx_meta = AdmissionContext {
+            pool: Pool::Metadata,
+            key: &KEY,
+            size_bytes: 100,
+            pinned: false,
+        };
+        let policy = CompositeAdmissionPolicy {
+            size: SizeThresholdPolicy {
+                size_threshold_bytes: 1 << 30,
+                pinned_bypass: true,
+            },
+            frequency: FrequencySketchAdmission::new(5),
+        };
+        assert_eq!(
+            policy.decide(&ctx_meta),
+            (AdmissionDecision::Admit, AdmissionRejectKind::Other)
         );
     }
 
     /// SHELF-24 regression: when the key is in the store's pin-set,
     /// `FoyerStore::get_or_fetch` must populate `ctx.pinned = true`
     /// so the size-threshold policy admits a payload that would
-    /// otherwise be rejected. The admission module never talks to
-    /// `FoyerStore` directly; the flag flows via `AdmissionContext`.
-    /// This test pins that wiring end-to-end so a future refactor
-    /// that forgets to plumb `is_pinned` fails here rather than
-    /// silently caching nothing.
+    /// otherwise be rejected.
     #[tokio::test]
     async fn pinned_keys_bypass_size_threshold() {
         use crate::config::{MetadataPoolConfig, PoolsConfig, RowGroupPoolConfig};

@@ -119,9 +119,11 @@ H_dram          = 143 GiB × 0.10            = 14 GiB   (per pod)
 H_NVMe          = 143 GiB × 1.30            = 186 GiB  (per pod)
 ```
 
-Chart default is `cache.pools.rowgroup.nvmeSizeBytes = 500 GiB` — that
-leaves ~63% headroom at the v0.5 working-set estimate, which is
-deliberately generous because the estimate is still soft.
+The stock chart default today is `nvmeSizeBytes` = 240 GiB (see
+`charts/shelf/values.yaml`) — tighter than this v0.5 estimate. Treat the
+numeric example above as **math for the model**; pick real `W` from
+your trace replay, then either grow the PVC (latency / GET-$) or
+accept higher churn (cost-down on EBS).
 
 ```
 mem_req         = 5 + 14 + 8                = 27 GiB   (per pod)
@@ -184,13 +186,13 @@ H_NVMe          = 345 GiB × 1.30            = 448 GiB  (per pod)
 Chart defaults (`values-prod.yaml`):
 
 - `storage.size = 500 GiB` per pod → **~11 %** NVMe headroom vs. the
-  448 GiB target. That is tighter than the v0.5 rep-2 case (63 %
-  headroom) and sits below the 30 % `headroom_frac` the formula
-  assumed. **Action**: either bump `storage.size` to 640 GiB (keeps
-  30 % headroom) *or* accept tighter headroom and commit to daily
-  NVMe-utilisation monitoring for the first 30 days. Prefer the
-  former; the StorageClass is `local-nvme` and the larger ask is
-  almost never node-bound at the Karpenter pool.
+448 GiB target. That is tighter than the v0.5 rep-2 case (63 %
+headroom) and sits below the 30 % `headroom_frac` the formula
+assumed. **Action**: either bump `storage.size` to 640 GiB (keeps
+30 % headroom) *or* accept tighter headroom and commit to daily
+NVMe-utilisation monitoring for the first 30 days. Prefer the
+former; the StorageClass is `local-nvme` and the larger ask is
+almost never node-bound at the Karpenter pool.
 
 ```
 mem_req         = 5 + 35 + 8                = 48 GiB   (per pod)
@@ -232,13 +234,13 @@ per-Trino-replica. Keeping the pod count decoupled from the Trino
 replica count lets us:
 
 - Scale shelfd independently when the working set grows past the `W`
-  here (§5 scale triggers).
+here (§5 scale triggers).
 - Survive a single-pod loss without coupling to a single Trino
-  replica being "in charge" of a pod.
+replica being "in charge" of a pod.
 - Match anti-affinity to AZs rather than to Trino replicas —
-  `values-prod.yaml` requires hostname anti-affinity and prefers zone
-  anti-affinity; with 5 pods and typical 3-AZ spreads that lands
-  ≥ 2 per zone.
+`values-prod.yaml` requires hostname anti-affinity and prefers zone
+anti-affinity; with 5 pods and typical 3-AZ spreads that lands
+≥ 2 per zone.
 
 ---
 
@@ -249,9 +251,9 @@ replica count lets us:
 Trigger if any of the following holds for > 24 h:
 
 - `max(nvme_bytes_used / nvme_bytes_capacity) > 0.80` on majority of
-  pods.
+pods.
 - `p95(shelf_read_latency_seconds{pool="rowgroup"}) > 50 ms` and the
-  origin S3 is healthy (i.e. the latency is NOT an S3 storm).
+origin S3 is healthy (i.e. the latency is NOT an S3 storm).
 - Working set estimate grows > 1.5× the `W` used in the latest sizing.
 
 Action: `scale-up.md`. Expected rebalance cost: `1/(N+1)` of keys
@@ -263,7 +265,7 @@ Trigger only if horizontal scale-up is not possible (node-pool
 constraint):
 
 - DRAM pool saturating at `H_dram ≈ H_dram_limit` for > 7 days;
-  dashboards evict under ad-hoc scan pressure.
+dashboards evict under ad-hoc scan pressure.
 - CPU limit hit (throttling) sustained > 50% of nodes.
 
 Action: bump `resources.requests` + `resources.limits` via Helm
@@ -274,17 +276,39 @@ overlay. This requires a pod-restart-per-pod — use the PDB.
 Trigger if:
 
 - `max(nvme_bytes_used / nvme_bytes_capacity) < 0.50` on all pods for
-  14 days AND
+14 days AND
 - Hit rate holds at ≥ 71% in that window.
 
 Action: `scale-down.md`.
+
+### 5.4 Latency vs net TCO — growing or shrinking the NVMe tier
+
+Use this when the rowgroup pool is **capacity-bound** (NVMe utilisation
+near the configured cap for sustained windows) *and* either (a) byte
+hit ratio is depressed versus historical baseline, or (b) S3 **GET**
+variable spend is high — larger NVMe often trades **higher EBS
+byte-months** for **lower request-variable S3** and better read tail
+latency. Reconcile with **GET-isolated** cost lines, not aggregate S3
+storage charges (those grow with data volume independently of cache).
+
+
+| Signal                                                            | Interpretation                                             | Typical lever                                                                                                           |
+| ----------------------------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `shelf_disk_bytes_used` ≈ cap, hit ratio low, LODC drops climbing | Working set > NVMe budget or admit faster than disk drains | Grow NVMe **or** tighten size-threshold / transient opt-out / SHELF-29 limiter **or** scale out pods (HRW spreads keys) |
+| NVMe < 50% util, hit ratio healthy 14d+                           | Headroom for cost take-back                                | Shrink PVC on **new** pools only (K8s cannot shrink in-place) or scale down pod count per §5.3                          |
+| OOM / RSS near node allocatable                                   | Memory pressure, not “disk full”                           | Follow `values.yaml` RSS budget comments; fix node family / pod limit before adding NVMe                                |
+
+
+Reference Helm merge example (500Gi larger rowgroup tier):
+`charts/shelf/examples/values-latency-priority.yaml`.
 
 ---
 
 ## 6. Pin list budget
 
 Pinned bytes per pod should stay under **20% of NVMe capacity** in the
-steady state. At 500 GiB NVMe per pod that means ≤ 100 GiB pinned.
+steady state (compute 20% from your configured `storage.size` /
+`nvmeSizeBytes`, e.g. 240Gi → ≤ 48GiB pinned per pod).
 
 If the trainer's next-cycle diff would exceed the budget, the diff is
 held back and an issue opened against the data-eng owner of the table
@@ -295,15 +319,16 @@ that tipped it over.
 ## 7. Known gaps
 
 - `R_rg` is a single number here. In reality it varies by query
-  cohort (dashboard vs ad-hoc vs dbt). Phase-4 splits this and tunes
-  admission per cohort.
+cohort (dashboard vs ad-hoc vs dbt). Phase-4 splits this and tunes
+admission per cohort.
 - `H_rate` in the steady state is 0.71 from Alluxio; Shelf's own
-  steady state may differ. The v0.5 gate window gives the first real
-  number; update this doc immediately after gate evaluation.
+steady state may differ. The v0.5 gate window gives the first real
+number; update this doc immediately after gate evaluation.
 - Multi-region egress costs are out of scope for v1 (single-region
-  deployment). `regional-outage.md` covers the operational story.
+deployment). `regional-outage.md` covers the operational story.
 - The §4 extrapolation assumes per-replica workloads are roughly equal
-  in volume. They almost certainly are not — rep-2 is already the
-  canary target because it has the cleanest workload signal.
-  Per-replica `monthly_reads` from sre-1 replaces the 4× multiplier
-  before rollout.
+in volume. They almost certainly are not — rep-2 is already the
+canary target because it has the cleanest workload signal.
+Per-replica `monthly_reads` from sre-1 replaces the 4× multiplier
+before rollout.
+

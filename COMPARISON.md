@@ -1,188 +1,135 @@
-# Shelf vs TrinoCache Stack — side-by-side
+# Shelf vs the field
 
-Two blueprints were drafted independently:
-
-- `shelf/BLUEPRINT.md` — **Shelf**: a new open-source, Iceberg-native,
-plan-aware, columnar-range cache. Larger scope, bigger bet.
-- `~/Desktop/trino/TRINOCACHE_BLUEPRINT.md` — **TrinoCache Stack**: a
-pragmatic 4-tier stack composing existing OSS components (Trino
-Gateway + Redis + `fs.cache` + a custom Go S3 proxy).
-
-They are **complementary, not competing**. Shelf is the long-term
-platform; TrinoCache Stack is what ships in the next 2-3 weeks. This doc
-reconciles them.
-
-> **v0.2 note:** after review, the Shelf blueprint was tightened on five
-> points: (1) plan-time prefetch is now correctly scoped to file+footer
-> level (the `QueryCreatedEvent` does not expose row-group byte ranges;
-> `IcebergSplitSource` generates those lazily during execution); (2)
-> ONNX admission latency reset to a realistic 10-50 µs; (3) the data
-> plane now branches HTTP vs Arrow Flight by payload size to avoid IPC
-> framing overhead on small objects; (4) `shelf-result-cache` is now an
-> explicit companion binary, not part of `shelfd`; (5) the Trino plugin
-> has an explicit circuit-breaker + retry state machine for spot churn.
-> None of these change the Shelf↔TrinoCache Stack reconciliation below.
+> What does Shelf get you, and where does it not pay off? This page is
+> the v1 honest-comparison surface. Numbers in §1 come from the
+> [in-cluster bench fixture](benchmarks/in-cluster/README.md);
+> vendor rows in §2 are cited from the vendor's own publications via
+> `[docs/VENDOR-COMPARE.md](docs/VENDOR-COMPARE.md)`. Operator
+> evidence on a real cluster is in §4 — explicitly framed as evidence,
+> not as third-party-reproducible numbers.
+>
+> What this page is NOT: a marketing speed-up table. We do not
+> multiply our SF100 measurement by a vendor's SF1000 ratio and call
+> it a Shelf-vs-vendor speed-up. That would violate the workspace's
+> no-fabricated-numbers rule, and it would mislead the OSS reader.
 
 ---
 
-## 1. Side-by-side
+## §1 — Measured by us: Shelf vs raw S3
+
+Source: `[benchmarks/RESULTS.md](benchmarks/RESULTS.md)`. Each cell links to the JSON record at `benchmarks/results/<date>/<backend>/<run-id>.json`. Bench fixture is documented at `[benchmarks/in-cluster/README.md](benchmarks/in-cluster/README.md)`.
 
 
-| Dimension                  | TrinoCache Stack (pragmatic)                                | Shelf (platform)                                                      |
-| -------------------------- | ----------------------------------------------------------- | --------------------------------------------------------------------- |
-| Time to first value        | 1 week (Phase 0)                                            | 5-6 weeks (Phase 2 — plan-aware prefetch)                             |
-| Net-new services           | Redis, Go proxy, 3 Python sidecars                          | `shelfd` (Rust) + trainer + result-cache sidecar                      |
-| Granularity                | File / range-GET                                            | Row group + footer + manifest + page index                            |
-| Cache-miss behaviour       | Non-blocking (serve S3, warm async)                         | Non-blocking + coordinator pre-fetches before the miss happens        |
-| Invalidation               | Iceberg snapshot ID in result-cache key                     | Content hash + snapshot-ID on metadata pointers; data files immutable |
-| Admission policy           | All reads admitted; ETL users skipped at result-cache layer | Learned admission (ONNX) trained on `trino_logs`                      |
-| Eviction                   | LRU                                                         | SIEVE (DRAM) + GL-Cache (NVMe) + FrozenHot (immutable metadata)       |
-| Cross-replica sharing      | Result cache shared; block cache per-worker                 | Every tier shared across all 4 replicas                               |
-| Language stack             | Python + Go + YAML glue                                     | Rust (`shelfd`) + Java plugin + Python trainer                        |
-| Open-source posture        | Internal tools, not designed to be published                | Apache 2.0, public repo, TIP track into Trino                         |
-| Competitive differentiator | None — same as Dune / stock Trino advice                    | Plan-aware prefetch + row-group granularity                           |
-| Ops burden                 | Moderate (5 new deployables)                                | Moderate (1 binary + sidecar) once mature                             |
-| Risk                       | Low — mostly config + small services                        | Medium — new Rust service, new protocol                               |
+| Bench        | Backend | p50 wall | p95 wall | p99 wall | p99.9 wall | Hit rate | $/query | TTFQ p95 | run record                            |
+| ------------ | ------- | -------- | -------- | -------- | ---------- | -------- | ------- | -------- | ------------------------------------- |
+| TPC-DS SF100 | shelf   | TBD      | TBD      | TBD      | TBD        | TBD      | TBD     | n/a      | (populates after first nightly green) |
+| TPC-DS SF100 | raw-s3  | TBD      | TBD      | TBD      | TBD        | n/a      | TBD     | n/a      | (populates after first nightly green) |
+| Cold-start   | shelf   | n/a      | TBD      | TBD      | n/a        | TBD      | n/a     | TBD      | (populates after first nightly green) |
+| Cold-start   | raw-s3  | n/a      | TBD      | TBD      | n/a        | n/a      | n/a     | TBD      | (populates after first nightly green) |
+| 1-day replay | shelf   | TBD      | TBD      | TBD      | TBD        | TBD      | TBD     | n/a      | (populates after first nightly green) |
+| 1-day replay | raw-s3  | TBD      | TBD      | TBD      | TBD        | n/a      | TBD     | n/a      | (populates after first nightly green) |
 
 
----
+**The cells above are EMPTY UNTIL the first green nightly bench run.** No one is allowed to fill them in by hand — see `[benchmarks/RESULTS.md](benchmarks/RESULTS.md)` for the auto-populate pipeline.
 
-## 2. Merged roadmap
+If you want to reproduce these numbers on your own cluster:
 
-These phases replace both individual roadmaps. Every phase delivers
-standalone value.
+```bash
+git clone https://github.com/shelf-project/shelf && cd shelf
+export BENCH_BUCKET=s3://your-tpcds-bench
+export BENCH_REGION=us-east-1
+export HMS_THRIFT_URI=thrift://your-metastore:9083
+export SHELF_IRSA_ROLE_ARN=arn:aws:iam::<acct>:role/shelf-bench-s3
+./benchmarks/tpcds/generator/generate_sf1000.sh
+./benchmarks/in-cluster/up.sh
+# … run TPC-DS, cold-start, replay per benchmarks/in-cluster/RUNBOOK.md …
+./benchmarks/in-cluster/down.sh
+```
 
-### Phase −1 — Stabilisation (Week 1, **zero new services**)
-
-Lifted straight from the TrinoCache blueprint, because it's right.
-
-1. `emptyDir` → `hostPath` for every Trino `fs.cache` volume on
-  rep-1/2/3.
-2. Audit `hive.metastore-cache-ttl=0s` catalogs → set to `10m`.
-3. Verify `iceberg.metadata-cache.enabled=false` wherever
-  `fs.cache.enabled=true` (they conflict).
-4. Commit the already-landed Alluxio `UfsIOManager=256` patch to git
-  (right now it exists only as a CM patch).
-5. Move rep-2 KEDA cooldown MR to merge.
-
-Expected: `fs.cache` hit rate 15-20 % → 45-55 %. No query regressions.
-
-### Phase 0 — Quick-win result cache (Weeks 2-3)
-
-Lifted from TrinoCache Tier 0.
-
-1. Deploy Redis 7 cluster (`cache` ns, 3 primaries × 32 GB).
-2. Write `SnapshotWatcher` (Python, 200 LoC) — polls Iceberg
-  `metadata.json` via Trino system tables every 30 s, writes
-    `snapshot_ids` hash to Redis.
-3. Write `trino-gateway-result-cache` plugin — intercepts queries from
-  `pbi_`*, `mbuser`, `commonuser`, builds snapshot-aware key, caches
-    Arrow IPC-serialised results.
-4. Enable for BI users only.
-
-Expected: dashboard queries ≤ 5 ms on cache hit, 60-80 % hit rate on BI
-traffic, instant removal from Trino CPU usage charts.
-
-### Phase 1 — Shelf PoC (Weeks 4-6)
-
-From Shelf Phase 0.
-
-1. Rust `shelfd` skeleton, DRAM Foyer, file-granularity read-through.
-2. Java `ShelfFileSystem` as a pass-through wrapper.
-3. Canary on rep-0 for non-critical queries.
-
-Expected: functional parity with Alluxio 2.9, measurable on cold-start
-benchmark.
-
-### Phase 2 — Columnar granularity + plan-aware prefetch (Weeks 7-10)
-
-From Shelf Phase 1 + 2.
-
-1. Row-group + footer + manifest granularity.
-2. `ShelfPrefetchListener` on coordinator, feeding plan-time hints.
-3. Per-pool quotas (manifest / footer / rowgroup_hot / rowgroup).
-4. Content-addressed keys including snapshot ID.
-
-Expected: TTFQ (time-to-first-query) after scale-up ≤ 3 s on rep-2.
-Cold-start tax eliminated.
-
-### Phase 3 — Multi-node Shelf + S3-shim (Weeks 11-13)
-
-From Shelf Phase 3.
-
-1. Consistent-hash ring, `openraft` membership.
-2. NVMe tier via Foyer hybrid.
-3. S3-compatible HTTP shim (so Spark/DuckDB/Python notebooks benefit).
-4. Migrate rep-2 traffic from Alluxio → Shelf.
-
-Expected: Alluxio retired from rep-2 path. 4-5× effective cache size vs
-node-local `fs.cache` thanks to sharing.
-
-### Phase 4 — Learned admission (Weeks 14-16)
-
-From Shelf Phase 4.
-
-1. Nightly trainer on `cdp.trino_logs.trino_queries`.
-2. ONNX model, per-tenant features.
-3. Admission gate on > 8 MB misses.
-
-Expected: NVMe admission bytes cut 60 %; hot dashboards unaffected.
-
-### Phase 5 — Merge tiers + migrate everyone (Weeks 17-19)
-
-1. Result cache moves from Redis → Shelf's DRAM tier (so one storage
-  layer, not two).
-2. Retire Alluxio from all 4 replicas.
-3. Retire Redis from cache critical path (keep for `SnapshotWatcher`
-  if still needed).
-
-### Phase 6 — Open-source launch (Weeks 20-22)
-
-From Shelf Phase 7.
-
-1. Public repo, docs, benchmarks, blog post.
-2. Trino Improvement Proposal (TIP) for plugin upstream.
+Reproduction budget: ~24 h wall-clock for SF100 + cold-start + 1-day-replay × 2 backends; ~$70 of `ap-south-1` on-demand spend (3 shelf-bench pods + 1 coord + 4 worker nodes).
 
 ---
 
-## 3. What got dropped
+## §2 — Vendor-cited: Alluxio, Starburst Warp Speed, Firebolt
 
-From TrinoCache blueprint:
+We do **not** measure these vendors ourselves. Their TPC-DS / TPC-H runs require contracts (Starburst Galaxy / Enterprise; Firebolt SaaS) or are published only on different engines (Alluxio's main TPC-DS write-up is Spark, not Trino). The honest path for an OSS comparison is to cite vendor publications and clearly mark them as such.
 
-- **PW-CacheProxy in Go** — dropped. Its purpose (non-blocking S3 with
-NVMe cache) is exactly what `shelfd` does in Rust with Arrow Flight
-zero-copy. Shipping both would create two implementations of the same
-idea.
-- **CacheAffinity Router in Gateway** — dropped. Trino's
-`fs.cache.preferred-hosts-count=N` already gives consistent-hash
-affinity at the worker level. Gateway-level routing adds complexity
-without clear win once Shelf's shared cache is live.
-- **Per-replica `fs.cache` as a permanent tier** — kept through Phase 3
-only. Once Shelf is on all replicas with shared NVMe, node-local
-`fs.cache` becomes redundant and can be turned off.
+The full citation matrix lives in `[docs/VENDOR-COMPARE.md](docs/VENDOR-COMPARE.md)`. Headlines:
 
-From Shelf blueprint v0.1:
 
-- **Separate Redis for result cache** — eventually folded into Shelf's
-DRAM tier (Phase 5). Redis stays as the quick-win Phase 0 shipping
-vehicle.
-- **Assumption that result cache was out of scope** — reversed. It's a
-first-class component now, just lives inside Shelf.
+| Vendor / engine                              | Cited claim                                                                                                                                         | Source                                                                                                                                                   | Apples-to-apples                     |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| Trino on Iceberg (no cache)                  | 99-query SF1000 sum = **2 552 s** on 5 × m6id.4xlarge, Iceberg via AWS Glue, Parquet+ZSTD                                                           | [StarRocks docs (2025-04)](https://docs.starrocks.io/docs/3.5/benchmarking/TPC_DS_Benchmark/)                                                            | ✓ Trino+Iceberg, ⚠ smaller hardware  |
+| Starburst Warp Speed (Galaxy public preview) | TPC-DS Q96 only at SF1000 on Iceberg: 5× perf, 10× CPU reduction vs Galaxy Standard. 40 % avg interactive-workload improvement on customer testing. | [Starburst blog (2023-06)](https://www.starburst.io/blog/announcing-warp-speed-starburst-galaxy/)                                                        | ⚠ Single-query, hardware undisclosed |
+| Trino + Alluxio cache (in-tree, Trino 439)   | Announcement only — Trino 439 (Feb 2024) integrated Alluxio file-system caching for Hive / Iceberg / Delta / Hudi. No published TPC-DS numbers.     | [trino.io blog](https://trino.io/blog/2024/03/08/cache-refresh) and [PR #18719](https://github.com/trinodb/trino/pull/18719)                             | n/a (announcement only)              |
+| Alluxio on S3 + Spark                        | Alluxio's own TPC-DS write-up is Spark + S3, not Trino. Useful for the cache-vs-direct-S3 framing only.                                             | [Alluxio blog](https://www.alluxio.io/blog/one-click-to-benchmark-spark-alluxio-s3-stack-with-tpc-ds-queries-on-aws)                                     | ⚠ Spark, not Trino                   |
+| Firebolt                                     | Firebolt does not publish TPC-DS. Their substitute is **FireScale** (1 TB Berkeley AMPLab BDB derivative).                                          | [Firebolt blog](https://www.firebolt.io/blog/firescale-benchmarks-a-deeper-dive) and [firebolt-db/benchmarks](https://github.com/firebolt-db/benchmarks) | ⚠ Different benchmark                |
+
+
+**We do NOT compute Shelf-vs-vendor speed-up ratios.** The vendor numbers are on different hardware, different scale factors, and (in Firebolt's case) different benchmarks. Multiplying them through with our SF100 measurement would produce a fabricated result.
 
 ---
 
-## 4. Decision log
+## §3 — Qualitative axes (no numbers)
+
+Where Shelf wins or loses without ever running a benchmark.
 
 
-| Decision                                                   | Outcome                                                                                        |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Keep two blueprints or merge?                              | Merge into BLUEPRINT.md with Phase −1 and result-cache adopted; this doc keeps the comparison. |
-| Ship quick-win result cache now (Redis) or wait for Shelf? | Ship now (Phase 0). Too much value to delay 4 months.                                          |
-| Build PW-CacheProxy in Go as an interim?                   | No. Keep Alluxio on the `UfsIOManager=256` fix; go straight to Shelf from there.               |
-| Include Iceberg snapshot IDs in cache keys?                | Yes, across metadata + result cache tiers. Acknowledged as adopted from TrinoCache blueprint.  |
-| Per-pool byte quotas (Firebolt-style)?                     | Yes, required to prevent ad-hoc scans from evicting hot metadata.                              |
+| Axis                                 | Shelf                                                                                                                           | Trino + Alluxio                                                             | Starburst Warp Speed                         | Firebolt                               |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | -------------------------------------------- | -------------------------------------- |
+| License model                        | Apache-2.0                                                                                                                      | Apache-2.0                                                                  | Commercial contract                          | SaaS (FBU/hr)                          |
+| Engine modification required         | None — `s3.endpoint` flip                                                                                                       | Trino-side compile-in (Trino 439+)                                          | Starburst-only execution mode                | Replatform (ingest into F3)            |
+| Iceberg-snapshot-safety              | By construction (ETag content-addressing — [ADR-0011](agents/out/adr/0011-shelf04-key-is-sha256-etag-offset-length-ordinal.md)) | Manual invalidation policy                                                  | Async column-index rebuild on schema change  | Re-ingest required                     |
+| Workload-churn tolerance             | Instant — new etag → new key, no rebuild                                                                                        | Trino fs.cache: 15–20 % hit ratio under KEDA spot churn (operator evidence) | Async index rebuild — minutes                | Re-ingest cost on schema/data change   |
+| Cross-replica / cluster-shared cache | Yes (HRW + peer-fetch — [ADR-0002](agents/out/adr/0002-hrw-hashing-over-vnode-ring.md))                                         | Per-worker in Trino fs.cache; cluster-shared in Alluxio standalone          | In-cluster, per-cluster index                | SaaS-side, no per-replica concept      |
+| Deploy-time-from-clone               | Single `s3.endpoint` line + `helm install` — minutes                                                                            | ~30 min Helm + IAM + UfsIOManager tuning                                    | Vendor contract → onboarding lead-time       | Vendor contract → onboarding lead-time |
+| Vendor-lock-in to remove             | Per-replica revert via `s3.endpoint` flip; no schema migration                                                                  | Easy (Trino fs.cache disable) or Alluxio drain                              | Hard (column-index format proprietary)       | Hard (data is in F3 format)            |
+| Operational language                 | Rust (`shelfd`) + Helm + ConfigMaps                                                                                             | Java + Alluxio operator                                                     | Vendor-managed                               | Vendor-managed                         |
+| Selective-query indexed lookups      | Not built — uses Iceberg's own bloom + min/max stats                                                                            | Same as Shelf                                                               | **Yes** — proprietary column index per query | **Yes** — F3 columnstore               |
+| Predictable steady-state $/query     | Yes (commodity NodePool)                                                                                                        | Yes (commodity NodePool)                                                    | Per-vCPU-hour contract                       | Per-FBU-hour contract                  |
+
+
+The takeaway from §3: Shelf is the right answer when the constraint is OSS, snapshot-safety, workload churn, or vendor-neutrality. Shelf is **not** the right answer when the constraint is winning warm-cache selective-query latency on a stable schema — that is what Warp Speed is built for.
+
+---
+
+## §4 — Internal cluster operator evidence (sidebar)
+
+The Shelf project originated on a 4-replica Trino-on-EKS cluster (penpencil) and has been on production traffic since rep-2 cutover (April 2026) and rep-1 cutover (April 2026 — see workspace evidence). The numbers below are operator evidence on that cluster — they are NOT third-party-reproducible OSS-launch numbers. The OSS-reproducible numbers are §1.
+
+- **rep-2 active cutover (2026-04-27)**: stopped a live Alluxio meltdown. Alluxio-class infra failure rate **94 % → 5.7 %** in the first post-cutover hour. `ICEBERG_INVALID_METADATA` 147 → 0; `ICEBERG_BAD_DATA` 38 → 0; `ICEBERG_CANNOT_OPEN_SPLIT` 111 → 13; `GENERIC_INTERNAL_ERROR` (metadata) 70 → 1; `USER_CANCELED` 205 → 61 (-70 %). Full write-up: `[docs/rollout-v1/cutover-rep2.md](docs/rollout-v1/cutover-rep2.md)`.
+- **rep-1 cutover (2026-04-27)**: median wall time 91 s → 49 s on a 7-day-before/after window; Power BI heaviest hitters dropped read latency 55–62 %; Trino `CLUSTER_OUT_OF_MEMORY` 20 → 0 (the cache offloads scan-buffer pressure off Trino workers, shrinking JVM heap footprint). The earlier "47 % volume drop confound" notice still applies — the operator-evidence narrative is honest about it. Full write-up: `[docs/rollout-v1/cutover-rep1.md](docs/rollout-v1/cutover-rep1.md)`.
+- **rep-0 cutover attempt + revert (2026-04-30 → 2026-05-01)**: clean roll-forward, then OOM cascade traced to c-family node-allocatable < pod-limit on the alluxio NodePool. Reverted to direct S3 the morning of May 1. Lesson: capacity engineering (drop c-family from `instance-family` AND bump pod limit 32 → 40 GiB) is mandatory for shelf pods on m-family at any scale. Full write-up: `[docs/rollout-v1/cutover-rep0.md](docs/rollout-v1/cutover-rep0.md)`.
+
+These numbers reflect a production-Trino workload (50.6 % join queries, 22.1 % equality-pushdown, 45.7 % selective-< 100 MB queries) which differs from TPC-DS in shape — TPC-DS has more analytical aggregations and fewer point-lookups. The §1 OSS numbers and §4 operator numbers are complementary, not redundant.
+
+---
+
+## §5 — What is NOT measured here, and why
+
+
+| Comparison                                    | Status                                                         | Why deferred / why not                                                                                                                                                                                                                                      |
+| --------------------------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Shelf vs Alluxio OSS 2.9.5 (in our cluster)   | Not in v1                                                      | Alluxio is currently scaled to 0 in our `alluxio` namespace (rep-1/2 are on Shelf since April 2026). Spinning Alluxio back up for a one-shot bench is operationally messy and would inflate cost. We cite the Spark+Alluxio TPC-DS write-up via §2 instead. |
+| Shelf vs Warp Speed (we run TPC-DS on Galaxy) | Not in v1                                                      | Vendor contract required. We cite Starburst's own TPC-DS Q96 + interactive-workload claims via §2. Realistic positioning: Shelf within ~2× of Warp Speed's warm-cache selective p99, at a fraction of the price (workspace evidence May 1).                 |
+| Shelf vs Firebolt                             | Not in v1                                                      | Firebolt is SaaS and explicitly does not publish TPC-DS — they substitute FireScale. The benchmarks are not comparable.                                                                                                                                     |
+| 7-day full-replay gate                        | Not in v1                                                      | Doesn't fit the OSS 90-min reproduction budget. The 1-day slice is in scope; the 7-day full path is documented at `[benchmarks/replay/SPEC.md](benchmarks/replay/SPEC.md)` for any operator who wants to run the full `v0.5 kill-switch`.                   |
+| `spot-churn` benchmark                        | v1.1                                                           | Chaos-driver complexity is not blocking the comparison story; deferred to a separate release.                                                                                                                                                               |
+| LRB / W-TinyLFU / SuRF algorithm-swap A/B     | Phase B/C of [perf research](docs/perf-research-2026-04-27.md) | Algorithm research, NOT the OSS launch baseline. Each lever has its own go/no-go criteria documented in the perf-research roadmap.                                                                                                                          |
 
 
 ---
 
-*Last updated: 2026-04-23. Read alongside `BLUEPRINT.md`.*
+## §6 — How to push back on this comparison
+
+If you have evidence that Shelf is mis-positioned in any cell of §3, file a GitHub issue with:
+
+1. The cell you disagree with.
+2. The specific scenario you measured.
+3. A reproducible artefact (config + commands) that another operator can run.
+
+We will update §3 with the new evidence. We will **not** update §1 or §2 from issue conversations — §1 lands via auto-PR from the nightly bench; §2 lands via PR-with-citation per the [VENDOR-COMPARE.md citation hygiene rules](docs/VENDOR-COMPARE.md#citation-hygiene).
+
+---
+
+*Last meaningful update: v1 launch. Replaces the 2026-04-23 "Shelf vs TrinoCache Stack" framing, which was internal-merge-debate context for blueprint v0.2 and has been superseded by v1.0 GA.*

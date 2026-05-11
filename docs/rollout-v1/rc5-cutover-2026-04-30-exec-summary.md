@@ -1,0 +1,63 @@
+# rc.5 cutover — exec summary (2026-04-30 IST)
+
+Same-day exec retrospective covering today's ship-only work: `1.0.0-rc.5` image, cluster mutations on `data-platform-cluster`, and the rep-0 cutover MRs. Ship-only scope; planning/skill/dashboard work intentionally omitted. Deep per-PR audit deferred to `rc5-cutover-2026-04-30-detailed.md` once Phase D 90-min soak completes (~19:36 IST).
+
+## 1. Top-line scoreboard
+
+
+| #   | Artefact                                                                    | Success matrix (set at plan time)                                                                                                     | Verdict                                                                                                                                                                                                                                             |
+| --- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `1.0.0-rc.5` image build + push to GitLab registry                          | 8-phase due-diligence (`release-prep/1.0.0-rc.5/ROLLOUT-rep1.md`): cargo+UI+helm+image green, OCI digest pinned                       | **PASS** — digest `sha256:21a73d25…ad8f`, 53.8 MB, linux/amd64                                                                                                                                                                                      |
+| 2   | rc.5 image rollout on `sts/shelf` ns alluxio (rc.4 → rc.5)                  | rolling-restart < 15 min, 0 OOMKills, all pods Ready, UI live                                                                         | **PASS** — ~7 min wall-clock for 4 pods, 0 restarts, `/ui` 200 OK                                                                                                                                                                                   |
+| 3   | Cost-region ConfigMap patch + rolling restart                               | `cost.region: ap-south-1` in `shelf-shelfd` CM, `shelf_s3_dollars_saved_total{region="ap-south-1"}` on every pod, 30-min soak healthy | **PASS** — 9 min 1 s rolling restart, region label flipped on all 4 pods, soak GREEN (0 restarts, RSS within ceiling)                                                                                                                               |
+| 4   | Shelf-pool scale 4 → 6 (capacity prep for rep-0)                            | shelf-{4,5} Ready < 5 min, HRW ring 6-wide, peer-fetch warming, existing-pod RSS not regressing                                       | **PASS** — shelf-4 Ready in 38 s, shelf-5 in 78 s, ring 6-wide, **shelf-3 RSS dropped 103 MiB** during warmup (HRW relief)                                                                                                                          |
+| 5   | rep-0 MR `!17954` (parallel `cdp_shelf` catalog, merged ~14:23 IST)         | catalog visible via `SHOW CATALOGS` on rep-0; `cdp_shelf.s3.endpoint=http://shelf-pool…:9092`; metadata-cache disabled                | **PARTIAL** — merged in deployments-repo, **NOT yet in cluster CM 2.5h post-merge**; `cdp_shelf.properties` absent from `trino-replica-0-catalog`. Pipeline reconciles property *changes* on existing files but appears to skip new-file additions. |
+| 6   | rep-0 MR `!17957` (file-based ACL grant for `cdp_shelf`, merged ~16:58 IST) | `rules.json` carries `cdp_shelf` regex extension; PII column masks preserved                                                          | **PASS** — 12 grants reconciled in ≤ 7 min via kubectl-applied path; `last-applied-configuration` annotation confirms                                                                                                                               |
+| 7   | rep-0 MR `!17955` (cdp `s3.endpoint` → shelf-pool, merged 18:04 IST)        | cdp catalog CM carries `s3.endpoint=http://shelf-pool…:9092`; soak healthy                                                            | **PASS** — flip landed at **18:06:28 IST**, ~2 min reconcile (much faster than feared); rep-0 coord ACTIVE on Trino 480                                                                                                                             |
+| 8   | Phase D auto-rollback watcher armed                                         | Polls for actual flip, 90-min soak from `FLIP_VERIFIED_TS`, auto-merges revert MR if any of 7 triggers fires                          | **ROLLED BACK (held standby)** — `shelf-3` OOMKilled 13:51:21 UTC (cycle 2', RSS peak 27.81 GiB on 32 GiB-limit pod, exit 137); revert MR `!17966` pushed but **held open per user directive** ("keep shelf there on rep0, low traffic at night time"). Watcher held the cycle-2 RED trigger ~10 min on stale Prom data (cri-containerd ID rotates on restart, last value sticks); subsequent OOM was inevitable. Trino-side perf in cycle 2': **p99 wall = 3290 ms vs rep-1's 535 s in the same window — 162× better**. Even mid-OOM the cache delivered. |
+
+
+## 2. Key findings (durable lessons)
+
+1. **Helm-reconcile asymmetry refined** — initial diagnosis was "kubectl-applied vs helm-rendered". Live-cluster annotations show **both** `trino-replica-0-catalog` and `trino-replica-0-access-control-volume-coordinator` carry `kubectl.kubernetes.io/last-applied-configuration`. The actual asymmetry: **changes to existing keys (e.g. `s3.endpoint=` line in `cdp.properties`) reconcile in ~2 min; new keys (e.g. adding `cdp_shelf.properties`) don't reconcile at all**. Worth a DevOps ticket — affects every future "add a new catalog" MR.
+2. `**Default::default()` for `CostConfig` ships `region=us-east-1`** — without an explicit `cost:` block in the ConfigMap, the dollars-saved counter mis-attributes. Helm chart default in `infra/penpencil/charts/shelf/values-prod.yaml` should ship `cost: { enabled: true, region: ap-south-1 }` to survive future re-renders.
+3. **Shelf-shim byte-compare answers cutover-safety better than Trino-via-`cdp_shelf`** — 15/15 byte-identity at the shim level (ETag + Content-Length + 4 byte ranges including SHELF-25 suffix-range edge cases) is sufficient. The Trino path adds plan-tree validation but is gated by the new-file reconcile bug (finding 1) plus an ACL-grant chain. For future cutovers, default to shim-level smoke.
+4. **rep-1 wall-time post-rc.5 is confounded by 47% query-volume drop** — earlier "p50 24→32 s, p95 610→765 s" is workload-mix bias, not real regression. SHELF-42 A/B tagging (already in rc.5) is the path to a clean answer; needs a clean week-long window.
+5. `**gen_pin_list.py` output schema doesn't match `/admin/pin` schema** — pre-warm via replay still works (replay tool's GET path fills the cache the same way live traffic would), but the pin-list-immune-from-eviction protection doesn't engage. Either adapt the tool's output or widen `/admin/pin`.
+6. **PR #66 SHELF-37 listener jar parked on JDK 25 absence** — `trino-spi:480.jar` is class-file major 69 (JDK 25); local toolchain is JDK 17. Source itself is JDK 17-compatible. Blocker is binary classpath link, not source features.
+7. **NVMe `used == capacity` (100%) is the goal of a warm hybrid cache** — Foyer reports `min(written, configured_cap)`. Pods at 100% with stable hit-ratio (~55% on warm pods) + low LODC drops + flat RSS = healthy. Surfacing this on the new dashboard explicitly to head off "disk full" alarm.
+
+Findings 1–7 are also folded into `AGENTS.md` continual-learning entries today.
+
+## 3. rc.6 backlog (priority-ordered)
+
+### P0 — must land in rc.6
+
+- **Helm chart default**: ship `cost: { enabled: true, region: ap-south-1 }` in `infra/penpencil/charts/shelf/values-prod.yaml` so future deploys don't lose the cost-region patch (currently in-cluster only).
+- **PR #66 SHELF-37 listener jar**: JDK 25 unblock OR pin `trino-spi` to JDK 17-compatible release. Without this, SHELF-45 compaction-rewarm reactor parks on empty channel.
+- **Cargo.lock regen for #49 SHELF-50**: deferred during drain wave; needs follow-up commit on a machine with cargo before SHELF-50 enables.
+- **Workspace member `COPY` rule in Dockerfile**: any new `crates/<name>` member needs explicit `COPY crates ./crates` (the SHELF-40 dollars-saved gotcha that broke the rc.5 buildx). Add a CI tripwire that diffs `cargo metadata --format-version 1 | jq '.workspace_members'` against the Dockerfile-grepped crates list.
+- **shelf-overview-v2 dashboard import**: still pending UI import (read-only Grafana SA can't apply via MCP). User action OR mint a write-scoped SA.
+- **P0.6 — pod memory limit 32 → 40 GiB + Karpenter NodePool restriction (drop c6a)**: PR #80 drafted today; held on Karpenter NodePool restriction (the 27.81 GiB OOM matches `c6a.4xlarge` allocatable ~27 GiB exactly — bumping the pod limit alone reproduces the OOM if c6a stays in the alluxio NodePool). Pending preflight + cluster apply.
+
+### P1 — desired in rc.6
+
+- **Tier-1 default-OFF lever flips, A/B-tagged windows**: SHELF-43 zstd compression, SHELF-46 bloom-aware footer admit, SHELF-50 decoded metadata cache, SHELF-34 page-index sidecar — each its own 24h soak.
+- **Capacity rule codification**: chart-side webhook or admin endpoint that refuses adding a new replica's traffic if any existing pod is > 22 GiB RSS. Today this is a workspace-memory rule, not enforced.
+- `**/admin/pin` schema flexibility**: accept `gen_pin_list.py` replay-list shape OR adapt the tool's output. Pinned-from-eviction protection then engages.
+- **Per-pod RSS Grafana alert**: 24 GiB warn → page; 25.5 GiB → critical (auto-rollback territory). Today only in worker triggers.
+- **Foyer 0.22 bump (PR #22)**: still parked under F2 P2-conditional gate; gates on SHELF-35 replay showing > 5 pp lift over tuned-S3-FIFO. Decision deferred indefinitely until that data exists.
+
+### P2 — track / observe
+
+- **SHELF-39 #29182 release-pin**: deep research found master-merged but NOT in tagged release. SHELF-39 plugin dispatch should `kubectl exec -- trino --version` first.
+- **deployments-repo new-file reconcile gap (this report's finding #1)**: DevOps ticket. Without a fix, every future "add a new catalog" MR will fail to reconcile silently.
+- **Iceberg metadata-cache shadowing**: workspace-known; affects only metadata-pool hit-ratio measurement. Use `cdp_shelf` style (with `iceberg.metadata-cache.enabled=false`) on canary catalogs.
+
+## 4. Open at end-of-day
+
+- **Phase D verdict — ROLLED BACK, held as standby.** `shelf-3` OOMKilled 13:51:21 UTC at RSS 27.81 GiB on 32 GiB-limit pod (exit 137). The 27.81 GiB peak matches `c6a.4xlarge` allocatable (~27 GiB) — the pod limit was structurally unreachable. Revert MR `!17966` pushed but **held open per user directive** ("keep shelf there on rep0, low traffic at night time"); rep-0 stays on shelf through the low-traffic overnight window. Watcher's cycle-2 RED trigger held 10 min on stale Prom data (cri-containerd ID rotates on shelf-pod restart and the last scrape sticks); a fresh-data trigger would have fired in time, the cri-id-aware fix is on the watcher backlog.
+- **rep-0 cdp.s3.endpoint flipped at 18:06:28 IST** — ~2 min reconcile, much faster than the feared 25+ min. This invalidates the "helm-reconcile asymmetry" framing's catalog-side estimate. The actual asymmetry is **changes to existing keys reconcile in ~2 min; new-file additions don't reconcile at all** — verified by `!17954`'s `cdp_shelf.properties` still missing 4+ h post-merge while the parallel `cdp.s3.endpoint` change in `!17955` reconciled cleanly.
+- **rc.6 P0.6 (memory bump 32 → 40 GiB + drop c6a from `alluxio` NodePool)** — added to §3 P0 list. PR #80 drafted, held on Karpenter NodePool restriction. Patch + runbook prepared at `/tmp/alluxio-provider-no-c6a.yaml` and `/tmp/alluxio-c6a-restriction-runbook.md`.
+- `**cdp_shelf` catalog still missing from rep-0** — `!17954` new-file reconcile gap (finding #1) blocks the richer Trino-via-`cdp_shelf` smoke and the post-cutover metadata-pool observability. Not blocking the cutover itself; tracked as P2 backlog.
+- **Tomorrow's deep retrospective** (`rc5-cutover-2026-04-30-detailed.md`) lands after the standby revert decision finalizes. Adds: per-PR audit of the 17 drained PRs, dashboard import outcome, rep-0's overnight hit-ratio + cost-saving curves, and any rc.6 backlog updates if the standby window surfaces new findings.

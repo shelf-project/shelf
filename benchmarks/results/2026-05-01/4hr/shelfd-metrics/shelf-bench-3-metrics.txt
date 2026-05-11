@@ -1,0 +1,308 @@
+# HELP shelf_admissions_total Admission-policy decisions, per pool.
+# TYPE shelf_admissions_total counter
+shelf_admissions_total{decision="admit",pool="metadata"} 3
+shelf_admissions_total{decision="admit",pool="rowgroup"} 1977
+shelf_admissions_total{decision="reject_lodc",pool="metadata"} 0
+shelf_admissions_total{decision="reject_lodc",pool="rowgroup"} 238
+shelf_admissions_total{decision="reject_rate",pool="metadata"} 0
+shelf_admissions_total{decision="reject_rate",pool="rowgroup"} 75
+shelf_admissions_total{decision="reject_size",pool="metadata"} 0
+shelf_admissions_total{decision="reject_size",pool="rowgroup"} 0
+# HELP shelf_coalesce_follower_bytes_saved_total SHELF-30 — bytes served to a follower from the leader's payload, per pool.
+# TYPE shelf_coalesce_follower_bytes_saved_total counter
+shelf_coalesce_follower_bytes_saved_total{pool="rowgroup"} 18017539
+# HELP shelf_coalesce_followers_total SHELF-30 — GET requests that joined an in-flight leader and sliced its bytes.
+# TYPE shelf_coalesce_followers_total counter
+shelf_coalesce_followers_total{pool="rowgroup"} 14
+# HELP shelf_coalesce_leaders_total SHELF-30 — GET requests registered as a coalesce leader, per Foyer pool.
+# TYPE shelf_coalesce_leaders_total counter
+shelf_coalesce_leaders_total{pool="metadata"} 3
+shelf_coalesce_leaders_total{pool="rowgroup"} 2290
+# HELP shelf_conditional_not_modified_total Local cache hits where the ETag-conditional GET to origin returned 304 Not Modified; bytes were served from cache.
+# TYPE shelf_conditional_not_modified_total counter
+shelf_conditional_not_modified_total{pool="metadata"} 52
+shelf_conditional_not_modified_total{pool="rowgroup"} 4031
+# HELP shelf_conditional_skipped_total Local cache hits where the freshness window let the shim skip the ETag-conditional GET round-trip.
+# TYPE shelf_conditional_skipped_total counter
+shelf_conditional_skipped_total{pool="metadata"} 11
+shelf_conditional_skipped_total{pool="rowgroup"} 57433
+# HELP shelf_disk_bytes_capacity Configured NVMe capacity for each pool (pools.<pool>.nvme_bytes).
+# TYPE shelf_disk_bytes_capacity gauge
+shelf_disk_bytes_capacity{pool="rowgroup"} 257698037760
+# HELP shelf_disk_bytes_used Best-effort bytes held on the NVMe tier of each pool.
+# TYPE shelf_disk_bytes_used gauge
+shelf_disk_bytes_used{pool="rowgroup"} 5144137728
+# HELP shelf_disk_hits_total Cache hits served from the NVMe tier of a hybrid pool (SHELF-18).
+# TYPE shelf_disk_hits_total counter
+shelf_disk_hits_total{pool="rowgroup"} 0
+# HELP shelf_disk_misses_total Misses that reached the NVMe tier of a hybrid pool and still missed.
+# TYPE shelf_disk_misses_total counter
+shelf_disk_misses_total{pool="rowgroup"} 4594
+# HELP shelf_engine_resets_total Foyer pool engine resets that wiped resident state without a process restart. Non-zero on a healthy cluster is a paging signal: dashboards must alert at rate > 0 over 15m.
+# TYPE shelf_engine_resets_total counter
+shelf_engine_resets_total{pool="metadata",reason="pool_open_retry"} 0
+shelf_engine_resets_total{pool="rowgroup",reason="pool_open_retry"} 0
+# HELP shelf_evictions_total Cache evictions, per pool + reason.
+# TYPE shelf_evictions_total counter
+shelf_evictions_total{pool="metadata",reason="capacity"} 0
+shelf_evictions_total{pool="rowgroup",reason="capacity"} 0
+# HELP shelf_hits_by_table_total Cache hits, partitioned by Foyer pool + Iceberg table (`schema.table`) parsed from the S3 key. Layered alongside shelf_hits_total so existing dashboards keep working; cardinality is bounded by the prod table count.
+# TYPE shelf_hits_by_table_total counter
+shelf_hits_by_table_total{pool="metadata",table="other"} 63
+shelf_hits_by_table_total{pool="rowgroup",table="other"} 61464
+# HELP shelf_hits_by_tag_total Cache hits, partitioned by Foyer pool + A/B tag (SHELF-42). The `tag` label is the canonical wire form of the request's X-Shelf-Tag header, or `none` when the header was absent / feature-disabled, or `other` when the per-pod cardinality cap fired.
+# TYPE shelf_hits_by_tag_total counter
+shelf_hits_by_tag_total{pool="metadata",tag="none"} 63
+shelf_hits_by_tag_total{pool="rowgroup",tag="none"} 61464
+# HELP shelf_hits_total Cache hits, partitioned by Foyer pool (see ADR-0008).
+# TYPE shelf_hits_total counter
+shelf_hits_total{pool="metadata"} 63
+shelf_hits_total{pool="rowgroup"} 61559
+# HELP shelf_inflight_singleflight In-flight single-flight fetches per pool.
+# TYPE shelf_inflight_singleflight gauge
+shelf_inflight_singleflight{pool="metadata"} 0
+shelf_inflight_singleflight{pool="rowgroup"} 0
+# HELP shelf_lodc_admit_burst_capacity Configured `max_burst_bytes` of the SHELF-29 admission rate-limiter. Constant per pod; exposed for dashboard ratios.
+# TYPE shelf_lodc_admit_burst_capacity gauge
+shelf_lodc_admit_burst_capacity{pool="rowgroup"} 268435456
+# HELP shelf_lodc_admit_tokens_available Bytes available in the SHELF-29 admission token bucket. Drains under burst, refills at the configured target rate. Reaching zero is the leading indicator of a `rate_limit` drop on the next admit.
+# TYPE shelf_lodc_admit_tokens_available gauge
+shelf_lodc_admit_tokens_available{pool="rowgroup"} 268435456
+# HELP shelf_lodc_drops_total Hybrid-pool admissions dropped by shelfd's LODC back-pressure. The `reason` label distinguishes the SHELF-21e level gate (`submit_queue_overflow`) from the SHELF-29 token-bucket gate (`rate_limit`). Sustained non-zero rate of either ⇒ NVMe drain is falling behind ingress and the cache is doing less work than it could.
+# TYPE shelf_lodc_drops_total counter
+shelf_lodc_drops_total{pool="rowgroup",reason="rate_limit"} 75
+shelf_lodc_drops_total{pool="rowgroup",reason="submit_queue_overflow"} 238
+# HELP shelf_lodc_inflight_bytes Approximate bytes admitted to the hybrid pool but not yet committed to NVMe. Updated on every admission decision.
+# TYPE shelf_lodc_inflight_bytes gauge
+shelf_lodc_inflight_bytes{pool="rowgroup"} 573933917
+# HELP shelf_lodc_queue_depth Estimated count of entries admitted to the hybrid pool but not yet committed to NVMe. Derived from the byte-level shelf_lodc_inflight_bytes; informational only.
+# TYPE shelf_lodc_queue_depth gauge
+shelf_lodc_queue_depth{pool="rowgroup"} 206
+# HELP shelf_misses_by_table_total Cache misses, partitioned by Foyer pool + Iceberg table.
+# TYPE shelf_misses_by_table_total counter
+shelf_misses_by_table_total{pool="metadata",table="other"} 3
+shelf_misses_by_table_total{pool="rowgroup",table="other"} 2290
+# HELP shelf_misses_by_tag_total Cache misses, partitioned by Foyer pool + A/B tag (SHELF-42).
+# TYPE shelf_misses_by_tag_total counter
+shelf_misses_by_tag_total{pool="metadata",tag="none"} 3
+shelf_misses_by_tag_total{pool="rowgroup",tag="none"} 2290
+# HELP shelf_misses_total Cache misses that fell through to origin.
+# TYPE shelf_misses_total counter
+shelf_misses_total{pool="metadata"} 3
+shelf_misses_total{pool="rowgroup"} 2290
+# HELP shelf_origin_request_bytes_total Bytes returned by origin (S3) requests, excludes HTTP headers.
+# TYPE shelf_origin_request_bytes_total counter
+shelf_origin_request_bytes_total{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok"} 6684205119
+shelf_origin_request_bytes_total{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified"} 0
+shelf_origin_request_bytes_total{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok"} 23563532475
+# HELP shelf_origin_request_seconds End-to-end origin request latency, per op + outcome.
+# TYPE shelf_origin_request_seconds histogram
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="0.001"} 0
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="0.002"} 0
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="0.004"} 0
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="0.008"} 0
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="0.016"} 0
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="0.032"} 536
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="0.064"} 1111
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="0.128"} 1722
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="0.256"} 1913
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="0.512"} 1947
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="1.024"} 1947
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="2.048"} 1947
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="4.096"} 1947
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="8.192"} 1947
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="16.384"} 1947
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok",le="+Inf"} 1947
+shelf_origin_request_seconds_sum{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok"} 140.28959192199983
+shelf_origin_request_seconds_count{bucket="pw-data-cdp-prod-temp",op="get_range",outcome="ok"} 1947
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="0.001"} 0
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="0.002"} 0
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="0.004"} 0
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="0.008"} 178
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="0.016"} 1919
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="0.032"} 3735
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="0.064"} 3941
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="0.128"} 4073
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="0.256"} 4079
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="0.512"} 4083
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="1.024"} 4083
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="2.048"} 4083
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="4.096"} 4083
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="8.192"} 4083
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="16.384"} 4083
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified",le="+Inf"} 4083
+shelf_origin_request_seconds_sum{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified"} 80.26528683099995
+shelf_origin_request_seconds_count{bucket="pw-data-cdp-prod-temp",op="get_range_conditional",outcome="not_modified"} 4083
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="0.001"} 0
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="0.002"} 0
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="0.004"} 0
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="0.008"} 7
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="0.016"} 87
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="0.032"} 93
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="0.064"} 94
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="0.128"} 94
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="0.256"} 126
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="0.512"} 126
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="1.024"} 126
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="2.048"} 126
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="4.096"} 126
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="8.192"} 126
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="16.384"} 126
+shelf_origin_request_seconds_bucket{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok",le="+Inf"} 126
+shelf_origin_request_seconds_sum{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok"} 5.626369690000004
+shelf_origin_request_seconds_count{bucket="pw-data-cdp-prod-temp",op="head",outcome="ok"} 126
+# HELP shelf_peer_hit_total Local-miss reads served from a peer pod (HRW primary) instead of origin.
+# TYPE shelf_peer_hit_total counter
+shelf_peer_hit_total{pool="metadata"} 3
+shelf_peer_hit_total{pool="rowgroup"} 343
+# HELP shelf_peer_miss_total Local-miss reads where the HRW primary peer reported miss; caller fell through to origin.
+# TYPE shelf_peer_miss_total counter
+shelf_peer_miss_total{pool="rowgroup"} 254
+# HELP shelf_peer_timeout_total Local-miss reads where the peer probe / fetch exceeded the configured deadline; caller fell through to origin.
+# TYPE shelf_peer_timeout_total counter
+shelf_peer_timeout_total{pool="rowgroup"} 1342
+# HELP shelf_request_seconds End-to-end request latency. Label `path` is /cache, /stats …
+# TYPE shelf_request_seconds histogram
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="0.0005"} 0
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="0.001"} 1
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="0.002"} 2
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="0.004"} 2
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="0.008"} 3
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="0.016"} 3
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="0.032"} 8
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="0.064"} 11
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="0.128"} 12
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="0.256"} 14
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="0.512"} 14
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="1.024"} 14
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="2.048"} 14
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="4.096"} 14
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="8.192"} 14
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="16.384"} 14
+shelf_request_seconds_bucket{outcome="coalesce_follower",path="/s3/get_object",le="+Inf"} 14
+shelf_request_seconds_sum{outcome="coalesce_follower",path="/s3/get_object"} 0.7347457639999999
+shelf_request_seconds_count{outcome="coalesce_follower",path="/s3/get_object"} 14
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="0.0005"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="0.001"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="0.002"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="0.004"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="0.008"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="0.016"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="0.032"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="0.064"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="0.128"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="0.256"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="0.512"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="1.024"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="2.048"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="4.096"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="8.192"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="16.384"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/cache",le="+Inf"} 95
+shelf_request_seconds_sum{outcome="hit",path="/cache"} 0.000927303
+shelf_request_seconds_count{outcome="hit",path="/cache"} 95
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="0.0005"} 57425
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="0.001"} 57440
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="0.002"} 57443
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="0.004"} 57444
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="0.008"} 57614
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="0.016"} 59354
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="0.032"} 61177
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="0.064"} 61385
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="0.128"} 61517
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="0.256"} 61523
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="0.512"} 61527
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="1.024"} 61527
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="2.048"} 61527
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="4.096"} 61527
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="8.192"} 61527
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="16.384"} 61527
+shelf_request_seconds_bucket{outcome="hit",path="/s3/get_object",le="+Inf"} 61527
+shelf_request_seconds_sum{outcome="hit",path="/s3/get_object"} 82.44054107800049
+shelf_request_seconds_count{outcome="hit",path="/s3/get_object"} 61527
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="0.0005"} 0
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="0.001"} 0
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="0.002"} 32
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="0.004"} 77
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="0.008"} 122
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="0.016"} 233
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="0.032"} 781
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="0.064"} 1392
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="0.128"} 2032
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="0.256"} 2258
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="0.512"} 2293
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="1.024"} 2293
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="2.048"} 2293
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="4.096"} 2293
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="8.192"} 2293
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="16.384"} 2293
+shelf_request_seconds_bucket{outcome="miss",path="/s3/get_object",le="+Inf"} 2293
+shelf_request_seconds_sum{outcome="miss",path="/s3/get_object"} 152.71500813400004
+shelf_request_seconds_count{outcome="miss",path="/s3/get_object"} 2293
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="0.0005"} 20
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="0.001"} 20
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="0.002"} 20
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="0.004"} 20
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="0.008"} 20
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="0.016"} 21
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="0.032"} 21
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="0.064"} 21
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="0.128"} 21
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="0.256"} 21
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="0.512"} 21
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="1.024"} 21
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="2.048"} 21
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="4.096"} 21
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="8.192"} 21
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="16.384"} 21
+shelf_request_seconds_bucket{outcome="ok",path="/s3/head_object",le="+Inf"} 21
+shelf_request_seconds_sum{outcome="ok",path="/s3/head_object"} 0.010241661999999999
+shelf_request_seconds_count{outcome="ok",path="/s3/head_object"} 21
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="0.0005"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="0.001"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="0.002"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="0.004"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="0.008"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="0.016"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="0.032"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="0.064"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="0.128"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="0.256"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="0.512"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="1.024"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="2.048"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="4.096"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="8.192"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="16.384"} 606
+shelf_request_seconds_bucket{outcome="ok",path="/stats",le="+Inf"} 606
+shelf_request_seconds_sum{outcome="ok",path="/stats"} 0.007808426999999996
+shelf_request_seconds_count{outcome="ok",path="/stats"} 606
+# HELP shelf_rolling_hit_ratio_bps Rolling hit ratio per pool, in basis points (0-10_000). Window is the last 60s of hits/misses; resets once per minute. Divide by 100 for a percentage.
+# TYPE shelf_rolling_hit_ratio_bps gauge
+shelf_rolling_hit_ratio_bps{pool="metadata"} 0
+shelf_rolling_hit_ratio_bps{pool="rowgroup"} 0
+# HELP shelf_s3_dollars_saved_rate_cents_per_sec 60s rolling rate of shelf_s3_dollars_saved_total, in **integer cents per second**. Updated once per second by the SHELF-40 rate-updater task. Multiply by 0.01 for $/sec, ×60 for $/min, ×3600 for $/hr.
+# TYPE shelf_s3_dollars_saved_rate_cents_per_sec gauge
+shelf_s3_dollars_saved_rate_cents_per_sec{outcome="hit_disk",region="us-east-1"} 0
+shelf_s3_dollars_saved_rate_cents_per_sec{outcome="hit_memory",region="us-east-1"} 0
+shelf_s3_dollars_saved_rate_cents_per_sec{outcome="peer",region="us-east-1"} 0
+# HELP shelf_s3_dollars_saved_total Cumulative S3 + cross-AZ + NAT dollars *saved* by serving from shelf, in **integer cents**. Multiply by 0.01 to render dollars. Region + outcome carry the same shape as shelf_hits_total / hit_memory|hit_disk plus the SHELF-23 `peer` outcome. Source formula: crates/shelf-cost/.
+# TYPE shelf_s3_dollars_saved_total counter
+shelf_s3_dollars_saved_total{outcome="hit_disk",region="us-east-1"} 0
+shelf_s3_dollars_saved_total{outcome="hit_memory",region="us-east-1"} 0
+shelf_s3_dollars_saved_total{outcome="peer",region="us-east-1"} 0
+# HELP shelf_s3_shim_response_bytes_by_tag_total Response body bytes served by the S3 shim (SHELF-22) partitioned by op + outcome + A/B tag (SHELF-42). The `tag` label follows the same `none` / `other` / wire-form rules as `shelf_hits_by_tag_total`.
+# TYPE shelf_s3_shim_response_bytes_by_tag_total counter
+shelf_s3_shim_response_bytes_by_tag_total{op="get_object",outcome="hit",tag="none"} 151064607268
+shelf_s3_shim_response_bytes_by_tag_total{op="get_object",outcome="miss",tag="none"} 7095639008
+shelf_s3_shim_response_bytes_by_tag_total{op="head_object",outcome="ok",tag="none"} 0
+# HELP shelf_s3_shim_response_bytes_total Response body bytes served by the S3 shim, by op + outcome.
+# TYPE shelf_s3_shim_response_bytes_total counter
+shelf_s3_shim_response_bytes_total{op="get_object",outcome="coalesce_follower"} 18017539
+shelf_s3_shim_response_bytes_total{op="get_object",outcome="hit"} 151064607268
+shelf_s3_shim_response_bytes_total{op="get_object",outcome="miss"} 7095639008
+shelf_s3_shim_response_bytes_total{op="head_object",outcome="ok"} 0
+# HELP shelf_warm_threshold_crossed_seconds Seconds from pod ready until rolling hit ratio first crossed the configured warm threshold. Set once per pod lifetime; absent until the threshold actually crosses.
+# TYPE shelf_warm_threshold_crossed_seconds gauge
+shelf_warm_threshold_crossed_seconds{pool="metadata"} 160
+shelf_warm_threshold_crossed_seconds{pool="rowgroup"} 160

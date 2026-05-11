@@ -347,7 +347,9 @@ fn default_admission_enabled() -> bool {
 }
 
 fn default_target_bytes_per_sec() -> u64 {
-    200 * 1024 * 1024
+    // ~80% of a 125 MiB/s gp3 baseline — admit rate matches disk drain;
+    // see `docs/runbooks/2026-05-lodc-daily-ops-tuning.md`.
+    100 * 1024 * 1024
 }
 
 fn default_max_burst_bytes() -> u64 {
@@ -414,6 +416,18 @@ impl RowGroupPoolConfig {
     }
 }
 
+/// Catalog admission strategy for inserts (SHELF-25 + frequency sketch).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionPolicyKind {
+    /// Size threshold only (ADR-0003 default).
+    #[default]
+    SizeThreshold,
+    /// After size checks, rowgroup keys need ≥ `frequency_min_hits`
+    /// sketch observations before NVMe insert (metadata pool exempt).
+    Frequency,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmissionConfig {
@@ -423,6 +437,19 @@ pub struct AdmissionConfig {
     /// If true, pinned objects bypass the size threshold.
     #[serde(default = "default_true")]
     pub pinned_bypass: bool,
+    /// Admission strategy: [`AdmissionPolicyKind::Frequency`] adds a
+    /// Count–Min estimate gate on the rowgroup pool.
+    #[serde(default)]
+    pub policy: AdmissionPolicyKind,
+    /// Minimum sketch count before admitting rowgroup keys when
+    /// `policy=frequency`. Default `2` — first observation serves but
+    /// does not populate NVMe; second hits the same key and admits.
+    #[serde(default = "default_frequency_min_hits")]
+    pub frequency_min_hits: u32,
+}
+
+fn default_frequency_min_hits() -> u32 {
+    2
 }
 
 fn default_true() -> bool {
@@ -694,6 +721,11 @@ impl Config {
                 "admission.size_threshold_bytes must be > 0".into(),
             ));
         }
+        if self.admission.frequency_min_hits == 0 {
+            return Err(crate::Error::Config(
+                "admission.frequency_min_hits must be >= 1".into(),
+            ));
+        }
         if self.membership.headless_service.is_empty() {
             return Err(crate::Error::Config(
                 "membership.headless_service must be non-empty".into(),
@@ -749,6 +781,8 @@ pin_list:
         // Defaults applied.
         assert_eq!(cfg.origin.max_inflight, 128);
         assert!(cfg.admission.pinned_bypass);
+        assert_eq!(cfg.admission.policy, AdmissionPolicyKind::SizeThreshold);
+        assert_eq!(cfg.admission.frequency_min_hits, 2);
     }
 
     #[test]

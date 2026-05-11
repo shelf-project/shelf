@@ -264,6 +264,14 @@ cache:
         # under sustained ingress; tune downward if you still observe
         # submit-queue overflow lines in the logs.
         # admissionBytesPerSec: 209715200  # 200 MiB/s
+        #
+        # SHELF-29 token-bucket aligned to gp3 drain (daily ops loop):
+        # default in-code is 100 MiB/s; override here to push into ConfigMap explicitly.
+        lodcAdmission:
+          enabled: true
+          targetBytesPerSec: 104857600
+          maxBurstBytes: 268435456
+          maxInflightAdmissions: 1024
 
   admission:
     # -- Refuse inserts for objects > threshold MiB unless pinned. [ADR-0003]
@@ -273,6 +281,11 @@ cache:
     sizeThresholdMiB: 4096
     # -- Pinned objects bypass the size threshold. [plan §4 SHELF-25]
     pinnedBypass: true
+    # -- Admission policy: `size_threshold` (default) or `frequency`
+    # (rowgroup pool: Count–Min sketch, admit after min hits).
+    policy: size_threshold
+    # -- When policy=frequency, minimum sketch observations before NVMe insert.
+    frequencyMinHits: 2
     # -- Learned admission disabled in v1. [ADR-0003]
     model:
       enabled: false

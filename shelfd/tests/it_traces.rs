@@ -203,6 +203,8 @@ fn singleflight_emits_leader_and_follower_events() {
         let admission = SizeThresholdPolicy::from_config(&AdmissionConfig {
             size_threshold_bytes: 1 << 30,
             pinned_bypass: true,
+            policy: shelfd::config::AdmissionPolicyKind::SizeThreshold,
+            frequency_min_hits: 2,
         });
         let key = key_from_tuple(b"singleflight-etag", 0, 1, 0).unwrap();
 

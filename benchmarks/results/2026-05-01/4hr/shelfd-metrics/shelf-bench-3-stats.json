@@ -1,0 +1,1 @@
+{"pod_id":"shelf-bench-3","capacity_bytes":17179869184,"used_bytes":5138233409,"metadata_pool":{"capacity_bytes":5368709120,"used_bytes":40311,"disk_used_bytes":0,"disk_capacity_bytes":0},"rowgroup_pool":{"capacity_bytes":11811160064,"used_bytes":5138193098,"disk_used_bytes":5144137728,"disk_capacity_bytes":257698037760},"pinned_bytes":0,"pinned_count":0,"draining":false}

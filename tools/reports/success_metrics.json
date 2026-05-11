@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "GREEN/AMBER/RED gates for shelf_daily_report.py — tune per cluster.",
+  "prometheus": {
+    "lodc_drop_ratio_vs_miss": {
+      "green_max": 0.2,
+      "amber_max": 0.5,
+      "expr_hint": "sum(rate(shelf_lodc_drops_total{reason=\"submit_queue_overflow\"}[5m])) / clamp_min(sum(rate(shelf_misses_total[5m])), 0.001)"
+    },
+    "rolling_hit_ratio_rowgroup_bps": {
+      "green_min": 6500,
+      "amber_min": 4500,
+      "expr_hint": "shelf_rolling_hit_ratio_bps{pool=\"rowgroup\"}"
+    },
+    "origin_get_mb_per_s": {
+      "green_min": 5.0,
+      "amber_min": 2.0,
+      "expr_hint": "sum(rate(shelf_origin_request_bytes_total{op=\"get_range\",outcome=\"ok\"}[5m])) / 1e6"
+    },
+    "rss_warn_gib": {
+      "green_max": 22,
+      "amber_max": 24,
+      "expr_hint": "container_memory_working_set_bytes{namespace=\"alluxio\", pod=~\"shelf-.*\"} / 1e9"
+    }
+  },
+  "trino": {
+    "fail_rate": {
+      "green_max": 0.05,
+      "amber_max": 0.15,
+      "note": "From cdp.trino_logs.trino_queries — compare FINISHED vs FAILED for same DOW window"
+    },
+    "iceberg_cannot_open_split_per_1k": {
+      "green_max": 0.5,
+      "amber_max": 2.0,
+      "note": "error_code = ICEBERG_CANNOT_OPEN_SPLIT per 1000 queries"
+    }
+  },
+  "notes": [
+    "Mimir/Prometheus queries run via Grafana POST /api/ds/query with a service-account token (see shelf_daily_report.py).",
+    "Trino section expects JDBC or pre-exported CSV paths via env TRINO_LOGS_EXPORT."
+  ]
+}

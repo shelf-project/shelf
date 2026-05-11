@@ -27,7 +27,6 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use bytes::Bytes;
 use shelfd::{
-    admission::SizeThresholdPolicy,
     config::{AdmissionConfig, MetadataPoolConfig, OriginConfig, PoolsConfig, RowGroupPoolConfig},
     http::{self, ServerState},
     metrics,
@@ -106,6 +105,8 @@ fn test_config() -> (OriginConfig, PoolsConfig, AdmissionConfig) {
     let admission = AdmissionConfig {
         size_threshold_bytes: 8 * 1024 * 1024,
         pinned_bypass: true,
+        policy: shelfd::config::AdmissionPolicyKind::SizeThreshold,
+        frequency_min_hits: 2,
     };
     (origin, pools, admission)
 }
@@ -130,7 +131,7 @@ async fn build_state() -> Arc<ServerState> {
     let origin = Arc::new(S3Origin::new(&origin_cfg).await.expect("origin"));
     let store = Arc::new(FoyerStore::open(&pools_cfg).await.expect("store"));
     let router = Arc::new(Router::new());
-    let admission = Arc::new(SizeThresholdPolicy::from_config(&admission_cfg));
+    let admission = shelfd::admission::build_admission_policy(&admission_cfg);
     let metrics_reg = METRICS
         .get_or_init(|| async { Arc::new(metrics::Registry::init().expect("metrics init")) })
         .await

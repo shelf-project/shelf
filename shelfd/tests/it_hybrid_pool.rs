@@ -22,7 +22,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use shelfd::{
-    admission::SizeThresholdPolicy,
     config::{AdmissionConfig, MetadataPoolConfig, PoolsConfig, RowGroupPoolConfig},
     http::{self, ServerState},
     metrics,
@@ -80,10 +79,12 @@ async fn spawn_server(store: Arc<FoyerStore>) -> (SocketAddr, CancellationToken)
             .expect("origin"),
     );
     let router = Arc::new(ShelfRouter::new());
-    let admission = Arc::new(SizeThresholdPolicy::from_config(&AdmissionConfig {
+    let admission = shelfd::admission::build_admission_policy(&AdmissionConfig {
         size_threshold_bytes: 1 << 30,
         pinned_bypass: true,
-    }));
+        policy: shelfd::config::AdmissionPolicyKind::SizeThreshold,
+        frequency_min_hits: 2,
+    });
     let state = Arc::new(ServerState::new(store, origin, router, admission, metrics));
     state.mark_ready();
 

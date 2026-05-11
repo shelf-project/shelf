@@ -49,10 +49,19 @@ data:
           {{- with .admissionBytesPerSec }}
           admission_bytes_per_sec: {{ . | int64 }}
           {{- end }}
+          {{- with .lodcAdmission }}
+          admission:
+            enabled: {{ .enabled }}
+            target_bytes_per_sec: {{ .targetBytesPerSec | int64 }}
+            max_burst_bytes: {{ .maxBurstBytes | int64 }}
+            max_inflight_admissions: {{ .maxInflightAdmissions | int64 }}
+          {{- end }}
         {{- end }}
     admission:
       size_threshold_bytes: {{ mul (int64 .Values.cache.admission.sizeThresholdMiB) 1048576 }}
       pinned_bypass: {{ .Values.cache.admission.pinnedBypass }}
+      policy: {{ .Values.cache.admission.policy | default "size_threshold" | quote }}
+      frequency_min_hits: {{ .Values.cache.admission.frequencyMinHits | int }}
     membership:
       headless_service: {{ include "shelf.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
       dns_refresh: 5s

@@ -862,7 +862,7 @@ impl FoyerStore {
         // future reasons). This is approximate but cheap; the policy
         // module could return a richer enum later without breaking
         // the metric name.
-        let decision = admission.decide(&ctx);
+        let (decision, reject_kind) = admission.decide(&ctx);
         let policy_admit = decision == crate::admission::AdmissionDecision::Admit;
 
         // SHELF-21e — second admission gate: even when the
@@ -913,13 +913,26 @@ impl FoyerStore {
             // `shelf_admissions_total` panel can show the *new*
             // gate's blast radius vs the level gate's.
             "reject_rate"
-        } else if ctx.pinned {
-            "reject_other"
         } else {
-            // `reject_size` captures the dominant path today per
-            // ADR-0003; when LightGBM lands (c-lightgbm-escape-hatch)
-            // we'll split this further.
-            "reject_size"
+            match reject_kind {
+                crate::admission::AdmissionRejectKind::ObjectTooLarge => {
+                    if ctx.pinned {
+                        "reject_other"
+                    } else {
+                        "reject_size"
+                    }
+                }
+                crate::admission::AdmissionRejectKind::FrequencyBelowThreshold => {
+                    "reject_frequency"
+                }
+                crate::admission::AdmissionRejectKind::Other => {
+                    if ctx.pinned {
+                        "reject_other"
+                    } else {
+                        "reject_size"
+                    }
+                }
+            }
         };
         crate::metrics::ADMISSIONS_TOTAL
             .with_label_values(&[pool_label, decision_label])
@@ -1442,16 +1455,25 @@ mod store_tests {
     #[derive(Debug)]
     struct AlwaysAdmit;
     impl AdmissionPolicy for AlwaysAdmit {
-        fn decide(&self, _ctx: &AdmissionContext<'_>) -> AdmissionDecision {
-            AdmissionDecision::Admit
+        fn decide(
+            &self,
+            _ctx: &AdmissionContext<'_>,
+        ) -> (AdmissionDecision, crate::admission::AdmissionRejectKind) {
+            (AdmissionDecision::Admit, crate::admission::AdmissionRejectKind::Other)
         }
     }
 
     #[derive(Debug)]
     struct NeverAdmit;
     impl AdmissionPolicy for NeverAdmit {
-        fn decide(&self, _ctx: &AdmissionContext<'_>) -> AdmissionDecision {
-            AdmissionDecision::Reject
+        fn decide(
+            &self,
+            _ctx: &AdmissionContext<'_>,
+        ) -> (AdmissionDecision, crate::admission::AdmissionRejectKind) {
+            (
+                AdmissionDecision::Reject,
+                crate::admission::AdmissionRejectKind::Other,
+            )
         }
     }
 
