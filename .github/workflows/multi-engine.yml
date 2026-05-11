@@ -110,7 +110,7 @@ jobs:
       # in covers the SHELFD_IMAGE=ghcr.io/... override path documented
       # in each per-example README without requiring extra plumbing.
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
