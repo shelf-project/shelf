@@ -27,8 +27,14 @@
 # `ui` cargo feature is active. The committed dist/ placeholder at
 # shelfd/ui/dist/index.html keeps `cargo build --features ui` working
 # even when this stage has not produced a real bundle.
-FROM node:20-alpine AS ui-builder
+# Bookworm (glibc): Rollup 4 + Vite 8 ship prebuilt `@rollup/rollup-linux-x64-gnu`.
+# Alpine/musl often misses the matching optional dep inside `docker buildx` →
+# `Cannot find module '@rollup/rollup-linux-x64-musl'` at `pnpm build`.
+FROM node:20-bookworm-slim AS ui-builder
 WORKDIR /ui
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 RUN corepack enable
 COPY shelfd/ui/package.json shelfd/ui/pnpm-lock.yaml* ./
 RUN pnpm install --frozen-lockfile 2>/dev/null || pnpm install
