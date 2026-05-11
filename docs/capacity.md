@@ -119,9 +119,12 @@ H_dram          = 143 GiB × 0.10            = 14 GiB   (per pod)
 H_NVMe          = 143 GiB × 1.30            = 186 GiB  (per pod)
 ```
 
-Chart default is `cache.pools.rowgroup.nvmeSizeBytes = 500 GiB` — that
-leaves ~63% headroom at the v0.5 working-set estimate, which is
-deliberately generous because the estimate is still soft.
+The stock chart default today is **60 GiB** NVMe per pod (`values.yaml`,
+ADR-0042 / K1 cost-down). The numeric example above is **model math**;
+if `H_NVMe` from replay exceeds ~60 GiB, merge
+`charts/shelf/examples/values-latency-priority.yaml` (**500 GiB** +
+matched `nvmeSizeBytes`) or pick another overlay size — re-validate
+node allocatable + pod memory before raising DRAM/NVMe together.
 
 ```
 mem_req         = 5 + 14 + 8                = 27 GiB   (per pod)
@@ -279,12 +282,33 @@ Trigger if:
 
 Action: `scale-down.md`.
 
+### 5.4 Latency vs net TCO — growing the NVMe tier (e.g. 500Gi overlay)
+
+Use when the rowgroup pool is **capacity-bound** (NVMe utilisation near
+the configured cap for sustained windows) *and* either (a) byte hit
+ratio is depressed versus historical baseline, or (b) S3 **GET**
+variable spend is high — larger NVMe often trades **higher EBS
+byte-months** for **lower request-variable S3** and better read tail
+latency. Reconcile with **GET-isolated** cost lines, not aggregate S3
+storage charges.
+
+| Signal | Interpretation | Typical lever |
+| ------ | -------------- | ------------- |
+| `shelf_disk_bytes_used` ≈ cap, hit ratio low, LODC drops climbing | Working set > NVMe budget or admit faster than disk drains | Merge `charts/shelf/examples/values-latency-priority.yaml` (500Gi) **or** tighten size-threshold / transient opt-out / SHELF-29 limiter **or** scale out pods |
+| Need in-place PVC growth | StorageClass must allow expansion | `kubectl get storageclass <name> -o jsonpath='{.allowVolumeExpansion}'` → must be `true` |
+| OOM / RSS near node allocatable | Memory pressure, not “disk full” | Follow `values.yaml` RSS budget comments before adding NVMe |
+
+**StorageClass check:** `kubectl get sc -o custom-columns=NAME:.metadata.name,EXPAND:.allowVolumeExpansion` — only classes with
+`EXPAND=true` support `kubectl patch pvc … spec.resources.requests.storage`
+for online growth.
+
 ---
 
 ## 6. Pin list budget
 
 Pinned bytes per pod should stay under **20% of NVMe capacity** in the
-steady state. At 500 GiB NVMe per pod that means ≤ 100 GiB pinned.
+steady state (compute 20% from your configured `storage.size` /
+`nvmeSizeBytes`).
 
 If the trainer's next-cycle diff would exceed the budget, the diff is
 held back and an issue opened against the data-eng owner of the table

@@ -1,0 +1,44 @@
+# Latency-first overlay — merge AFTER your environment values, e.g.:
+#   helm upgrade --install shelf ./charts/shelf \
+#     -f ./your-prod.yaml \
+#     -f ./charts/shelf/examples/values-latency-priority.yaml
+#
+# Goals:
+#   - More NVMe headroom for the rowgroup hybrid pool → fewer evictions,
+#     higher byte hit rate, lower p99 read latency when the working set
+#     is larger than the previous PVC.
+#
+# Default in this file: 500Gi rowgroup NVMe (matches common ADR sizing
+# headroom for multi-replica lakehouse). Override in your fork if your
+# node pool caps out lower.
+#
+# Cost note (net TCO, not sticker price):
+#   EBS gp3 $/GiB-month rises with PVC size, but S3 Tier-2 GET charges
+#   often dominate interactive lakehouse workloads. Validate with your
+#   cost attribution (object GET line items) before/after resize.
+#
+# Do NOT set `cache.pools.rowgroup.diskCache.admissionBytesPerSec` here
+# unless you have read the preview-8 / SHELF-21e runbooks: Foyer's stock
+# RateLimitPicker shares the LODC admission path with reads and can
+# inflate tail latency. Prefer submit-queue + bytes thresholds + the
+# independent-queue admission limiter (SHELF-29) for stability.
+#
+# PVC resize: Kubernetes allows expansion when the StorageClass has
+# `allowVolumeExpansion: true` (verify with `kubectl get sc <name> -o yaml`).
+# Shrinking requires StatefulSet recreate + data loss (cold cache).
+
+storage:
+  # Must stay in sync with cache.pools.rowgroup.nvmeSizeBytes (same byte cap).
+  size: 500Gi
+
+cache:
+  pools:
+    rowgroup:
+      # 500 * 1024^3 — use int64 in Helm if you change this (see values.yaml).
+      nvmeSizeBytes: 536870912000
+
+# If Foyer NVMe replay on cold nodes exceeds the stock startup grace,
+# merge a probes override from your overlay, e.g.:
+# probes:
+#   startup:
+#     failureThreshold: 72   # 72 × 5s = 6 min

@@ -466,9 +466,19 @@ jobs:
 
       - name: Helm lint (strict, with CI values)
         run: |
+          set -euo pipefail
           helm lint charts/shelf \
             --values charts/shelf/ci/lint-values.yaml \
             --strict
+          shopt -s nullglob
+          for f in charts/shelf/examples/*.yaml; do
+            echo "::group::helm lint ci+${f}"
+            helm lint charts/shelf \
+              --values charts/shelf/ci/lint-values.yaml \
+              --values "${f}" \
+              --strict
+            echo "::endgroup::"
+          done
 
       - name: Package chart
         id: pkg
