@@ -17,7 +17,9 @@
 //! number — the bench is a "you broke the hot path" leading
 //! indicator, not a regression alert.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, Criterion};
 use shelf_cost::{CostModel, HitEvent, PeerAz};
 
 fn bench_memory_same_az(c: &mut Criterion) {
