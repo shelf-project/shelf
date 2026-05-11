@@ -134,7 +134,7 @@ thrift = "0.17"
 # SHELF-S1 — in-process S3 origin for the shim Criterion bench. Pinned
 # to 0.7 (the latest line) which works against `tokio` 1 and exposes
 # the `MockServer::start_async` API the bench uses.
-httpmock = "0.7"
+httpmock = "0.8"
 # SHELF-S1 — `tower::ServiceExt::oneshot` drives the axum router
 # in-process so the bench excludes TCP framing from the measurement.
 tower = { workspace = true }
