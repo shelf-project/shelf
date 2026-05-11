@@ -112,7 +112,7 @@ mime_guess = { workspace = true, optional = true }
 # until then; this feature exists so an operator can rebuild a debug
 # image (`cargo build --features console`) and attach `tokio-console` on
 # a single shelf pod without modifying the production binary.
-console-subscriber = { version = "0.4", optional = true }
+console-subscriber = { version = "0.5", optional = true }
 # SHELF-46 footer-parser dep is already satisfied by the unconditional
 # `parquet = { workspace = true }` above (added by SHELF-50). The
 # `parquet_meta` feature below remains a marker feature: it toggles
