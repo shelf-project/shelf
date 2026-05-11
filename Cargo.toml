@@ -72,7 +72,7 @@ prost = "0.14"
 # Integration-test helper (S3 via MinIO) — see tests/README.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
 # Bench deps
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 # Embedded admin UI — rust-embed bakes the Vite bundle into the binary
 # under the `ui` feature. `mime_guess` resolves a Content-Type from the
 # asset path so we don't ship our own extension table.
