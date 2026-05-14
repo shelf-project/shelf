@@ -92,6 +92,7 @@ pub mod error;
 pub mod filter_service;
 #[cfg(feature = "fingerprint")]
 pub mod fingerprint;
+pub mod footer_overlay;
 pub mod freshness;
 pub mod head_lru;
 pub mod http;
@@ -110,6 +111,9 @@ pub mod parquet_meta;
 pub mod peer;
 pub mod peer_fetch;
 pub mod pinlist;
+pub mod plan_endpoint;
+pub mod plan_warmer;
+pub mod prefetch;
 // **K2 (rc.8)** — HRW-skew-aware autoscaler integration. Default-on
 // (`cache.podLoad.enabled=true`) with hot-path cost = single
 // `AtomicU64::fetch_add` per accepted s3-shim request; the rolling
@@ -123,6 +127,7 @@ pub mod s3_shim;
 // defines independently for the hot path.
 #[cfg(feature = "side_bloom_module")]
 pub mod side_bloom;
+pub mod snapshot_delta;
 pub mod store;
 pub mod table_props;
 pub mod telemetry;

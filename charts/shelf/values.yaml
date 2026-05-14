@@ -161,6 +161,12 @@ storage:
 # Cache configuration — two pools (ADR-0008).
 # ---------------------------------------------------------------------------
 cache:
+  # -- HEAD-LRU capacity. Caches HeadObject results to avoid origin
+  # round-trips on warm paths. Budget ~12 MiB head_lru + ~20 MiB
+  # freshness tracker (FreshnessTracker is sized 2 × head_lru.capacity()).
+  # [TODO-fix-shelf-performance.md §2 Tier 1 item 2]
+  headLruEntries: 100000
+
   pools:
     metadata:
       # -- DRAM-only, SIEVE. Holds metadata.json, manifest lists,
@@ -494,9 +500,10 @@ cache:
   # [plan §4 SHELF-46, ADR-0003 size-threshold admission, ADR-0011
   # content-addressed keys]
   bloom:
-    # -- Master switch. Default off — flip on as a canary after
-    # SHELF-49 + B1 are stable.
-    enabled: false
+    # -- Master switch. Routes Parquet footer and bloom-block byte
+    # ranges into the DRAM metadata pool for faster access.
+    # [TODO-fix-shelf-performance.md §2 Tier 1 item 4]
+    enabled: true
     # -- Cap on the in-process `etag → Vec<BloomBlockRange>` LRU.
     # Worst case is ~8 bytes/range × ~10 ranges/file × this cap, so
     # 50 000 entries ≈ 4 MiB RSS. Bump if your working set has more
