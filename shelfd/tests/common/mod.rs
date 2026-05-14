@@ -52,10 +52,10 @@ pub const TEST_BUCKET: &str = "shelf-it";
 /// message if the TCP connect fails — never returns a "skip" value.
 ///
 /// This replaces the old `skip_if_offline()` helper, which returned
-/// `true` when `SHELF_INTEGRATION` was unset and let the caller
-/// `return;` from the test. That pattern made `cargo test` report
-/// every integration test as passing in 0s when the env var was not
-/// configured, hiding zero coverage in CI. The new contract:
+/// `true` when the old `SHELF_INTEGRATION` env var was unset and let
+/// the caller `return;` from the test. That pattern made `cargo test`
+/// report every integration test as passing in 0s when the env var was
+/// not configured, hiding zero coverage in CI. The new contract:
 ///
 /// 1. The cargo `integration` feature gates whether the test runs at
 ///    all (compile-time `#[cfg_attr(not(feature = "integration"),
@@ -64,8 +64,9 @@ pub const TEST_BUCKET: &str = "shelf-it";
 ///    with a clear hint instead of silently continuing into a flaky
 ///    SDK error path.
 pub fn require_minio_or_panic() {
-    let panic_msg = "MinIO unreachable; set SHELF_INTEGRATION=1 only when \
-         docker compose -f shelfd/tests/docker-compose.yml up is healthy";
+    let panic_msg = "MinIO unreachable — run integration tests with \
+         `cargo test --features integration` after \
+         `docker compose -f shelfd/tests/docker-compose.yml up`";
     let addr: SocketAddr = "127.0.0.1:9000"
         .to_socket_addrs()
         .ok()
@@ -78,13 +79,20 @@ pub fn require_minio_or_panic() {
 
 /// Back-compat shim for integration test files that still use the
 /// pre-SHELF-29 "probe + return" pattern (e.g. `it_ab_tag.rs`,
-/// `it_dollars_saved.rs`). Returns `true` when `SHELF_INTEGRATION` is
-/// unset OR MinIO is unreachable, so callers can short-circuit with
-/// `if skip_if_offline() { return; }`. Preferred new pattern is
-/// [`require_minio_or_panic`]; this shim exists solely to keep both
-/// callers compiling until they migrate.
+/// `it_dollars_saved.rs`). Returns `true` when the `integration` cargo
+/// feature is NOT enabled OR MinIO is unreachable, so callers can
+/// short-circuit with `if skip_if_offline() { return; }`. Preferred
+/// new pattern is [`require_minio_or_panic`]; this shim exists solely
+/// to keep both callers compiling until they migrate.
+///
+/// Note: The old `SHELF_INTEGRATION=1` env var convention is
+/// **deprecated**. Use `cargo test --features integration` instead.
 pub fn skip_if_offline() -> bool {
-    if std::env::var("SHELF_INTEGRATION").ok().as_deref() != Some("1") {
+    // Legacy env-var check kept for back-compat with any scripts that
+    // still use SHELF_INTEGRATION=1; prefer the cargo feature gate.
+    if cfg!(not(feature = "integration"))
+        && std::env::var("SHELF_INTEGRATION").ok().as_deref() != Some("1")
+    {
         return true;
     }
     let addr: Option<SocketAddr> = "127.0.0.1:9000"

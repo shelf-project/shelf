@@ -50,8 +50,9 @@ const TEST_BUCKET: &str = "shelf-it";
 /// suites.
 fn require_minio_or_panic() {
     use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-    let panic_msg = "MinIO unreachable; set SHELF_INTEGRATION=1 only when \
-         docker compose -f shelfd/tests/docker-compose.yml up is healthy";
+    let panic_msg = "MinIO unreachable — run integration tests with \
+         `cargo test --features integration` after \
+         `docker compose -f shelfd/tests/docker-compose.yml up`";
     let addr: SocketAddr = "127.0.0.1:9000"
         .to_socket_addrs()
         .ok()

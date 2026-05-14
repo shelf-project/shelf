@@ -1,9 +1,9 @@
 //! SHELF-46 — End-to-end test that bloom-aware admission promotes
 //! Parquet footer suffix reads into `Pool::Metadata`.
 //!
-//! Gated on `SHELF_INTEGRATION=1` (read the trap: without the env var
-//! the suite silently exits 0 and looks like it passed; the tests only
-//! actually run when the docker-compose MinIO is up).
+//! Gated on `--features integration` (read the trap: without the
+//! feature the suite silently exits 0 and looks like it passed; the
+//! tests only actually run when the docker-compose MinIO is up).
 //!
 //! We do **not** seed a real Parquet file here — bloom-aware
 //! admission's footer-suffix branch is structurally a length-vs-end

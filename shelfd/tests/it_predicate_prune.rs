@@ -11,7 +11,7 @@
 //!    These guard the security envelope (allowlist, predicate
 //!    shape) and verify the metric labels register correctly.
 //!
-//! 2. **MinIO-gated tests** (`SHELF_INTEGRATION=1`): seed a real
+//! 2. **MinIO-gated tests** (`--features integration`): seed a real
 //!    Parquet file into MinIO, hit `/predicate-prune` against it,
 //!    and assert the response is structurally well-formed
 //!    (`pages` array of `[offset, length]` pairs, page-level
@@ -19,12 +19,12 @@
 //!
 //!    ```
 //!    cd shelfd/tests && docker compose up -d minio
-//!    SHELF_INTEGRATION=1 cargo test -p shelfd --test it_predicate_prune
+//!    cargo test -p shelfd --features integration --test it_predicate_prune
 //!    ```
 //!
-//! Without `SHELF_INTEGRATION=1` the MinIO-gated tests print a
+//! Without `--features integration` the MinIO-gated tests print a
 //! one-line skip notice and exit cleanly. **Never** silently pass
-//! them — the test prompt warns that absent the env var, the suite
+//! them — the test prompt warns that absent the feature, the suite
 //! exits in 0.00 s pretending to pass; we explicitly mark them as
 //! skipped.
 
@@ -55,13 +55,14 @@ const MINIO_SECRET_KEY: &str = "minioadmin";
 const TEST_BUCKET: &str = "shelf-it-predicate-prune";
 
 fn integration_enabled() -> bool {
-    std::env::var("SHELF_INTEGRATION").as_deref() == Ok("1")
+    cfg!(feature = "integration") || std::env::var("SHELF_INTEGRATION").as_deref() == Ok("1")
 }
 
 fn skip_if_offline() -> bool {
     if !integration_enabled() {
         eprintln!(
-            "SKIP: set SHELF_INTEGRATION=1 + run docker-compose up -d minio to enable this test"
+            "SKIP: run `cargo test --features integration` + \
+             `docker compose up -d minio` to enable this test"
         );
         return true;
     }
@@ -132,7 +133,7 @@ async fn build_offline_state(allowlist: Vec<String>) -> Arc<ServerState> {
 }
 
 /// Build a `ServerState` whose origin reaches the local MinIO. Used
-/// by the `SHELF_INTEGRATION=1`-gated tests.
+/// by the `--features integration`-gated tests.
 async fn build_minio_state(allowlist: Vec<String>) -> Arc<ServerState> {
     unsafe {
         std::env::set_var("AWS_ACCESS_KEY_ID", MINIO_ACCESS_KEY);

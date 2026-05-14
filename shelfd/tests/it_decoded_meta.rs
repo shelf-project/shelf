@@ -11,15 +11,15 @@
 //! ## Gate
 //!
 //! Like every other `it_*.rs` suite in this crate, every test here
-//! is gated on `SHELF_INTEGRATION=1`. Without it the tests skip
-//! immediately — the SHELF-09 trap (silent 0.00 s pass when the env
-//! var is absent) is mitigated by `eprintln!`-ing a `SKIP:` line so
-//! the operator can tell the test was actually invoked.
+//! is gated on `--features integration`. Without it the tests skip
+//! immediately — the SHELF-09 trap (silent 0.00 s pass when the
+//! feature is absent) is mitigated by `eprintln!`-ing a `SKIP:` line
+//! so the operator can tell the test was actually invoked.
 //!
 //! ## Run
 //!
 //! ```bash
-//! SHELF_INTEGRATION=1 cargo test -p shelfd --test it_decoded_meta
+//! cargo test -p shelfd --features integration --test it_decoded_meta
 //! ```
 //!
 //! No external services are required (no MinIO, no Trino).
@@ -34,10 +34,10 @@ use shelfd::decoded_meta::{self, AdmitHint, DecodedKind, DecodedMetaCache, Manif
 use thrift::protocol::TCompactOutputProtocol;
 
 fn skip_if_offline() -> bool {
-    if std::env::var("SHELF_INTEGRATION").as_deref() != Ok("1") {
+    if !cfg!(feature = "integration") && std::env::var("SHELF_INTEGRATION").as_deref() != Ok("1") {
         eprintln!(
-            "SKIP: SHELF_INTEGRATION=1 not set; \
-             skipping decoded_meta integration suite"
+            "SKIP: run `cargo test --features integration` to enable \
+             decoded_meta integration suite"
         );
         return true;
     }

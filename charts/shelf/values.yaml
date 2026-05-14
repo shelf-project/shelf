@@ -248,27 +248,37 @@ cache:
         flushers: 8                       # was 4 (was Foyer default 1)
         bufferPoolSizeBytes: 402653184    # 384 MiB; was 256 MiB (was Foyer default 16 MiB)
         submitQueueSizeThresholdBytes: 1073741824  # 1 GiB; bounds RSS growth from the LODC pipeline
-        # -- SHELF-21e-v2 — admission rate-limit (bytes/sec) into the
-        # Foyer LODC pipeline. The three knobs above bound the *size*
-        # of the submit queue / flush buffers, which caps RSS but does
-        # not prevent overflow when sustained ingress exceeds the EBS
-        # drain rate (Foyer then logs
-        #   `[lodc] submit queue overflow, new entry ignored`
-        # and silently drops admissions). When this field is set,
-        # shelfd installs Foyer's built-in `RateLimitPicker` on the
-        # `HybridCacheBuilder`; admissions into NVMe self-throttle to
-        # whatever the disk can absorb. DRAM stays hot either way —
-        # the picker gates only the disk admission seam.
+        # -- DEPRECATED (SHELF-21e, preview-10): `admissionBytesPerSec`
+        # is silently ignored at runtime. The underlying Foyer
+        # `RateLimitPicker` added latency to all writes regardless of
+        # queue pressure, so it was removed in favor of the level-based
+        # backpressure in `LodcBackpressure`.
         #
-        # Unset ⇒ no limiter (pre-preview-8 behaviour, Foyer's
-        # `AdmitAllPicker`). Production recommendation on the alluxio
-        # NodePool (gp3 EBS, ~250 MiB/s baseline) is ~200 MB/s so the
-        # picker leaves ~50 MiB/s headroom for the region-reclaim
-        # read path that shares the volume. Tune upward if you see
-        # `shelf_disk_bytes_used` rising more slowly than expected
-        # under sustained ingress; tune downward if you still observe
-        # submit-queue overflow lines in the logs.
-        # admissionBytesPerSec: 209715200  # 200 MiB/s
+        # The **actual** admission throttle is now controlled by the
+        # nested `admission:` block below (SHELF-29). By default it is
+        # ENABLED at 200 MiB/s — operators do NOT need to uncomment
+        # anything to get rate-limited admission. To disable it, set
+        # `diskCache.admission.enabled: false` in your overlay.
+        #
+        # This field is kept only for YAML-schema backward compat.
+        # admissionBytesPerSec: 209715200  # DEPRECATED — no effect
+        #
+        # -- SHELF-29 — Independent-queue admission rate-limiter.
+        # The token-bucket refill rate defaults to 200 MiB/s, matching
+        # the gp3 EBS baseline. Operators on faster NVMe can raise
+        # `targetBytesPerSec`; on slower disks, lower it to stop
+        # `shelf_lodc_drops_total{reason="submit_queue_overflow"}`.
+        #
+        # Default values are applied by shelfd when this block is absent,
+        # so the throttle is ON by default without any YAML config.
+        # Uncomment and tune only if you need to change from defaults:
+        # admission:
+        #   enabled: true              # default: true
+        #   targetBytesPerSec: 209715200  # default: 200 MiB/s
+        #   maxBurstBytes: 268435456   # default: 256 MiB
+        #   rssThrottle:
+        #     enabled: true            # default: true (A1 rc.7 RSS-aware)
+        #     rssTargetBytes: 42949672960  # default: 40 GiB
 
       # -- B1 — opt-in zstd compression of cached row-group payloads.
       #

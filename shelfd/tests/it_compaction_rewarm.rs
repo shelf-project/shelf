@@ -1,6 +1,6 @@
 //! SHELF-45 — end-to-end re-warm reactor test against MinIO.
 //!
-//! Gate: `SHELF_INTEGRATION=1` plus a running MinIO at
+//! Gate: `--features integration` plus a running MinIO at
 //! `127.0.0.1:9000` (see `shelfd/tests/docker-compose.yml`). The
 //! test boots a real `FoyerStore`, seeds a synthetic compaction
 //! event whose `added_files` reference live MinIO objects, drives

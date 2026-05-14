@@ -1,7 +1,7 @@
 //! SHELF-42 — integration tests for the A/B query-tagging receive
 //! path on the S3 shim.
 //!
-//! Gated on `SHELF_INTEGRATION=1`; reuses the same MinIO fixture as
+//! Gated on `--features integration`; reuses the same MinIO fixture as
 //! `it_s3_shim.rs`. The contract under test:
 //!
 //! - shelfd parses `X-Shelf-Tag` from incoming GETs;

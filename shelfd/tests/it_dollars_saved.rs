@@ -3,7 +3,7 @@
 //! formula after a deterministic sequence of cached reads through
 //! the S3 shim.
 //!
-//! Gated on `SHELF_INTEGRATION=1` like every other suite under
+//! Gated on `--features integration` like every other suite under
 //! `shelfd/tests/`. The MinIO fixture is shared with `it_s3_shim.rs`
 //! / `it_read_path.rs` to keep the docker-compose surface narrow.
 //!

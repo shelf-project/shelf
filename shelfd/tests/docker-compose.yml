@@ -1,8 +1,8 @@
-# MinIO fixture for `cargo test --test it_read_path` (SHELF_INTEGRATION=1).
+# MinIO fixture for `cargo test --features integration --test it_read_path`.
 #
 # Spin up with:
 #   cd shelfd/tests && docker compose up -d minio
-#   SHELF_INTEGRATION=1 cargo test -p shelfd --test it_read_path
+#   cargo test -p shelfd --features integration --test it_read_path
 #
 # Tear down with:
 #   docker compose down -v
