@@ -77,6 +77,26 @@ use xml::{
 /// surface (501 NotImplemented) tells the caller exactly why.
 const SHIM_MAX_PUT_BYTES: usize = 256 * 1024 * 1024;
 
+/// Tier 2 item 5 — Immutable Iceberg data-file heuristic.
+///
+/// Iceberg data files live under `/data/` and have `.parquet`, `.orc`,
+/// or `.avro` extensions. They are immutable by design (Iceberg uses
+/// copy-on-write semantics). When this returns `true`, the shim can
+/// skip the ETag-conditional GET round-trip because the file cannot
+/// change once written. This saves 5–15 ms per read on early hits
+/// after cold restart before the freshness tracker has warmed.
+///
+/// See `TODO-fix-shelf-performance.md` §3 Tier 2 item 5.
+#[inline]
+fn is_immutable_data_file(key: &str) -> bool {
+    // Iceberg data files are under /data/ and have specific extensions
+    let lower = key.to_ascii_lowercase();
+    lower.contains("/data/")
+        && (lower.ends_with(".parquet")
+            || lower.ends_with(".orc")
+            || lower.ends_with(".avro"))
+}
+
 /// Build the shim router. Pure function, no I/O.
 ///
 /// Keep the route shape path-style (`/:bucket/*key`) so swapping a
@@ -1047,6 +1067,59 @@ pub async fn handle_get_object(
         Pool::Metadata => "metadata",
         Pool::RowGroup => "rowgroup",
     };
+
+    // Tier 2 item 5 — Immutable data-file bypass.
+    //
+    // Iceberg data files under `/data/` with `.parquet/.orc/.avro`
+    // extensions are immutable by design. When we have a cache hit on
+    // an immutable file, skip the ETag-conditional GET round-trip
+    // entirely — the file cannot have changed. This saves 5–15 ms per
+    // read on early hits after cold restart before the freshness
+    // tracker has warmed.
+    if is_immutable_data_file(&key) {
+        if let Ok(Some(cached)) = state.store.get(pool, &key_obj).await {
+            crate::metrics::IMMUTABLE_BYPASS_SKIPPED_TOTAL
+                .with_label_values(&[pool_label_early])
+                .inc();
+            crate::metrics::HITS_TOTAL
+                .with_label_values(&[pool_label_early])
+                .inc();
+            let table_label_cow = table_label(&key);
+            crate::metrics::HITS_BY_TABLE_TOTAL
+                .with_label_values(&[pool_label_early, table_label_cow.as_ref()])
+                .inc();
+            crate::metrics::S3_SHIM_RESPONSE_BYTES_TOTAL
+                .with_label_values(&["get_object", "hit"])
+                .inc_by(cached.len() as u64);
+            bump_per_tag_get(
+                pool_label_early,
+                "hit",
+                tag_label_ref,
+                cached.len() as u64,
+                true, // is_hit
+            );
+
+            let mut headers = HeaderMap::new();
+            stamp_common_headers(&mut headers, &meta);
+            headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+            let status = if is_partial {
+                let last = offset.saturating_add(length).saturating_sub(1);
+                let cr = format!("bytes {}-{}/{}", offset, last, total_size);
+                if let Ok(v) = HeaderValue::from_str(&cr) {
+                    headers.insert(header::CONTENT_RANGE, v);
+                }
+                StatusCode::PARTIAL_CONTENT
+            } else {
+                StatusCode::OK
+            };
+            return record_get_latency(
+                &state,
+                start,
+                "hit",
+                (status, headers, cached).into_response(),
+            );
+        }
+    }
 
     // SHELF-23 — ETag-conditional GET on a local cache hit.
     //

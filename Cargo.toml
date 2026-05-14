@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["shelfd", "shelfctl", "shelf-advisor", "crates/shelf-cost"]
+members = ["shelfd", "shelfctl", "shelf-advisor", "crates/shelf-cost", "crates/shelf-result-cache"]
 
 [workspace.package]
 version = "1.0.2"

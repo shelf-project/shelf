@@ -661,6 +661,26 @@ pub static CONDITIONAL_ERROR_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("register conditional_error_total")
 });
 
+/// Tier 2 item 5 — immutable Iceberg data-file bypass counter.
+///
+/// Iceberg data files under `/data/` with `.parquet`, `.orc`, or
+/// `.avro` extensions are immutable by design (Iceberg copy-on-write).
+/// When this counter increments, the shim skipped the ETag-conditional
+/// GET round-trip because the key matches the immutable-data-file
+/// heuristic. Saves 5–15 ms per read on early hits after cold restart.
+///
+/// See `TODO-fix-shelf-performance.md` §3 Tier 2 item 5.
+pub static IMMUTABLE_BYPASS_SKIPPED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec_with_registry!(
+        "shelf_immutable_bypass_skipped_total",
+        "Local cache hits where the shim skipped ETag-conditional GET \
+         because the key is an immutable Iceberg data file.",
+        &["pool"],
+        REGISTRY
+    )
+    .expect("register immutable_bypass_skipped_total")
+});
+
 /// Track G-10 — Foyer / pool engine resets that wiped in-memory or
 /// on-disk state without a process restart. The post-cutover snapshot
 /// 2026-04-27 caught `shelf_hits_total` rolling back to 0 multiple
@@ -1853,6 +1873,8 @@ pub const EXPOSED_SERIES: &[&str] = &[
     "shelf_conditional_modified_total",
     "shelf_conditional_skipped_total",
     "shelf_conditional_error_total",
+    // Tier 2 item 5 — immutable data-file bypass.
+    "shelf_immutable_bypass_skipped_total",
     // SHELF-40 — audit-able dollars-saved counter + rolling rate.
     "shelf_s3_dollars_saved_total",
     "shelf_s3_dollars_saved_rate_cents_per_sec",
@@ -1997,6 +2019,7 @@ mod tests {
             CONDITIONAL_MODIFIED_TOTAL.desc(),
             CONDITIONAL_SKIPPED_TOTAL.desc(),
             CONDITIONAL_ERROR_TOTAL.desc(),
+            IMMUTABLE_BYPASS_SKIPPED_TOTAL.desc(),
             S3_DOLLARS_SAVED_TOTAL.desc(),
             S3_DOLLARS_SAVED_RATE_CENTS_PER_SEC.desc(),
             S3_DOLLARS_SAVED_NET_TOTAL.desc(),
@@ -2185,6 +2208,12 @@ mod tests {
             .inc_by(0);
         CONDITIONAL_ERROR_TOTAL
             .with_label_values(&["metadata"])
+            .inc_by(0);
+        IMMUTABLE_BYPASS_SKIPPED_TOTAL
+            .with_label_values(&["metadata"])
+            .inc_by(0);
+        IMMUTABLE_BYPASS_SKIPPED_TOTAL
+            .with_label_values(&["rowgroup"])
             .inc_by(0);
         S3_DOLLARS_SAVED_TOTAL
             .with_label_values(&["us-east-1", "hit_memory"])
