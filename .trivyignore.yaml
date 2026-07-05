@@ -1,0 +1,16 @@
+# Trivy ignore policy for the Shelf source tree.
+#
+# Entries MUST cite a ticket and expiry (≤90 days) per SECURITY.md §5.
+# Re-reviewed on the scheduled security.yml run.
+
+vulnerabilities:
+  # rustls-webpki 0.101.7 (transitive via rustls 0.21 / hyper-rustls 0.24).
+  # Fixed only on the rustls 0.23+ webpki line (0.103.13+); upgrading the
+  # legacy chain is a non-trivial SHELF-30 sweep. shelfd does not consume
+  # CRLs (no client-cert auth on the data plane) — same rationale as
+  # deny.toml RUSTSEC-2026-0104.
+  - id: GHSA-82j2-j2ch-gfr8
+    paths:
+      - Cargo.lock
+    expired_at: 2026-07-27
+    statement: "ticket: SHELF-30; rustls 0.21 webpki transitive, CRL path not reachable"

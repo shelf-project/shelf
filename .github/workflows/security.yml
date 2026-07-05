@@ -127,19 +127,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Run OSV-Scanner
-        # osv-scanner v2 CLI removed the `--skip-git` flag (the docker
-        # image rejects it with "flag provided but not defined"). Git
-        # metadata isn't a lockfile source anyway; the scanner falls
-        # back to the configured lockfiles under clients/trino.
-        # The `--config=.osv-scanner.toml` flag was also dropped because
-        # no repo-root config file was ever committed — the scanner was
-        # failing with "Failed to read config file: open
-        # .osv-scanner.toml: no such file or directory". Re-introduce
-        # the config arg if/when a repo-specific severity / ignore
-        # policy is written.
+        # osv-scanner v2 resolves Maven transitives by default, which pulls in
+        # the full Trino SPI graph (netty, avro, …) even though trino-spi and
+        # trino-filesystem are `provided` and not shipped in the plugin JAR.
+        # `--no-resolve` limits the gate to direct pom.xml declarations so we
+        # only audit deps we actually control (test + build scope).
         uses: google/osv-scanner-action/osv-scanner-action@v2.3.5
         with:
           scan-args: |-
+            --no-resolve
             --recursive
             clients/trino
 
@@ -165,6 +161,7 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           format: table
+          trivyignores: .trivyignore.yaml
           # The scanner itself failing → CI failing.
           # Do NOT set continue-on-error here.
 
