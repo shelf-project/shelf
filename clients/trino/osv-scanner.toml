@@ -1,0 +1,9 @@
+# OSV-Scanner policy for the Trino plugin module.
+#
+# Scope: direct pom.xml deps only (security.yml passes --no-resolve).
+# Entries MUST cite a ticket and expiry (≤90 days) per SECURITY.md §5.
+
+[[IgnoredVulns]]
+id = "GHSA-5jmj-h7xm-6q6v"
+ignoreUntil = 2026-07-27
+reason = "ticket: SHELF-30; jackson-databind 2.18.9 not yet on Maven Central — test-scope fixture parser only, no runtime JSON deserialisation"
