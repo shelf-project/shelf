@@ -24,6 +24,21 @@ id = "generic-api-key"
 description = "sha256-shape hex constants used as Shelf cache-key fixtures in trino-plugin tests"
 paths = [
   '''clients/trino/src/test/java/.*Test\.java$''',
+  '''shelfd/src/admin_pin_payload\.rs$''',
+  '''shelfd/tests/it_dollars_saved\.rs$''',
+  '''docs/launch/history-audit\.md$''',
+]
+
+[[rules]]
+id = "aws-access-token"
+
+# Redactor unit tests in shelfctl deliberately embed synthetic AKIA…
+# literals to assert redaction behaviour. These are not real AWS keys.
+[[rules.allowlists]]
+description = "Synthetic AKIA literals in shelfctl redactor unit tests"
+paths = [
+  '''shelfctl/src/bundle\.rs$''',
+  '''docs/launch/history-audit\.md$''',
 ]
 
 [allowlist]
