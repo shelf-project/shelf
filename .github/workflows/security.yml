@@ -132,7 +132,7 @@ jobs:
         # trino-filesystem are `provided` and not shipped in the plugin JAR.
         # `--no-resolve` limits the gate to direct pom.xml declarations so we
         # only audit deps we actually control (test + build scope).
-        uses: google/osv-scanner-action/osv-scanner-action@v2.3.5
+        uses: google/osv-scanner-action/osv-scanner-action@v2.3.8
         with:
           scan-args: |-
             --no-resolve
