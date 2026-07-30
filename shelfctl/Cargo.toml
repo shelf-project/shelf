@@ -28,7 +28,7 @@ reqwest = { workspace = true }
 # rename to `kube::Api::list_metadata`/etc. landed in 0.96; pinning
 # here keeps the surface stable while shelfd's own kube usage is
 # still sketched out (see SHELF-23).
-kube = { version = "0.95", features = ["client", "runtime", "derive"] }
+kube = { version = "3.1", features = ["client", "runtime", "derive"] }
 k8s-openapi = { version = "0.23", features = ["latest"] }
 tar = "0.4"
 flate2 = "1"
