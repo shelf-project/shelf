@@ -29,7 +29,7 @@ reqwest = { workspace = true }
 # here keeps the surface stable while shelfd's own kube usage is
 # still sketched out (see SHELF-23).
 kube = { version = "0.95", features = ["client", "runtime", "derive"] }
-k8s-openapi = { version = "0.23", features = ["latest"] }
+k8s-openapi = { version = "0.27", features = ["latest"] }
 tar = "0.4"
 flate2 = "1"
 regex = "1"
