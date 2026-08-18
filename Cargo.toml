@@ -37,7 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # `grpc-tonic` OTLP transport that pairs cleanly with the `tonic`
 # already pinned in the workspace.
 opentelemetry = "0.31"
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "trace"] }
 tracing-opentelemetry = "0.32"
 prometheus = { version = "0.14", features = ["process"] }
